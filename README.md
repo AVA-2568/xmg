@@ -1,24 +1,7 @@
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/AVA-2568/xmg/main/install.sh)
 ```
-```
-xmg/
-├── xmg.sh                # 主入口 ✅（已改）
-├── install.sh
-├── uninstall.sh
-├── README.md
-├── lib/
-│   ├── common.sh
-│   ├── system.sh         # 可保留（非核心）
-│   ├── monitor.sh        # ✅ 新增（核心）
-│   ├── menu.sh           # ✅ 修改
-│   ├── caddy.sh
-│   ├── xray.sh
-│   ├── site.sh
-│   ├── firewall.sh
-│   └── update.sh        ✅ 新增
 
-```
 
 ```
 /opt/xmg/                  程序目录
