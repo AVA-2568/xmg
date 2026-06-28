@@ -3,7 +3,9 @@
 [ "${XMG_UPDATE_SH_LOADED:-0}" = "1" ] && return 0
 XMG_UPDATE_SH_LOADED=1
 
-XMG_REPO_RAW="${XMG_REPO_RAW:-https://raw.githubusercontent.com/AVA-2568/XMG/main}"
+# 和 install.sh 保持一致，统一使用 /main/ 风格。
+XMG_REPO_RAW="${XMG_REPO_RAW:-https://raw.githubusercontent.com/AVA-2568/xmg/main}"
+
 XMG_BIN_PATH="${XMG_BIN_PATH:-/usr/local/bin/xmg}"
 
 xmg_update_version() {
@@ -73,10 +75,18 @@ xmg_update_download() {
     fi
 
     tmp="$(mktemp)"
+    if [ -z "$tmp" ]; then
+        xmg_die "创建临时文件失败"
+    fi
 
     if ! curl -fsSL "$url" -o "$tmp"; then
         rm -f "$tmp"
         xmg_die "下载失败: $url"
+    fi
+
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        xmg_die "下载结果为空: $url"
     fi
 
     install -m "$mode" -o root -g root "$tmp" "$dst"
@@ -88,7 +98,7 @@ xmg_update_from_github() {
 
     local f=""
 
-    xmg_warn "将从 GitHub raw 更新 XMG 文件。"
+    xmg_warn "将从 GitHub Raw 更新 XMG 文件。"
     echo "源: $XMG_REPO_RAW"
     echo
 
@@ -99,15 +109,16 @@ xmg_update_from_github() {
 
     xmg_mkdirs
     mkdir -p "$XMG_LIB_DIR"
+    mkdir -p "$(dirname "$XMG_BIN_PATH")"
 
-    if [ -e "$XMG_BIN_PATH" ]; then
+    if [ -e "$XMG_BIN_PATH" ] || [ -L "$XMG_BIN_PATH" ]; then
         xmg_backup_file "$XMG_BIN_PATH"
     fi
 
     xmg_update_download "$XMG_REPO_RAW/xmg" "$XMG_BIN_PATH" 0755
 
     while IFS= read -r f; do
-        if [ -e "$XMG_LIB_DIR/$f" ]; then
+        if [ -e "$XMG_LIB_DIR/$f" ] || [ -L "$XMG_LIB_DIR/$f" ]; then
             xmg_backup_file "$XMG_LIB_DIR/$f"
         fi
 
