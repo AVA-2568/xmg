@@ -1,159 +1,92 @@
 #!/usr/bin/env bash
 
-CACHE_CPU="/dev/shm/xmg_cpu"
-CACHE_TTL=2
+[ "${XMG_MONITOR_SH_LOADED:-0}" = "1" ] && return 0
+XMG_MONITOR_SH_LOADED=1
 
-########################################
-# 服务检测（极轻）
-########################################
+XMG_MONITOR_INTERVAL="${XMG_MONITOR_INTERVAL:-1}"
 
-check_service() {
-    pidof "$1" >/dev/null 2>&1 && echo active || echo inactive
+xmg_monitor_clear() {
+    printf '\033[H\033[2J'
 }
 
-########################################
-# CPU（缓存）
-########################################
-
-calc_cpu() {
-    local u n s i io irq si st t1 t2
-    read -r _ u n s i io irq si st _ < /proc/stat
-    t1=$((u+n+s+i+io+irq+si+st))
-    sleep 0.2
-    read -r _ u n s i io irq si st _ < /proc/stat
-    t2=$((u+n+s+i+io+irq+si+st))
-
-    local idle_diff total_diff
-    idle_diff=$((i+io))
-    total_diff=$((t2 - t1))
-
-    (( total_diff == 0 )) && echo "0%" || echo "$((100*(total_diff-idle_diff)/total_diff))%"
+xmg_monitor_hide_cursor() {
+    printf '\033[?25l'
 }
 
-get_cpu() {
-    local now ts
-    now=$(date +%s)
-
-    if [[ ! -f "$CACHE_CPU" ]]; then
-        calc_cpu > "$CACHE_CPU"
-    else
-        ts=$(stat -c %Y "$CACHE_CPU" 2>/dev/null || echo 0)
-        (( now - ts >= CACHE_TTL )) && calc_cpu > "$CACHE_CPU"
-    fi
-
-    cat "$CACHE_CPU"
+xmg_monitor_show_cursor() {
+    printf '\033[?25h'
 }
 
-########################################
-# 内存
-########################################
-
-get_mem() {
-    local total avail k v
-
-    while read -r k v _; do
-        case "$k" in
-            MemTotal:) total=$v ;;
-            MemAvailable:) avail=$v ;;
-        esac
-    done < /proc/meminfo
-
-    echo "$(((total-avail)/1024))MB / $((total/1024))MB"
+xmg_monitor_cleanup() {
+    xmg_monitor_show_cursor
 }
 
-########################################
-# TCP
-########################################
+xmg_monitor_draw() {
+    xmg_monitor_clear
 
-get_tcp() {
-    wc -l < /proc/net/tcp
+    printf '%sXMG Monitor (Real-Time)%s\n' "$(xmg_c 36)" "$(xmg_reset)"
+    printf '=======================\n\n'
+
+    printf '%s系统%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '  Time       : %s\n' "$XMG_STATUS_TIME"
+    printf '  Hostname   : %s\n' "$XMG_STATUS_HOSTNAME"
+    printf '  Kernel     : %s\n' "$XMG_STATUS_KERNEL"
+    printf '  Uptime     : %s\n' "$XMG_STATUS_UPTIME"
+    printf '  Load       : %s\n' "$XMG_STATUS_LOAD"
+    printf '  Memory     : %s (%s)\n' "$XMG_STATUS_MEM_PERCENT" "$XMG_STATUS_MEM_DETAIL"
+    printf '  Disk /     : %s\n' "$XMG_STATUS_DISK_ROOT"
+    printf '\n'
+
+    printf '%s服务%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '  Xray       : %s\n' "$(xmg_status_color "$XMG_STATUS_XRAY")"
+    printf '  Caddy      : %s\n' "$(xmg_status_color "$XMG_STATUS_CADDY")"
+    printf '\n'
+
+    printf '%s监听端口%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '  22/SSH     : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_22")"
+    printf '  80/HTTP    : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_80")"
+    printf '  443/HTTPS  : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_443")"
+    printf '\n'
+
+    printf '操作: '
+    printf '%s[m]%s 管理菜单  ' "$(xmg_c 32)" "$(xmg_reset)"
+    printf '%s[q]%s 退出\n' "$(xmg_c 31)" "$(xmg_reset)"
+    printf '\n'
+    printf '低资源模式: UI刷新=%ss, 系统缓存=%ss, 服务缓存=%ss\n' \
+        "$XMG_MONITOR_INTERVAL" "$XMG_CACHE_TTL" "$XMG_SERVICE_TTL"
 }
 
-########################################
-# load
-########################################
+xmg_monitor_loop() {
+    local key=""
 
-get_load() {
-    awk '{print $1" "$2" "$3}' /proc/loadavg
-}
+    trap 'xmg_monitor_cleanup; exit 130' INT TERM
+    trap 'xmg_monitor_cleanup' EXIT
 
-########################################
-# uptime
-########################################
-
-get_uptime() {
-    awk '{print int($1/3600)"h "int(($1%3600)/60)"m"}' /proc/uptime
-}
-
-########################################
-# 状态灯
-########################################
-
-light() {
-    case "$1" in
-        active) printf "\033[32m●\033[0m" ;;
-        inactive) printf "\033[31m●\033[0m" ;;
-        *) printf "\033[33m●\033[0m" ;;
-    esac
-}
-
-########################################
-# 绘制UI（无clear）
-########################################
-
-draw_dashboard() {
-    printf "\033[H"
-
-    local caddy xray cpu mem tcp load uptime
-
-    caddy=$(check_service caddy)
-    xray=$(check_service xray)
-    cpu=$(get_cpu)
-    mem=$(get_mem)
-    tcp=$(get_tcp)
-    load=$(get_load)
-    uptime=$(get_uptime)
-
-    echo "=========================================="
-    echo " XMG Monitor (Real-Time)"
-    echo "------------------------------------------"
-
-    printf " Caddy: %s %-8s   Xray: %s %-8s\n" \
-        "$(light "$caddy")" "$caddy" \
-        "$(light "$xray")" "$xray"
-
-    echo
-
-    printf " CPU: %-10s  MEM: %-18s\n" "$cpu" "$mem"
-    printf " TCP: %-10s  Load: %-15s\n" "$tcp" "$load"
-    printf " Uptime: %-15s\n" "$uptime"
-
-    echo "=========================================="
-    echo "[m] 菜单   [q] 退出"
-}
-
-########################################
-# 主循环
-########################################
-
-monitor_loop() {
-    tput civis 2>/dev/null
+    xmg_monitor_hide_cursor
+    xmg_system_refresh_all force
 
     while true; do
-        draw_dashboard
+        xmg_system_refresh_all
+        xmg_monitor_draw
 
-        read -rsn1 -t 1 key
-
-        case "$key" in
-            q) break ;;
-            m)
-                tput cnorm
-                run_main_menu
-                tput civis
-                ;;
-        esac
+        key=""
+        if read -rsn1 -t "$XMG_MONITOR_INTERVAL" key; then
+            case "$key" in
+                m|M)
+                    xmg_monitor_show_cursor
+                    xmg_menu_loop
+                    xmg_monitor_hide_cursor
+                    xmg_system_refresh_all force
+                    ;;
+                q|Q)
+                    xmg_monitor_show_cursor
+                    xmg_monitor_clear
+                    trap - EXIT
+                    return 0
+                    ;;
+                *)
+                    ;;
+            esac
+        fi
     done
-
-    tput cnorm
-    clear
 }
