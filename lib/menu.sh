@@ -6,10 +6,7 @@
 main_menu() {
     while true; do
         clear
-        echo "===================================="
-        echo "  XMG 轻量级 VPS 脚本管理器"
-        echo "  Version: ${XMG_VERSION}"
-        echo "===================================="
+        show_panel_header
         echo "1. 系统信息"
         echo "2. Caddy 管理"
         echo "3. Xray 管理"
