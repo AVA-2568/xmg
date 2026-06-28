@@ -31,27 +31,12 @@ xmg_menu_load_modules() {
     [ "${XMG_UPDATE_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "update.sh"
     [ "${XMG_UNINSTALL_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "uninstall.sh"
 
-    # 只检查一级入口函数
     xmg_menu_require_func xmg_xray_menu
     xmg_menu_require_func xmg_caddy_menu
-    xmg_menu_require_func xmg_firewall_status
-    xmg_menu_require_func xmg_firewall_allow_basic
-    xmg_menu_require_func xmg_firewall_enable
-    xmg_menu_require_func xmg_firewall_disable
-    xmg_menu_require_func xmg_update_version
-    xmg_menu_require_func xmg_update_check_files
-    xmg_menu_require_func xmg_update_from_github
+    xmg_menu_require_func xmg_site_menu
+    xmg_menu_require_func xmg_firewall_menu
+    xmg_menu_require_func xmg_update_menu
     xmg_menu_require_func xmg_uninstall_menu
-
-    # site.sh 允许两种模式：
-    # 1) 提供 xmg_site_menu
-    # 2) 只提供最小功能函数
-    if declare -F xmg_site_menu >/dev/null 2>&1; then
-        :
-    else
-        xmg_menu_require_func xmg_site_create_default
-        xmg_menu_require_func xmg_site_show_path
-    fi
 }
 
 xmg_menu_show() {
@@ -73,122 +58,74 @@ xmg_menu_show() {
 EOF
 }
 
-xmg_menu_site_fallback() {
-    local choice=""
-
-    while true; do
-        clear
-        echo "========== 站点管理 =========="
-        echo "1. 创建默认静态站点"
-        echo "2. 查看站点目录"
-        echo "0. 返回"
-        echo
-        printf "请选择: "
-
-        read -r choice || return 0
-
-        case "$choice" in
-            1)
-                xmg_site_create_default
-                xmg_pause
-                ;;
-            2)
-                xmg_site_show_path
-                xmg_pause
-                ;;
-            0)
-                return 0
-                ;;
-            *)
-                xmg_warn "无效选择"
-                xmg_pause
-                ;;
-        esac
-    done
-}
-
-xmg_menu_firewall() {
-    local choice=""
-
-    while true; do
-        clear
-        echo "========== 防火墙管理 =========="
-        echo "1. 查看 UFW 状态"
-        echo "2. 放行 SSH/HTTP/HTTPS"
-        echo "3. 启用 UFW"
-        echo "4. 禁用 UFW"
-        echo "0. 返回"
-        echo
-        printf "请选择: "
-
-        read -r choice || return 0
-
-        case "$choice" in
-            1)
-                xmg_firewall_status
-                xmg_pause
-                ;;
-            2)
-                xmg_firewall_allow_basic
-                xmg_pause
-                ;;
-            3)
-                xmg_firewall_enable
-                xmg_pause
-                ;;
-            4)
-                xmg_firewall_disable
-                xmg_pause
-                ;;
-            0)
-                return 0
-                ;;
-            *)
-                xmg_warn "无效选择"
-                xmg_pause
-                ;;
-        esac
-    done
-}
-
-xmg_menu_update() {
-    local choice=""
-
-    while true; do
-        clear
-        echo "========== 更新 / 版本 =========="
-        echo "1. 显示版本"
-        echo "2. 检查本地文件完整性"
-        echo "3. 从 GitHub 更新"
-        echo "0. 返回"
-        echo
-        printf "请选择: "
-
-        read -r choice || return 0
-
-        case "$choice" in
-            1)
-                xmg_update_version
-                xmg_pause
-                ;;
-            2)
-                xmg_update_check_files
-                xmg_pause
-                ;;
-            3)
-                xmg_update_from_github
-                xmg_pause
-                ;;
-            0)
-                return 0
-                ;;
-            *)
-                xmg_warn "无效选择"
-                xmg_pause
-                ;;
-        esac
-    done
-}
-
 xmg_menu_logs() {
     clear
+    echo "========== 最近日志 =========="
+    echo
+
+    if xmg_cmd_exists journalctl; then
+        echo "--- xray ---"
+        journalctl -u xray -n 30 --no-pager 2>/dev/null || true
+        echo
+        echo "--- caddy ---"
+        journalctl -u caddy -n 30 --no-pager 2>/dev/null || true
+    else
+        xmg_warn "journalctl 不存在"
+    fi
+
+    xmg_pause
+}
+
+xmg_menu_loop() {
+    local choice=""
+
+    xmg_menu_load_modules
+
+    while true; do
+        xmg_menu_show
+        printf "请选择: "
+
+        read -r choice || return 0
+
+        case "$choice" in
+            1)
+                clear
+                xmg_system_refresh_all force
+                xmg_system_print_summary
+                xmg_pause
+                ;;
+            2)
+                xmg_xray_menu
+                ;;
+            3)
+                xmg_caddy_menu
+                ;;
+            4)
+                xmg_site_menu
+                ;;
+            5)
+                xmg_firewall_menu
+                ;;
+            6)
+                xmg_update_menu
+                ;;
+            7)
+                xmg_menu_logs
+                ;;
+            8)
+                xmg_uninstall_menu
+                ;;
+            9)
+                return 0
+                ;;
+            0)
+                clear
+                exit 0
+                ;;
+            *)
+                xmg_warn "无效选择"
+                xmg_pause
+                ;;
+        esac
+    done
+}
