@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-# GitHub Raw 基准地址。
-# 你当前确定使用：
-# https://raw.githubusercontent.com/AVA-2568/xmg/main/lib/xray.sh
-# https://raw.githubusercontent.com/AVA-2568/xmg/main/lib/caddy.sh
-# https://raw.githubusercontent.com/AVA-2568/xmg/main/lib/site.sh
-#
-# 因此这里统一使用 /main/ 风格。
 XMG_BASE_URL="${XMG_BASE_URL:-https://raw.githubusercontent.com/AVA-2568/xmg/main}"
-
 XMG_BIN="${XMG_BIN:-/usr/local/bin/xmg}"
 XMG_LIB_DIR="${XMG_LIB_DIR:-/usr/local/lib/xmg}"
 
@@ -93,9 +85,7 @@ download_file() {
     cmd_exists curl || die "curl 不存在，请先安装 curl"
 
     tmp="$(mktemp)"
-    if [ -z "$tmp" ]; then
-        die "创建临时文件失败"
-    fi
+    [ -n "$tmp" ] || die "创建临时文件失败"
 
     if ! curl -fsSL "$url" -o "$tmp"; then
         rm -f "$tmp"
