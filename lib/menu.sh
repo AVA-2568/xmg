@@ -24,6 +24,7 @@ xmg_menu_require_func() {
 }
 
 xmg_menu_load_modules() {
+    # 业务模块懒加载，避免默认 Monitor 启动路径过重
     [ "${XMG_XRAY_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "xray.sh"
     [ "${XMG_CADDY_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "caddy.sh"
     [ "${XMG_SITE_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "site.sh"
@@ -31,6 +32,7 @@ xmg_menu_load_modules() {
     [ "${XMG_UPDATE_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "update.sh"
     [ "${XMG_UNINSTALL_SH_LOADED:-0}" = "1" ] || xmg_menu_source_module "uninstall.sh"
 
+    # 一级入口接口校验
     xmg_menu_require_func xmg_xray_menu
     xmg_menu_require_func xmg_caddy_menu
     xmg_menu_require_func xmg_site_menu
