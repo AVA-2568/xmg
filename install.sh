@@ -1,107 +1,123 @@
 #!/usr/bin/env bash
-#
-# install.sh - XMG 在线安装器
-#
+set -Eeuo pipefail
 
-set -o errexit
-set -o nounset
-set -o pipefail
+XMG_BASE_URL="${XMG_BASE_URL:-https://raw.githubusercontent.com/AVA-2568/XMG/main}"
+XMG_BIN="${XMG_BIN:-/usr/local/bin/xmg}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-/usr/local/lib/xmg}"
 
-GITHUB_REPO="${GITHUB_REPO:-https://github.com/AVA-2568/xmg.git}"
-INSTALL_DIR="/opt/xmg"
-BIN_PATH="/usr/local/bin/xmg"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-RED="\033[31m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-BLUE="\033[34m"
-RESET="\033[0m"
-
-info() {
-    echo -e "${BLUE}[INFO]${RESET} $*"
+red() {
+    printf '\033[31m%s\033[0m\n' "$*" >&2
 }
 
-ok() {
-    echo -e "${GREEN}[OK]${RESET} $*"
+green() {
+    printf '\033[32m%s\033[0m\n' "$*"
 }
 
-warn() {
-    echo -e "${YELLOW}[WARN]${RESET} $*"
+yellow() {
+    printf '\033[33m%s\033[0m\n' "$*" >&2
 }
 
-err() {
-    echo -e "${RED}[ERROR]${RESET} $*" >&2
+die() {
+    red "错误: $*"
+    exit 1
 }
 
 need_root() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        err "请使用 root 用户执行安装"
-        exit 1
-    fi
+    [ "${EUID:-$(id -u)}" -eq 0 ] || die "请使用 root 执行安装，例如: sudo ./install.sh"
 }
 
-check_os() {
-    if [[ ! -f /etc/os-release ]]; then
-        err "无法识别系统"
-        exit 1
-    fi
-
-    # shellcheck disable=SC1091
-    . /etc/os-release
-
-    case "${ID}" in
-        debian|ubuntu)
-            ok "检测到系统：${PRETTY_NAME}"
-            ;;
-        *)
-            warn "当前系统为：${PRETTY_NAME}，主要适配 Debian / Ubuntu"
-            ;;
-    esac
+cmd_exists() {
+    command -v "$1" >/dev/null 2>&1
 }
 
-install_deps() {
-    info "安装安装器依赖..."
-
-    apt-get update
-    apt-get install -y \
-        git \
-        curl \
-        ca-certificates
+required_libs() {
+    cat <<EOF
+common.sh
+system.sh
+monitor.sh
+menu.sh
+caddy.sh
+xray.sh
+site.sh
+firewall.sh
+update.sh
+uninstall.sh
+EOF
 }
 
-install_xmg() {
-    info "安装 XMG 到 ${INSTALL_DIR}"
+install_local() {
+    local f=""
 
-    if [[ -d "${INSTALL_DIR}/.git" ]]; then
-        info "检测到已有安装，执行更新..."
-        git -C "${INSTALL_DIR}" pull --ff-only
-    else
-        rm -rf "${INSTALL_DIR}"
-        git clone --depth=1 "${GITHUB_REPO}" "${INSTALL_DIR}"
+    [ -f "$SCRIPT_DIR/xmg" ] || return 1
+    [ -d "$SCRIPT_DIR/lib" ] || return 1
+
+    mkdir -p "$(dirname "$XMG_BIN")" "$XMG_LIB_DIR"
+
+    install -m 0755 -o root -g root "$SCRIPT_DIR/xmg" "$XMG_BIN"
+
+    while IFS= read -r f; do
+        [ -f "$SCRIPT_DIR/lib/$f" ] || die "缺少本地文件: lib/$f"
+        install -m 0644 -o root -g root "$SCRIPT_DIR/lib/$f" "$XMG_LIB_DIR/$f"
+    done < <(required_libs)
+
+    return 0
+}
+
+download_file() {
+    local url="$1"
+    local dst="$2"
+    local mode="$3"
+    local tmp=""
+
+    cmd_exists curl || die "curl 不存在，请先安装 curl"
+
+    tmp="$(mktemp)"
+
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        die "下载失败: $url"
     fi
 
-    chmod +x "${INSTALL_DIR}/xmg.sh"
-    chmod +x "${INSTALL_DIR}/install.sh" 2>/dev/null || true
-    chmod +x "${INSTALL_DIR}/uninstall.sh" 2>/dev/null || true
+    install -m "$mode" -o root -g root "$tmp" "$dst"
+    rm -f "$tmp"
+}
 
-    find "${INSTALL_DIR}/lib" -type f -name "*.sh" -exec chmod 644 {} \;
+install_remote() {
+    local f=""
 
-    ln -sf "${INSTALL_DIR}/xmg.sh" "${BIN_PATH}"
+    mkdir -p "$(dirname "$XMG_BIN")" "$XMG_LIB_DIR"
 
-    mkdir -p /etc/xmg/backup
-    mkdir -p /var/www/mask-site
+    download_file "$XMG_BASE_URL/xmg" "$XMG_BIN" 0755
 
-    ok "XMG 安装完成"
-    echo
-    echo "运行命令："
-    echo "  xmg"
+    while IFS= read -r f; do
+        download_file "$XMG_BASE_URL/lib/$f" "$XMG_LIB_DIR/$f" 0644
+    done < <(required_libs)
 }
 
 main() {
     need_root
-    check_os
-    install_deps
-    install_xmg
+
+    mkdir -p \
+        /etc/xmg \
+        /run/xmg \
+        /var/log/xmg \
+        /var/backups/xmg \
+        /var/www/xmg/site
+
+    if install_local; then
+        green "已从本地源码安装 XMG"
+    else
+        yellow "未检测到完整本地源码，尝试从 GitHub raw 安装"
+        install_remote
+        green "已从 GitHub raw 安装 XMG"
+    fi
+
+    echo
+    green "安装完成"
+    echo "命令: xmg"
+    echo "源码目录测试: XMG_LIB_DIR=./lib ./xmg"
 }
 
 main "$@"
