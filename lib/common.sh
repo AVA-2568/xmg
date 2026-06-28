@@ -25,7 +25,6 @@ xmg_color_enabled() {
 
 xmg_c() {
     local code="$1"
-
     if xmg_color_enabled; then
         printf '\033[%sm' "$code"
     fi
@@ -120,21 +119,6 @@ xmg_backup_file() {
     xmg_info "已备份: $file -> $dst"
 }
 
-xmg_write_atomic() {
-    local target="$1"
-    local mode="${2:-0644}"
-    local dir=""
-    local tmp=""
-
-    dir="$(dirname "$target")"
-    mkdir -p "$dir"
-
-    tmp="${target}.tmp.$$"
-    cat > "$tmp"
-    chmod "$mode" "$tmp"
-    mv -f "$tmp" "$target"
-}
-
 xmg_systemctl() {
     local action="$1"
     local service="$2"
@@ -153,21 +137,4 @@ xmg_systemctl() {
             xmg_die "非法 systemctl 操作: $action"
             ;;
     esac
-}
-
-xmg_safe_name() {
-    local value="$1"
-
-    case "$value" in
-        *[!a-zA-Z0-9._-]*|"")
-            return 1
-            ;;
-        *)
-            return 0
-            ;;
-    esac
-}
-
-xmg_print_line() {
-    printf '%*s\n' "${1:-60}" '' | tr ' ' '-'
 }
