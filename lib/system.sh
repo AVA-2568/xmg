@@ -91,7 +91,6 @@ xmg_read_mem_detail() {
 }
 
 xmg_read_disk_root() {
-    # df 比读取 /proc 略重，但由 TTL 控制，默认 3 秒一次
     df -hP / 2>/dev/null | awk 'NR==2 {print $5" "$3"/"$2}' || echo "unknown"
 }
 
@@ -121,7 +120,6 @@ xmg_proc_port_listening() {
 
     hex="$(xmg_hex_port "$port")"
 
-    # /proc/net/tcp 中状态 0A 表示 LISTEN
     awk -v p="$hex" '
         NR > 1 {
             split($2, a, ":")
@@ -180,7 +178,6 @@ xmg_system_refresh_basic() {
     XMG_STATUS_MEM_DETAIL="$(xmg_read_mem_detail)"
     XMG_STATUS_DISK_ROOT="$(xmg_read_disk_root)"
 
-    # 端口状态读取 /proc，不调用 ss/netstat/lsof
     XMG_STATUS_PORT_22="$(xmg_port_status 22)"
     XMG_STATUS_PORT_80="$(xmg_port_status 80)"
     XMG_STATUS_PORT_443="$(xmg_port_status 443)"
@@ -198,7 +195,6 @@ xmg_system_refresh_services() {
 
     XMG_SERVICE_CACHE_TS="$now"
 
-    # systemctl 只在服务缓存过期时调用
     XMG_STATUS_XRAY="$(xmg_service_active_read xray)"
     XMG_STATUS_CADDY="$(xmg_service_active_read caddy)"
 }
