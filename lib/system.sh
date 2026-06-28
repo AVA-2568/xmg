@@ -1,145 +1,251 @@
 #!/usr/bin/env bash
-#
-# system.sh - 非实时系统管理模块（轻量版）
-#
 
-########################################
-# 基础系统信息（菜单用）
-########################################
+[ "${XMG_SYSTEM_SH_LOADED:-0}" = "1" ] && return 0
+XMG_SYSTEM_SH_LOADED=1
 
-show_system_info() {
-    echo
-    echo "========== 系统信息 =========="
+XMG_CACHE_TTL="${XMG_CACHE_TTL:-3}"
+XMG_SERVICE_TTL="${XMG_SERVICE_TTL:-5}"
 
-    echo "主机名: $(hostname)"
+XMG_CACHE_TS=0
+XMG_SERVICE_CACHE_TS=0
 
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        echo "系统: ${PRETTY_NAME}"
-    fi
+XMG_STATUS_TIME="unknown"
+XMG_STATUS_HOSTNAME="unknown"
+XMG_STATUS_KERNEL="unknown"
+XMG_STATUS_UPTIME="unknown"
+XMG_STATUS_LOAD="unknown"
+XMG_STATUS_MEM_PERCENT="unknown"
+XMG_STATUS_MEM_DETAIL="unknown"
+XMG_STATUS_DISK_ROOT="unknown"
+XMG_STATUS_XRAY="unknown"
+XMG_STATUS_CADDY="unknown"
+XMG_STATUS_PORT_22="unknown"
+XMG_STATUS_PORT_80="unknown"
+XMG_STATUS_PORT_443="unknown"
 
-    echo "内核: $(uname -r)"
-
-    echo
-    echo "========== CPU =========="
-    echo "逻辑 CPU 核心数: $(nproc)"
-
-    echo
-    echo "========== 内存 =========="
-    free -h
-
-    echo
-    echo "========== 磁盘 =========="
-    df -h /
-
-    echo
-    echo "========== 网络端口 =========="
-    ss -lntup 2>/dev/null || echo "ss 命令不可用"
+xmg_now_s() {
+    date +%s
 }
 
-########################################
-# 服务状态（菜单用）
-########################################
-
-show_services_status() {
-    echo
-    echo "========== 服务状态 =========="
-
-    if pidof caddy >/dev/null 2>&1; then
-        echo "Caddy: running"
-    else
-        echo "Caddy: stopped"
-    fi
-
-    if pidof xray >/dev/null 2>&1; then
-        echo "Xray: running"
-    else
-        echo "Xray: stopped"
-    fi
-
-    echo
-    echo "========== 端口监听 =========="
-    ss -lntup 2>/dev/null || echo "ss 不可用"
+xmg_read_hostname() {
+    cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null || echo "unknown"
 }
 
-########################################
-# 小内存 VPS 优化
-########################################
+xmg_read_kernel() {
+    uname -r 2>/dev/null || echo "unknown"
+}
 
-optimize_small_vps() {
-    echo
-    echo "[INFO] 开始优化小内存 VPS（适用于 0.5C / 512MB）"
+xmg_read_time() {
+    date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown"
+}
 
-    ########################################
-    # journald 限制
-    ########################################
-    mkdir -p /etc/systemd/journald.conf.d
+xmg_read_load() {
+    awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "unknown"
+}
 
-    cat > /etc/systemd/journald.conf.d/99-xmg.conf <<EOF
-[Journal]
-SystemMaxUse=50M
-RuntimeMaxUse=20M
-MaxRetentionSec=7day
+xmg_read_uptime() {
+    awk '
+        {
+            sec=int($1)
+            d=int(sec/86400)
+            h=int((sec%86400)/3600)
+            m=int((sec%3600)/60)
+
+            if (d > 0) {
+                printf "%dd %02dh %02dm", d, h, m
+            } else {
+                printf "%02dh %02dm", h, m
+            }
+        }
+    ' /proc/uptime 2>/dev/null || echo "unknown"
+}
+
+xmg_read_mem_percent() {
+    awk '
+        /MemTotal:/ {total=$2}
+        /MemAvailable:/ {avail=$2}
+        END {
+            if (total > 0 && avail >= 0) {
+                used=total-avail
+                printf "%.1f%%", used*100/total
+            } else {
+                printf "unknown"
+            }
+        }
+    ' /proc/meminfo 2>/dev/null || echo "unknown"
+}
+
+xmg_read_mem_detail() {
+    awk '
+        /MemTotal:/ {total=$2}
+        /MemAvailable:/ {avail=$2}
+        END {
+            if (total > 0 && avail >= 0) {
+                used=total-avail
+                printf "%.0fMiB/%.0fMiB", used/1024, total/1024
+            } else {
+                printf "unknown"
+            }
+        }
+    ' /proc/meminfo 2>/dev/null || echo "unknown"
+}
+
+xmg_read_disk_root() {
+    # df 比读取 /proc 略重，但由 TTL 控制，默认 3 秒一次
+    df -hP / 2>/dev/null | awk 'NR==2 {print $5" "$3"/"$2}' || echo "unknown"
+}
+
+xmg_service_active_read() {
+    local service="$1"
+
+    if ! xmg_cmd_exists systemctl; then
+        echo "no-systemd"
+        return 0
+    fi
+
+    if systemctl is-active --quiet "$service" 2>/dev/null; then
+        echo "running"
+    else
+        echo "stopped"
+    fi
+}
+
+xmg_hex_port() {
+    local port="$1"
+    printf '%04X' "$port"
+}
+
+xmg_proc_port_listening() {
+    local port="$1"
+    local hex=""
+
+    hex="$(xmg_hex_port "$port")"
+
+    # /proc/net/tcp 中状态 0A 表示 LISTEN
+    awk -v p="$hex" '
+        NR > 1 {
+            split($2, a, ":")
+            if (toupper(a[2]) == p && $4 == "0A") {
+                found=1
+                exit
+            }
+        }
+        END {
+            exit found ? 0 : 1
+        }
+    ' /proc/net/tcp 2>/dev/null && return 0
+
+    awk -v p="$hex" '
+        NR > 1 {
+            split($2, a, ":")
+            if (toupper(a[2]) == p && $4 == "0A") {
+                found=1
+                exit
+            }
+        }
+        END {
+            exit found ? 0 : 1
+        }
+    ' /proc/net/tcp6 2>/dev/null
+}
+
+xmg_port_status() {
+    local port="$1"
+
+    if xmg_proc_port_listening "$port"; then
+        echo "listen"
+    else
+        echo "closed"
+    fi
+}
+
+xmg_system_refresh_basic() {
+    local force="${1:-}"
+    local now=0
+
+    now="$(xmg_now_s)"
+
+    if [ "$force" != "force" ] && [ $((now - XMG_CACHE_TS)) -lt "$XMG_CACHE_TTL" ]; then
+        return 0
+    fi
+
+    XMG_CACHE_TS="$now"
+
+    XMG_STATUS_TIME="$(xmg_read_time)"
+    XMG_STATUS_HOSTNAME="$(xmg_read_hostname)"
+    XMG_STATUS_KERNEL="$(xmg_read_kernel)"
+    XMG_STATUS_UPTIME="$(xmg_read_uptime)"
+    XMG_STATUS_LOAD="$(xmg_read_load)"
+    XMG_STATUS_MEM_PERCENT="$(xmg_read_mem_percent)"
+    XMG_STATUS_MEM_DETAIL="$(xmg_read_mem_detail)"
+    XMG_STATUS_DISK_ROOT="$(xmg_read_disk_root)"
+
+    # 端口状态读取 /proc，不调用 ss/netstat/lsof
+    XMG_STATUS_PORT_22="$(xmg_port_status 22)"
+    XMG_STATUS_PORT_80="$(xmg_port_status 80)"
+    XMG_STATUS_PORT_443="$(xmg_port_status 443)"
+}
+
+xmg_system_refresh_services() {
+    local force="${1:-}"
+    local now=0
+
+    now="$(xmg_now_s)"
+
+    if [ "$force" != "force" ] && [ $((now - XMG_SERVICE_CACHE_TS)) -lt "$XMG_SERVICE_TTL" ]; then
+        return 0
+    fi
+
+    XMG_SERVICE_CACHE_TS="$now"
+
+    # systemctl 只在服务缓存过期时调用
+    XMG_STATUS_XRAY="$(xmg_service_active_read xray)"
+    XMG_STATUS_CADDY="$(xmg_service_active_read caddy)"
+}
+
+xmg_system_refresh_all() {
+    local force="${1:-}"
+
+    xmg_system_refresh_basic "$force"
+    xmg_system_refresh_services "$force"
+}
+
+xmg_status_color() {
+    local value="$1"
+
+    case "$value" in
+        running|listen)
+            printf '%s%s%s' "$(xmg_c 32)" "$value" "$(xmg_reset)"
+            ;;
+        stopped|closed)
+            printf '%s%s%s' "$(xmg_c 31)" "$value" "$(xmg_reset)"
+            ;;
+        *)
+            printf '%s%s%s' "$(xmg_c 33)" "$value" "$(xmg_reset)"
+            ;;
+    esac
+}
+
+xmg_system_print_summary() {
+    cat <<EOF
+XMG System Summary
+==================
+
+Time       : $XMG_STATUS_TIME
+Hostname   : $XMG_STATUS_HOSTNAME
+Kernel     : $XMG_STATUS_KERNEL
+Uptime     : $XMG_STATUS_UPTIME
+Load       : $XMG_STATUS_LOAD
+Memory     : $XMG_STATUS_MEM_PERCENT ($XMG_STATUS_MEM_DETAIL)
+Disk /     : $XMG_STATUS_DISK_ROOT
+
+Services:
+  Xray      : $XMG_STATUS_XRAY
+  Caddy     : $XMG_STATUS_CADDY
+
+Ports:
+  22/SSH    : $XMG_STATUS_PORT_22
+  80/HTTP   : $XMG_STATUS_PORT_80
+  443/HTTPS : $XMG_STATUS_PORT_443
 EOF
-
-    systemctl restart systemd-journald 2>/dev/null || true
-
-    ########################################
-    # Swap
-    ########################################
-    if swapon --show | grep -q '^'; then
-        echo "[INFO] 已存在 swap，跳过创建"
-    else
-        echo "[INFO] 创建 512M swap..."
-
-        if ! fallocate -l 512M /swapfile 2>/dev/null; then
-            dd if=/dev/zero of=/swapfile bs=1M count=512
-        fi
-
-        chmod 600 /swapfile
-        mkswap /swapfile
-        swapon /swapfile
-
-        if ! grep -q '^/swapfile ' /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
-        fi
-    fi
-
-    ########################################
-    # sysctl 优化
-    ########################################
-    cat > /etc/sysctl.d/99-xmg.conf <<EOF
-vm.swappiness=20
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
-EOF
-
-    sysctl --system >/dev/null 2>&1 || true
-
-    echo "[OK] 优化完成 ✅"
-}
-
-########################################
-# （可选）快速诊断
-########################################
-
-quick_diagnose() {
-    echo
-    echo "========== 快速诊断 =========="
-
-    echo "[服务状态]"
-    pidof caddy >/dev/null && echo "Caddy: OK" || echo "Caddy: ERROR"
-    pidof xray  >/dev/null && echo "Xray: OK"  || echo "Xray: ERROR"
-
-    echo
-    echo "[端口]"
-    ss -lnt 2>/dev/null | head -n 10 || true
-
-    echo
-    echo "[内存]"
-    free -h
-
-    echo
-    echo "[负载]"
-    cat /proc/loadavg
 }
