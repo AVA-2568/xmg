@@ -1,78 +1,119 @@
 #!/usr/bin/env bash
-#
-# update.sh - XMG 更新模块
-#
 
-########################################
-# 获取当前版本（可选）
-########################################
+[ "${XMG_UPDATE_SH_LOADED:-0}" = "1" ] && return 0
+XMG_UPDATE_SH_LOADED=1
 
-get_local_version() {
-    if command -v git >/dev/null 2>&1; then
-        git -C /opt/xmg rev-parse --short HEAD 2>/dev/null || echo "unknown"
-    else
-        echo "unknown"
-    fi
+XMG_REPO_RAW="${XMG_REPO_RAW:-https://raw.githubusercontent.com/AVA-2568/XMG/main}"
+XMG_BIN_PATH="${XMG_BIN_PATH:-/usr/local/bin/xmg}"
+
+xmg_update_version() {
+    echo "XMG_VERSION=${XMG_VERSION:-unknown}"
+    echo "XMG_LIB_DIR=$XMG_LIB_DIR"
+    echo "XMG_REPO_RAW=$XMG_REPO_RAW"
 }
 
-########################################
-# 更新 XMG
-########################################
+xmg_update_required_files() {
+    cat <<EOF
+common.sh
+system.sh
+monitor.sh
+menu.sh
+caddy.sh
+xray.sh
+site.sh
+firewall.sh
+update.sh
+uninstall.sh
+EOF
+}
 
-xmg_update() {
+xmg_update_check_files() {
+    local missing=0
+    local f=""
+
+    echo "检查 XMG 文件完整性"
+    echo "===================="
     echo
-    echo "========== XMG 更新 =========="
 
-    local dir="/opt/xmg"
-
-    # 1. 检查目录
-    if [[ ! -d "$dir" ]]; then
-        echo "[ERROR] 未检测到安装目录：$dir"
-        return 1
-    fi
-
-    # 2. 检查 git
-    if ! command -v git >/dev/null 2>&1; then
-        echo "[INFO] 安装 git..."
-        apt-get update
-        apt-get install -y git
-    fi
-
-    # 3. 检查 git 仓库
-    if [[ ! -d "$dir/.git" ]]; then
-        echo "[ERROR] 当前不是 Git 安装版本，无法自动更新"
-        echo "请重新通过 install.sh 安装"
-        return 1
-    fi
-
-    echo "[INFO] 当前版本: $(get_local_version)"
-
-    echo "[INFO] 拉取最新代码..."
-
-    if git -C "$dir" pull --ff-only; then
-        echo "[OK] 已更新到最新版本 ✅"
+    if [ -x "$XMG_BIN_PATH" ] || [ -f "$XMG_BIN_PATH" ]; then
+        echo "[OK]   $XMG_BIN_PATH"
     else
-        echo "[ERROR] 更新失败，请检查网络或冲突"
-        return 1
+        echo "[MISS] $XMG_BIN_PATH"
+        missing=$((missing + 1))
     fi
 
-    ########################################
-    # 修复权限
-    ########################################
-
-    chmod +x "$dir/xmg.sh" 2>/dev/null || true
-    chmod +x "$dir/install.sh" 2>/dev/null || true
-    chmod +x "$dir/uninstall.sh" 2>/dev/null || true
-
-    find "$dir/lib" -type f -name "*.sh" -exec chmod 644 {} \;
-
-    echo "[OK] 权限修复完成"
-
-    ########################################
-    # 完成
-    ########################################
+    while IFS= read -r f; do
+        if [ -r "$XMG_LIB_DIR/$f" ]; then
+            echo "[OK]   $XMG_LIB_DIR/$f"
+        else
+            echo "[MISS] $XMG_LIB_DIR/$f"
+            missing=$((missing + 1))
+        fi
+    done < <(xmg_update_required_files)
 
     echo
-    echo "更新完成 ✅"
-    echo "请重新运行：xmg"
+
+    if [ "$missing" -eq 0 ]; then
+        xmg_info "文件检查通过"
+        return 0
+    fi
+
+    xmg_warn "缺失 $missing 个文件"
+    return 1
+}
+
+xmg_update_download() {
+    local url="$1"
+    local dst="$2"
+    local mode="${3:-0644}"
+    local tmp=""
+
+    if ! xmg_cmd_exists curl; then
+        xmg_die "curl 不存在，无法更新"
+    fi
+
+    tmp="$(mktemp)"
+
+    if ! curl -fsSL "$url" -o "$tmp"; then
+        rm -f "$tmp"
+        xmg_die "下载失败: $url"
+    fi
+
+    install -m "$mode" -o root -g root "$tmp" "$dst"
+    rm -f "$tmp"
+}
+
+xmg_update_from_github() {
+    xmg_require_root
+
+    local f=""
+
+    xmg_warn "将从 GitHub raw 更新 XMG 文件。"
+    echo "源: $XMG_REPO_RAW"
+    echo
+
+    if ! xmg_confirm "确认更新?"; then
+        xmg_info "已取消"
+        return 0
+    fi
+
+    xmg_mkdirs
+    mkdir -p "$XMG_LIB_DIR"
+
+    if [ -e "$XMG_BIN_PATH" ]; then
+        xmg_backup_file "$XMG_BIN_PATH"
+    fi
+
+    xmg_update_download "$XMG_REPO_RAW/xmg" "$XMG_BIN_PATH" 0755
+
+    while IFS= read -r f; do
+        if [ -e "$XMG_LIB_DIR/$f" ]; then
+            xmg_backup_file "$XMG_LIB_DIR/$f"
+        fi
+
+        xmg_update_download "$XMG_REPO_RAW/lib/$f" "$XMG_LIB_DIR/$f" 0644
+    done < <(xmg_update_required_files)
+
+    xmg_info "更新完成"
+    xmg_update_check_files || true
 }
