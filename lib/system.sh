@@ -24,11 +24,15 @@ XMG_STATUS_PORT_80="unknown"
 XMG_STATUS_PORT_443="unknown"
 
 xmg_now_s() {
-    date +%s
+    # bash 4.2+ 支持 printf %(%s)T，无需 fork date 子进程
+    printf '%(%s)T' -1
 }
 
 xmg_read_hostname() {
-    cat /proc/sys/kernel/hostname 2>/dev/null || hostname 2>/dev/null || echo "unknown"
+    # 使用 read 内建替代 cat，避免 fork
+    local h=""
+    read -r h < /proc/sys/kernel/hostname 2>/dev/null && printf '%s' "$h" && return 0
+    hostname 2>/dev/null || echo "unknown"
 }
 
 xmg_read_kernel() {
@@ -36,28 +40,31 @@ xmg_read_kernel() {
 }
 
 xmg_read_time() {
-    date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "unknown"
+    # bash 4.2+ 内建时间格式化，避免 fork date
+    printf '%(%Y-%m-%d %H:%M:%S)T' -1
 }
 
 xmg_read_load() {
-    awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null || echo "unknown"
+    # 使用 read 内建替代 awk，避免 fork
+    local l1 l2 l3 rest
+    read -r l1 l2 l3 rest < /proc/loadavg 2>/dev/null && printf '%s %s %s' "$l1" "$l2" "$l3" && return 0
+    echo "unknown"
 }
 
 xmg_read_uptime() {
-    awk '
-        {
-            sec=int($1)
-            d=int(sec/86400)
-            h=int((sec%86400)/3600)
-            m=int((sec%3600)/60)
-
-            if (d > 0) {
-                printf "%dd %02dh %02dm", d, h, m
-            } else {
-                printf "%02dh %02dm", h, m
-            }
-        }
-    ' /proc/uptime 2>/dev/null || echo "unknown"
+    # 使用 bash 内建算术替代 awk，避免 fork
+    local raw sec d h m
+    read -r raw _ < /proc/uptime 2>/dev/null || { echo "unknown"; return 0; }
+    # raw 格式为 "12345.67 ..."，取整数部分
+    sec="${raw%%.*}"
+    d=$((sec / 86400))
+    h=$(( (sec % 86400) / 3600 ))
+    m=$(( (sec % 3600) / 60 ))
+    if [ "$d" -gt 0 ]; then
+        printf '%dd %02dh %02dm' "$d" "$h" "$m"
+    else
+        printf '%02dh %02dm' "$h" "$m"
+    fi
 }
 
 # ===== 修改 xmg_system_refresh_basic =====
