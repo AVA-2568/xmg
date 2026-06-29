@@ -218,18 +218,20 @@ xmg_system_refresh_all() {
     xmg_system_refresh_services "$force"
 }
 
+# ===== 替换 xmg_status_color =====
+# 位置：lib/system.sh 中 xmg_system_print_summary 函数之前
 xmg_status_color() {
     local value="$1"
 
     case "$value" in
         running|listen)
-            printf '%s%s%s' "$(xmg_c 32)" "$value" "$(xmg_reset)"
+            printf '%s%s%s' "$XMG_C_GREEN" "$value" "$XMG_C_RESET"
             ;;
         stopped|closed)
-            printf '%s%s%s' "$(xmg_c 31)" "$value" "$(xmg_reset)"
+            printf '%s%s%s' "$XMG_C_RED" "$value" "$XMG_C_RESET"
             ;;
         *)
-            printf '%s%s%s' "$(xmg_c 33)" "$value" "$(xmg_reset)"
+            printf '%s%s%s' "$XMG_C_YELLOW" "$value" "$XMG_C_RESET"
             ;;
     esac
 }
