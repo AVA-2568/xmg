@@ -117,10 +117,10 @@ xmg_hex_port() {
 xmg_proc_port_listening() {
     local port="$1"
     local hex=""
-
     hex="$(xmg_hex_port "$port")"
 
     awk -v p="$hex" '
+        BEGIN { found=0 }          # <-- 显式初始化
         NR > 1 {
             split($2, a, ":")
             if (toupper(a[2]) == p && $4 == "0A") {
@@ -128,12 +128,11 @@ xmg_proc_port_listening() {
                 exit
             }
         }
-        END {
-            exit found ? 0 : 1
-        }
+        END { exit found ? 0 : 1 }
     ' /proc/net/tcp 2>/dev/null && return 0
 
     awk -v p="$hex" '
+        BEGIN { found=0 }          # <-- 显式初始化
         NR > 1 {
             split($2, a, ":")
             if (toupper(a[2]) == p && $4 == "0A") {
@@ -141,9 +140,7 @@ xmg_proc_port_listening() {
                 exit
             }
         }
-        END {
-            exit found ? 0 : 1
-        }
+        END { exit found ? 0 : 1 }
     ' /proc/net/tcp6 2>/dev/null
 }
 
