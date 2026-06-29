@@ -21,13 +21,16 @@ xmg_monitor_cleanup() {
     xmg_monitor_show_cursor
 }
 
+# ===== 替换 xmg_monitor_draw =====
+# 位置：lib/monitor.sh 中 xmg_monitor_cleanup 函数之后
 xmg_monitor_draw() {
     xmg_monitor_clear
 
-    printf '%sXMG Monitor (Real-Time)%s\n' "$(xmg_c 36)" "$(xmg_reset)"
+    # 使用缓存的颜色变量，避免 $() fork
+    printf '%sXMG Monitor (Real-Time)%s\n' "$XMG_C_CYAN" "$XMG_C_RESET"
     printf '=======================\n\n'
 
-    printf '%s系统%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '%s系统%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"
     printf '  Time       : %s\n' "$XMG_STATUS_TIME"
     printf '  Hostname   : %s\n' "$XMG_STATUS_HOSTNAME"
     printf '  Kernel     : %s\n' "$XMG_STATUS_KERNEL"
@@ -37,20 +40,20 @@ xmg_monitor_draw() {
     printf '  Disk /     : %s\n' "$XMG_STATUS_DISK_ROOT"
     printf '\n'
 
-    printf '%s服务%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '%s服务%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"
     printf '  Xray       : %s\n' "$(xmg_status_color "$XMG_STATUS_XRAY")"
     printf '  Caddy      : %s\n' "$(xmg_status_color "$XMG_STATUS_CADDY")"
     printf '\n'
 
-    printf '%s监听端口%s\n' "$(xmg_c 1)" "$(xmg_reset)"
+    printf '%s监听端口%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"
     printf '  22/SSH     : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_22")"
     printf '  80/HTTP    : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_80")"
     printf '  443/HTTPS  : %s\n' "$(xmg_status_color "$XMG_STATUS_PORT_443")"
     printf '\n'
 
     printf '操作: '
-    printf '%s[m]%s 管理菜单  ' "$(xmg_c 32)" "$(xmg_reset)"
-    printf '%s[q]%s 退出\n' "$(xmg_c 31)" "$(xmg_reset)"
+    printf '%s[m]%s 管理菜单  ' "$XMG_C_GREEN" "$XMG_C_RESET"
+    printf '%s[q]%s 退出\n' "$XMG_C_RED" "$XMG_C_RESET"
     printf '\n'
     printf '低资源模式: UI刷新=%ss, 系统缓存=%ss, 服务缓存=%ss\n' \
         "$XMG_MONITOR_INTERVAL" "$XMG_CACHE_TTL" "$XMG_SERVICE_TTL"
