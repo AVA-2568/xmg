@@ -12,6 +12,7 @@ fi
 
 # shellcheck source=/usr/local/lib/xmg/common.sh
 source "$XMG_LIB_DIR/common.sh"
+xmg_color_init
 
 # shellcheck source=/usr/local/lib/xmg/system.sh
 source "$XMG_LIB_DIR/system.sh"
