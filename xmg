@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
+# coding: utf-8
+#
+# xmg - XMG 主入口
+#
+# 说明：
+#   - 默认启动实时监控界面
+#   - 可通过子命令进入菜单、查看系统摘要、显示版本或帮助
+#   - 文件内容应使用 UTF-8 编码保存
+#
 
 # 必须在 set -o pipefail 前检查是否为 bash
 if [ -z "${BASH_VERSION:-}" ]; then
