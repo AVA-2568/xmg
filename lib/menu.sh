@@ -1,4 +1,20 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
+# coding: utf-8
+#
+# menu.sh - XMG 管理菜单与模块发现
+#
+# 说明：
+#   - 本文件是 Bash 库文件，应由 xmg 主程序 source 加载
+#   - 使用 Bash 数组和正则匹配，因此不支持 sh/dash
+#   - 文件内容应使用 UTF-8 编码保存
+#
+
+# menu.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "menu.sh: requires bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # ===== 安全加载 =====
 if [ "${XMG_MENU_SH_LOADED:-0}" = "1" ]; then
@@ -45,10 +61,15 @@ xmg_menu_is_core_file() {
 }
 
 # 从模块文件中提取第一个 xmg_xxx_menu 函数名
-# 支持:
+#
+# 支持以下写法：
 #   xmg_demo_menu() {
 #   function xmg_demo_menu {
 #   function xmg_demo_menu() {
+#
+# 注意：
+#   - 这里只做轻量静态扫描，不执行模块内容
+#   - 真正执行模块时由 xmg_menu_load_module_func 按需 source
 xmg_menu_find_menu_func() {
     local path="$1"
     local line=""
@@ -56,9 +77,9 @@ xmg_menu_find_menu_func() {
     [ -r "$path" ] || return 1
 
     while IFS= read -r line; do
-        # 跳过注释行
+        # 跳过空行和注释行
         case "$line" in
-            ''|'#'*)
+            ''|[[:space:]]'#'*|'#'*)
                 continue
                 ;;
         esac
@@ -68,7 +89,7 @@ xmg_menu_find_menu_func() {
             return 0
         fi
 
-        if [[ "$line" =~ ^[[:space:]]*function[[:space:]]+(xmg_[A-Za-z0-9_]+_menu) ]]; then
+        if [[ "$line" =~ ^[[:space:]]*function[[:space:]]+(xmg_[A-Za-z0-9_]+_menu)[[:space:]]*(\(\))?[[:space:]]*(\{|$) ]]; then
             printf '%s' "${BASH_REMATCH[1]}"
             return 0
         fi
@@ -125,11 +146,16 @@ xmg_menu_add_module_if_valid() {
     local fn=""
     local label=""
 
+    # 核心模块不作为菜单项出现
     xmg_menu_is_core_file "$file" && return 0
+
+    # 避免重复添加
     xmg_menu_module_seen "$file" && return 0
 
+    # 不可读文件直接跳过
     [ -r "$path" ] || return 0
 
+    # 没有 xmg_xxx_menu 函数定义的模块直接跳过
     if ! fn="$(xmg_menu_find_menu_func "$path")"; then
         return 0
     fi
@@ -160,6 +186,7 @@ xmg_menu_discover_modules() {
     # 自动追加未知模块
     for path in "$XMG_LIB_DIR"/*.sh; do
         [ -e "$path" ] || continue
+
         file="${path##*/}"
         xmg_menu_add_module_if_valid "$file"
     done
@@ -192,6 +219,12 @@ xmg_menu_open_module_by_index() {
     local idx="$1"
     local file=""
     local fn=""
+
+    if [[ ! "$idx" =~ ^[0-9]+$ ]]; then
+        xmg_warn "无效模块索引"
+        xmg_pause
+        return 1
+    fi
 
     if [ "$idx" -lt 0 ] || [ "$idx" -ge "${#XMG_MENU_FILES[@]}" ]; then
         xmg_warn "无效模块索引"
@@ -303,3 +336,4 @@ xmg_menu_loop() {
         esac
     done
 }
+``
