@@ -1,184 +1,158 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash**# common.sh 是 Bash 库文件，明确拒绝非 Bash**主
+[ -n "${BASH_VERSION:-}" ] || {**   echo "common.sh: requires bash**>&2
+    return 1 2>/dev/null || e**t 1
+}
 
-[ "${XMG_COMMON_SH_LOADED:-0}" = "1" ] && return 0
+# 既兼容 source，也兼容被直接执行
+if [**${XMG_COMMON_SH_LOADED:-0}" = "1"**; then
+    return 0 2>/dev/null |**exit 0
+fi
 XMG_COMMON_SH_LOADED=1
+**MG_ETC_DIR="${XMG_ETC_DIR:-/etc/x**}"
+XMG_RUN_DIR="${XMG_RUN_DIR:-/r**/xmg}"
+XMG_LOG_DIR="${XMG_LOG_DIR**/var/log/xmg}"
+XMG_BACKUP_DIR="${**G_BACKUP_DIR:-/var/backups/xmg}"
+**G******IR="${X**_WWW_DIR:-***r/www/xmg**
+XMG_COLOR="${X****OLOR:-auto}"
 
-XMG_ETC_DIR="${XMG_ETC_DIR:-/etc/xmg}"
-XMG_RUN_DIR="${XMG_RUN_DIR:-/run/xmg}"
-XMG_LOG_DIR="${XMG_LOG_DIR:-/var/log/xmg}"
-XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-/var/backups/xmg}"
-XMG_WWW_DIR="${XMG_WWW_DIR:-/var/www/xmg}"
-XMG_COLOR="${XMG_COLOR:-auto}"
+**颜色转义序**存变量（初始化***引用，避免**径反复做**替**
+X**_C_RESET=""
+XMG****OLD=""
+XMG**_RED=""
+XMG_C**REEN=""
+XMG_C****LOW=""
+XMG**_CYAN=""
 
-xmg_has_tty() {
-    [ -t 1 ]
+x****as_tty()**
+    [ -t **]
 }
 
-xmg_color_enabled() {
-    case "$XMG_COLOR" in
-        always) return 0 ;;
-        never) return 1 ;;
-        auto) xmg_has_tty ;;
-        *) xmg_has_tty ;;
-    esac
-}
-
-# ===== 替换原有的 xmg_c / xmg_reset，新增颜色缓存 =====
-# 位置：在 XMG_COLOR 变量定义之后，xmg_info 函数之前
-
-# 颜色转义序列缓存变量（初始化后直接引用，避免 $() fork）
-XMG_C_RESET=""
-XMG_C_BOLD=""
-XMG_C_RED=""
-XMG_C_GREEN=""
-XMG_C_YELLOW=""
-XMG_C_CYAN=""
-
-xmg_color_init() {
-    # 初始化颜色缓存，只在启动时调用一次
-    if xmg_color_enabled; then
-        XMG_C_RESET=$'\033[0m'
-        XMG_C_BOLD=$'\033[1m'
-        XMG_C_RED=$'\033[31m'
-        XMG_C_GREEN=$'\033[32m'
-        XMG_C_YELLOW=$'\033[33m'
-        XMG_C_CYAN=$'\033[36m'
+**g_color**nabled() {
+    case**$**G_COLOR" in**       always) return** ;;
+        never***return 1**;
+        auto)   x**_has_tty ;;
+**     **)      xmg_has**ty ;;
+    esac***
+xmg_color_init** {
+    #**动时初始化一次颜色****免***里**用 $(...)
+    if xmg_color_enabled**then
+        X**_C_RESET=$'\033**m'
+       **MG_C_BOLD****033****
+**     **MG_C_RED=$'\033**1m'
+        X****_GREEN=$'\033[32m'
+       ****_C_YELLOW=$**033[33m****      XMG_C_C**N=$'\033[**m'
     else
-        XMG_C_RESET=""
-        XMG_C_BOLD=""
-        XMG_C_RED=""
+**     **MG_C_RESET**"
+**      XMG_C_BOLD=""
+        XMG_C**ED=""
         XMG_C_GREEN=""
-        XMG_C_YELLOW=""
-        XMG_C_CYAN=""
+    **  XMG_C_YELLOW=""
+        XMG_C_C**N=""
     fi
-}
-
-# 保留原函数供非热路径使用（如 install.sh 等一次性脚本）
-xmg_c() {
-    local code="$1"
-    if xmg_color_enabled; then
-        printf '\033[%sm' "$code"
-    fi
+**
+# 保留这**兼容函数，供******次性脚本使用
+xmg_c** {
+    local**ode="$1"
+   **f xmg_color_enabled***hen
+       **rintf**\033[%sm' "$code"
+**  fi
 }
 
 xmg_reset() {
-    if xmg_color_enabled; then
-        printf '\033[0m'
+   **f**mg_color_enabled;**hen
+        printf**\033[0**
     fi
 }
 
-# 优化后的日志函数，使用缓存变量避免 $() fork
-xmg_info() {
-    printf '%s[INFO]%s %s\n' "$XMG_C_GREEN" "$XMG_C_RESET" "$*"
+#***控制台提示接口：这是公共 API，不是“日志系统”
+**必须保持稳定**其他模块调用**mg_info()**
+    printf '%s[**FO**s %s\n**"$XMG_C**REEN***$XMG_C_RESET" "$*"
 }
 
-xmg_warn() {
-    printf '%s[WARN]%s %s\n' "$XMG_C_YELLOW" "$XMG_C_RESET" "$*" >&2
-}
+xmg_warn** {
+**  printf '%s[**RN]%s %s****"$XMG_C**ELLOW" "$XMG**_RESET" "$*"**&**}
 
-xmg_error() {
-    printf '%s[ERROR]%s %s\n' "$XMG_C_RED" "$XMG_C_RESET" "$*" >&2
-}
-
-xmg_info() {
-    printf '%s[INFO]%s %s\n' "$(xmg_c 32)" "$(xmg_reset)" "$*"
-}
-
-xmg_warn() {
-    printf '%s[WARN]%s %s\n' "$(xmg_c 33)" "$(xmg_reset)" "$*" >&2
-}
-
-xmg_error() {
-    printf '%s[ERROR]%s %s\n' "$(xmg_c 31)" "$(xmg_reset)" "$*" >&2
-}
-
-xmg_die() {
+x**_error() {
+    printf**%s[ERROR]%***s\n' "$**G_C_RED"**$XMG_C_RESET"**$*" >&2
+**
+**g_die** {
     xmg_error "$*"
-    exit 1
-}
+    exit **}
 
-xmg_cmd_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+xmg_cmd**xists** {
+    command**v "$1" >/**v/null 2>&1**
 
-xmg_require_bash() {
-    if [ -z "${BASH_VERSION:-}" ]; then
-        echo "错误: 需要 bash 运行" >&2
-        exit 1
+xmg_require**ash** {
+    if** -z "${BASH**ERSION**}" ]; then
+**      echo "错误:**要 bash 运行"**&**        exit**
     fi
+**
+xmg_is_root****
+    [ "${**ID}" -eq ***
 }
 
-xmg_is_root() {
-    [ "${EUID:-$(id -u)}" -eq 0 ]
-}
-
-xmg_require_root() {
-    xmg_is_root || xmg_die "此操作需要 root 权限，请使用 sudo 或 root 用户执行"
+xmg_require_root****
+    xmg_is_root || xmg_die "**作需要 root**限，请使用 sudo 或**oot**户执行"
 }
 
 xmg_mkdirs() {
-    mkdir -p \
-        "$XMG_ETC_DIR" \
-        "$XMG_RUN_DIR" \
-        "$XMG_LOG_DIR" \
-        "$XMG_BACKUP_DIR" \
-        "$XMG_WWW_DIR"
+**  mkdir -p \
+**     **$XMG**T**DIR" \
+        "$XMG**UN**IR" \
+        "$**G_LOG_DIR" \
+**     **$XMG_BACK**_DIR" \
+        "$***_WWW_DIR"
+**
+xmg_pause()**
+**  local dummy=""
+   **rintf '\n按 Enter**回...'
+    read****dummy
 }
 
-xmg_pause() {
-    printf '\n按 Enter 返回...'
-    # shellcheck disable=SC2162
-    read _
+x**_confirm() {
+   **ocal prompt="${1:-确认****"
+    local**ns=""
+
+    printf '%***y/N]: '**$prompt"
+    read -**ans || return *****  case "$ans" in
+        y|Y***s|YES) return** ;;
+        *)          **eturn** ;;
+** **sac
 }
 
-xmg_confirm() {
-    local prompt="${1:-确认继续?}"
-    local ans=""
-
-    printf '%s [y/N]: ' "$prompt"
-    read -r ans || return 1
-
-    case "$ans" in
-        y|Y|yes|YES) return 0 ;;
-        *) return 1 ;;
-    esac
+x**_timestamp() {
+    date '+%Y%m**-%H%M***
 }
 
-xmg_timestamp() {
-    date '+%Y%m%d-%H%M%S'
-}
-
-xmg_backup_file() {
-    local file="$1"
+xmg**ackup**ile() {
+    local file**$**
     local base=""
-    local dst=""
+    local dst=**
+    local ts=""
 
-    [ -e "$file" ] || return 0
-
+    [ -e "$file**] || return **
     xmg_mkdirs
-    base="$(basename "$file")"
-    dst="$XMG_BACKUP_DIR/${base}.$(xmg_timestamp).bak"
 
-    cp -a "$file" "$dst" || return 1
-    xmg_info "已备份: $file -> $dst"
+**  base="$(basename "$file")"
+**  ts="$(xmg_timestamp)"
+    dst="**MG_BACKUP_DIR/${base**${ts}.bak"
+
+**  cp -a "$**le**"$dst" ||**eturn 1
+   **mg_info "已*** $file ->**dst"
 }
 
-xmg_systemctl() {
-    local action="$1"
-    local service="$2"
+x**_systemctl() {
+   **ocal**ction="$1"
+   **ocal service="$2"
 
-    xmg_require_root
-
-    if ! xmg_cmd_exists systemctl; then
-        xmg_die "当前系统未发现 systemctl，可能不是 systemd 系统"
-    fi
-
-    case "$action" in
-        start|stop|restart|reload|enable|disable|status|is-active|is-enabled)
-            systemctl "$action" "$service"
+   **mg_require_root**   **f ! xmg_cmd**xists systemctl; then**       xmg_die "**系统未发现**ystem**l，可能不是 system**系统"
+    fi****  case "$action**in
+        start|**op**estart|reload|**able|disable|status|**-active|is-enabled)
+**         **ystemctl "$action"**$service"
             ;;
-        *)
-            xmg_die "非法 systemctl 操作: $action"
-            ;;
-    esac
+       **)
+**          xmg_die "** systemctl 操作:**action"
+           **;
+**  esac
 }
+****
