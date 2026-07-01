@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# 必须在 set -o pipefail 前检查 bash
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "错误: 需要使用 bash 运行 install.sh" >&2
+    exit 1
+fi
+
 set -Eeuo pipefail
 
 XMG_BASE_URL="${XMG_BASE_URL:-https://raw.githubusercontent.com/AVA-2568/xmg/main}"
@@ -55,7 +62,7 @@ install_dirs() {
         /run/xmg \
         /var/log/xmg \
         /var/backups/xmg \
-        /var/www/xmg/site
+        /var/www/xmg
 }
 
 install_local() {
@@ -83,22 +90,27 @@ download_file() {
     local tmp=""
 
     cmd_exists curl || die "curl 不存在，请先安装 curl"
+    cmd_exists install || die "install 命令不存在，请先安装 coreutils"
 
-    tmp="$(mktemp)"
-    [ -n "$tmp" ] || die "创建临时文件失败"
+    tmp="$(mktemp)" || die "创建临时文件失败"
+
+    # 确保异常退出也清理
+    cleanup_tmp() {
+        [ -n "${tmp:-}" ] && [ -e "$tmp" ] && rm -f "$tmp"
+    }
+    trap cleanup_tmp RETURN
 
     if ! curl -fsSL "$url" -o "$tmp"; then
-        rm -f "$tmp"
         die "下载失败: $url"
     fi
 
     if [ ! -s "$tmp" ]; then
-        rm -f "$tmp"
         die "下载结果为空: $url"
     fi
 
-    install -m "$mode" -o root -g root "$tmp" "$dst"
-    rm -f "$tmp"
+    if ! install -m "$mode" -o root -g root "$tmp" "$dst"; then
+        die "安装文件失败: $dst"
+    fi
 }
 
 install_remote() {
