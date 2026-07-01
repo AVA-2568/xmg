@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+
+# 必须在 set -o pipefail 前检查是否为 bash
+if [ -z "${BASH_VERSION:-}" ]; then
+    echo "错误: 需要使用 bash 运行 xmg" >&2
+    exit 1
+fi
+
 set -Eeuo pipefail
 
 XMG_VERSION="1.5.0"
@@ -9,6 +16,20 @@ if [ ! -d "$XMG_LIB_DIR" ]; then
     echo "源码目录运行示例: XMG_LIB_DIR=./lib ./xmg" >&2
     exit 1
 fi
+
+xmg_require_core_file() {
+    local f="$1"
+    if [ ! -r "$XMG_LIB_DIR/$f" ]; then
+        echo "错误: 缺少核心模块: $XMG_LIB_DIR/$f" >&2
+        exit 1
+    fi
+}
+
+# 入口只检查自己直接依赖的核心模块
+xmg_require_core_file common.sh
+xmg_require_core_file system.sh
+xmg_require_core_file menu.sh
+xmg_require_core_file monitor.sh
 
 # shellcheck source=/usr/local/lib/xmg/common.sh
 source "$XMG_LIB_DIR/common.sh"
