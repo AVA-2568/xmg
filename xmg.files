@@ -1,0 +1,11 @@
+xmg
+lib/common.sh
+lib/system.sh
+lib/monitor.sh
+lib/menu.sh
+lib/caddy.sh
+lib/xray.sh
+lib/site.sh
+lib/firewall.sh
+lib/update.sh
+lib/uninstall.sh
