@@ -19,13 +19,14 @@ fi
 
 xmg_require_core_file() {
     local f="$1"
+
     if [ ! -r "$XMG_LIB_DIR/$f" ]; then
         echo "错误: 缺少核心模块: $XMG_LIB_DIR/$f" >&2
         exit 1
     fi
 }
 
-# 入口只检查自己直接依赖的核心模块
+# 入口层只检查自己直接依赖的核心模块
 xmg_require_core_file common.sh
 xmg_require_core_file system.sh
 xmg_require_core_file menu.sh
@@ -61,17 +62,17 @@ XMG $XMG_VERSION
   q                   退出
 
 环境变量:
-  XMG_LIB_DIR         库目录，默认 /usr/local/lib/xmg
-  XMG_CACHE_TTL       基础系统状态缓存秒数，默认 3
-  XMG_SERVICE_TTL     服务状态缓存秒数，默认 5
-  XMG_MONITOR_INTERVAL UI刷新间隔，默认 1
-  XMG_COLOR           auto/always/never，默认 auto
+  XMG_LIB_DIR          库目录，默认 /usr/local/lib/xmg
+  XMG_CACHE_TTL        基础系统状态缓存秒数，默认 3
+  XMG_SERVICE_TTL      服务状态缓存秒数，默认 5
+  XMG_MONITOR_INTERVAL UI 刷新间隔，默认 3
+  XMG_COLOR            auto/always/never，默认 auto
+  XMG_XRAY_SERVICE     Xray 服务名，默认 xray
+  XMG_CADDY_SERVICE    Caddy 服务名，默认 caddy
 EOF
 }
 
 xmg_main() {
-    xmg_require_bash
-
     case "${1:-monitor}" in
         monitor)
             xmg_monitor_loop
