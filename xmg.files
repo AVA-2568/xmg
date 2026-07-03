@@ -7,5 +7,6 @@ lib/caddy.sh
 lib/xray.sh
 lib/site.sh
 lib/firewall.sh
+ib/third-party.sh
 lib/update.sh
 lib/uninstall.sh
