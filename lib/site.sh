@@ -7,8 +7,9 @@
 # 说明：
 #   - 本模块只管理站点文件目录
 #   - 本模块不创建、不编辑、不校验 Caddyfile
-#   - 默认站点目录由 XMG_WWW_DIR 控制，通常为 /var/www/xmg
+#   - 默认站点目录由 XMG_WWW_DIR 控制，通常为 /opt/xmg/www
 #   - 文件内容应使用 UTF-8 编码保存
+#   - 所有 XMG 管理的文件集中放在 /opt/xmg 下
 #
 
 # site.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
@@ -23,23 +24,29 @@ if [ "${XMG_SITE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_SITE_SH_LOADED=1
 
-# 路径安全检查：
+# ===== 路径安全检查 =====
 # 只允许操作 XMG_WWW_DIR 本身或其子路径，并拒绝常见危险路径。
 xmg_site_safe_path() {
     local path="$1"
 
+    # 拒绝系统级危险路径和 XMG 根目录
     case "$path" in
         ""|"/"|"/usr"|"/usr/local"|"/etc"|"/var"|"/var/www"|"/var/log"|"/var/backups"|"/home"|"/home/"*)
             xmg_die "拒绝操作危险路径: $path"
             ;;
+        "/opt"|"/opt/xmg")
+            xmg_die "拒绝操作 XMG 根目录: $path"
+            ;;
     esac
 
+    # 拒绝路径穿越
     case "$path" in
         *"/../"*|*"/.."|".."|"../"*)
             xmg_die "拒绝包含路径穿越的路径: $path"
             ;;
     esac
 
+    # 确认路径在站点目录下
     case "$path" in
         "$XMG_WWW_DIR"|"$XMG_WWW_DIR"/*)
             return 0
@@ -56,6 +63,7 @@ xmg_site_need_git() {
     fi
 }
 
+# 准备站点目录，由 xmg_mkdirs 统一创建 /opt/xmg 目录结构
 xmg_site_prepare_www() {
     xmg_require_root
     xmg_mkdirs
@@ -188,6 +196,8 @@ xmg_site_pull_from_github() {
     fi
     shopt -u dotglob nullglob
 
+    # 设置站点文件权限
+    # 如果系统中存在 caddy 用户，将站点目录归属给 caddy
     if id caddy >/dev/null 2>&1; then
         chown -R caddy:caddy "$XMG_WWW_DIR" 2>/dev/null || true
     fi
@@ -247,6 +257,8 @@ xmg_site_menu() {
         echo "  - XMG 只管理站点文件目录"
         echo "  - XMG 不创建、不编辑、不校验 Caddyfile"
         echo "  - 拉取站点需要系统已安装 git"
+        echo "  - 站点目录: $XMG_WWW_DIR"
+        echo "  - 备份目录: $XMG_BACKUP_DIR"
         echo
         printf "请选择: "
 
@@ -279,3 +291,8 @@ xmg_site_menu() {
         esac
     done
 }
+
+# ===== 直接执行支持 =====
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    xmg_site_menu
+fi
