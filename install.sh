@@ -78,14 +78,30 @@ manifest_local_path() {
 }
 
 install_dirs() {
+    # 创建统一目录结构，mkdir -p 可以重复执行，保证安装脚本幂等
     mkdir -p \
-        "$(dirname "$XMG_BIN")" \
+        "$XMG_BIN_DIR" \
         "$XMG_LIB_DIR" \
-        /etc/xmg \
-        /run/xmg \
-        /var/log/xmg \
-        /var/backups/xmg \
-        /var/www/xmg
+        "$XMG_ETC_DIR" \
+        "$XMG_RUN_DIR" \
+        "$XMG_LOG_DIR" \
+        "$XMG_BACKUP_DIR" \
+        "$XMG_WWW_DIR" \
+        "$XMG_CADDY_DIR" \
+        "$XMG_XRAY_DIR" \
+        "$(dirname "$XMG_LINK")"
+
+    # 设置基础权限，避免普通用户误写核心目录
+    chmod 755 "$XMG_HOME" \
+        "$XMG_BIN_DIR" \
+        "$XMG_LIB_DIR" \
+        "$XMG_ETC_DIR" \
+        "$XMG_RUN_DIR" \
+        "$XMG_LOG_DIR" \
+        "$XMG_BACKUP_DIR" \
+        "$XMG_WWW_DIR" \
+        "$XMG_CADDY_DIR" \
+        "$XMG_XRAY_DIR"
 }
 
 manifest_entry_validate() {
