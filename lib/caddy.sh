@@ -10,6 +10,7 @@
 #   - 默认不执行 apt-get update，避免被第三方 APT 源阻塞
 #   - APT 安装失败后，自动回退到 Caddy 官方二进制安装
 #   - 所有 XMG 管理的 Caddy 文件集中放在 /opt/xmg/caddy 下
+#   - 安装后自动修补 systemd unit，使 ExecStart 指向 /opt/xmg/caddy/Caddyfile
 #
 
 # ===== 安全加载 =====
@@ -365,6 +366,88 @@ EOF
     return 0
 }
 
+# ===== 自动修补已有 Caddy systemd unit 的 ExecStart =====
+# 如果用户之前通过 apt 安装的 Caddy，其 systemd unit 可能仍指向 /etc/caddy/Caddyfile
+# 这个函数会自动将其改为指向 XMG 统一 Caddyfile 路径
+xmg_caddy_patch_existing_systemd_unit() {
+    local caddy_unit=""
+    local unit_found=0
+
+    # 查找 Caddy 的 systemd unit 文件
+    for path in "/etc/systemd/system/caddy.service" "/lib/systemd/system/caddy.service" "/usr/lib/systemd/system/caddy.service"; do
+        if [ -f "$path" ]; then
+            caddy_unit="$path"
+            unit_found=1
+            break
+        fi
+    done
+
+    if [ "$unit_found" -ne 1 ]; then
+        # 没有现有 unit，说明是二进制安装自己创建的 unit，已经使用了正确路径
+        return 0
+    fi
+
+    xmg_info "检测到 Caddy systemd unit: $caddy_unit"
+
+    # 检查当前 ExecStart 是否已经指向 XMG 统一 Caddyfile 路径
+    if grep -q "$XMG_CADDYFILE" "$caddy_unit" 2>/dev/null; then
+        xmg_info "ExecStart 已指向 XMG 统一配置路径，无需修改"
+        return 0
+    fi
+
+    # 备份原始 unit 文件
+    local backup_unit="${caddy_unit}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$caddy_unit" "$backup_unit" && xmg_info "已备份原始 unit 到: $backup_unit" || {
+        xmg_warn "备份 systemd unit 失败，跳过修改"
+        return 1
+    }
+
+    # 修改 ExecStart 行，将 --config 后面的路径替换为 XMG 统一 Caddyfile 路径
+    sed -i 's|--config /[^ ]*Caddyfile|--config '"$XMG_CADDYFILE"'|g' "$caddy_unit"
+
+    # 验证修改是否成功
+    if grep -q "$XMG_CADDYFILE" "$caddy_unit" 2>/dev/null; then
+        xmg_info "systemd unit 已更新，ExecStart 指向: $XMG_CADDYFILE"
+    else
+        xmg_warn "systemd unit 修改失败，已恢复原始文件"
+        cp "$backup_unit" "$caddy_unit" 2>/dev/null || true
+        return 1
+    fi
+
+    # 重载 systemd 配置
+    systemctl daemon-reload >/dev/null 2>&1 || true
+
+    return 0
+}
+
+# ===== 恢复 Caddy systemd unit 备份 =====
+xmg_caddy_restore_systemd_unit() {
+    local caddy_unit=""
+
+    for path in "/etc/systemd/system/caddy.service" "/lib/systemd/system/caddy.service" "/usr/lib/systemd/system/caddy.service"; do
+        if [ -f "$path" ]; then
+            caddy_unit="$path"
+            break
+        fi
+    done
+
+    if [ -z "$caddy_unit" ]; then
+        xmg_warn "未找到 Caddy systemd unit"
+        return 1
+    fi
+
+    local backup_file=""
+    backup_file=$(ls -t "${caddy_unit}.xmg-backup."* 2>/dev/null | head -1)
+
+    if [ -z "$backup_file" ]; then
+        xmg_warn "未找到 systemd unit 的备份文件"
+        return 1
+    fi
+
+    cp "$backup_file" "$caddy_unit" && xmg_info "已恢复 systemd unit 备份: $backup_file"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+}
+
 # ===== 官方二进制安装：完全不依赖 apt update =====
 
 xmg_caddy_install_by_binary() {
@@ -508,6 +591,9 @@ xmg_caddy_install_update() {
     else
         xmg_warn "无法获取 Caddy 版本，但 caddy 命令已存在"
     fi
+
+    # 自动修补已存在的 Caddy systemd unit，使其 ExecStart 指向 XMG 统一 Caddyfile
+    xmg_caddy_patch_existing_systemd_unit
 
     if xmg_caddy_is_systemd_available; then
         systemctl daemon-reload >/dev/null 2>&1 || true
@@ -751,6 +837,18 @@ xmg_caddy_diag() {
     fi
 
     echo
+    echo "[systemd unit 路径检测]"
+    local unit_found=0
+    for path in "/etc/systemd/system/caddy.service" "/lib/systemd/system/caddy.service" "/usr/lib/systemd/system/caddy.service"; do
+        if [ -f "$path" ]; then
+            echo "存在: $path"
+            echo "  ExecStart: $(grep 'ExecStart=' "$path" | head -1)"
+            unit_found=1
+        fi
+    done
+    [ "$unit_found" -eq 0 ] && echo "未找到 systemd unit"
+
+    echo
     echo "[systemd 服务状态]"
     if xmg_caddy_is_systemd_available; then
         systemctl status "$XMG_CADDY_SERVICE" --no-pager || true
@@ -785,6 +883,7 @@ xmg_caddy_menu() {
         echo "8. 校验 Caddyfile"
         echo "9. 安装诊断"
         echo "10. 强制使用官方二进制安装"
+        echo "11. 恢复 systemd unit 备份"
         echo "0. 返回"
         echo
         echo "说明:"
@@ -842,6 +941,10 @@ xmg_caddy_menu() {
             10)
                 XMG_CADDY_INSTALL_MODE="binary"
                 xmg_caddy_install_update
+                xmg_pause
+                ;;
+            11)
+                xmg_caddy_restore_systemd_unit
                 xmg_pause
                 ;;
             0)
