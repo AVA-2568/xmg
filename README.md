@@ -4,13 +4,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AVA-2568/xmg/main/install.sh
 
 
 ```
-/opt/xmg/                  程序目录
-/usr/local/bin/xmg         命令入口
-/etc/xmg/                  xmg 配置和备份目录
-/etc/xmg/backup/           配置备份目录
-/var/www/mask-site/        默认站点目录
-/etc/caddy/Caddyfile       Caddy 配置
-/usr/local/etc/xray/config.json  Xray 配置
+/opt/xmg/                  目录
 ```
 
 ```
