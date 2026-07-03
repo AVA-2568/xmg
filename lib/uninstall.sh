@@ -5,17 +5,11 @@
 # uninstall.sh - XMG 卸载模块
 #
 # 说明：
-#   - 本卸载器只删除 XMG 自身文件
-#   - 不卸载 xray、caddy、ufw
-#   - 默认不使用 XMG_LIB_DIR，避免源码目录测试时误删 ./lib
-#   - 文件内容应使用 UTF-8 编码保存
+#   - 卸载 XMG 及其管理的组件
+#   - 删除 XMG 统一目录 /opt/xmg
+#   - 删除命令入口软链接 /usr/local/bin/xmg
+#   - 可选择是否清理 Caddy 和 Xray 的配置
 #
-
-# uninstall.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
-if [ -z "${BASH_VERSION:-}" ]; then
-    echo "uninstall.sh: requires bash" >&2
-    return 1 2>/dev/null || exit 1
-fi
 
 # ===== 安全加载 =====
 if [ "${XMG_UNINSTALL_SH_LOADED:-0}" = "1" ]; then
@@ -23,195 +17,265 @@ if [ "${XMG_UNINSTALL_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_UNINSTALL_SH_LOADED=1
 
-# 注意：
-# 不默认使用 XMG_LIB_DIR，避免源码目录测试时：
-#   XMG_LIB_DIR=./lib ./xmg menu
-# 误删当前源码 lib。
-XMG_BIN_PATH="${XMG_BIN_PATH:-/usr/local/bin/xmg}"
-XMG_LIB_INSTALL_DIR="${XMG_LIB_INSTALL_DIR:-/usr/local/lib/xmg}"
+# ===== 默认配置 =====
+XMG_UNINSTALL_KEEP_CADDY="${XMG_UNINSTALL_KEEP_CADDY:-0}"
+XMG_UNINSTALL_KEEP_XRAY="${XMG_UNINSTALL_KEEP_XRAY:-0}"
+XMG_UNINSTALL_KEEP_BACKUPS="${XMG_UNINSTALL_KEEP_BACKUPS:-0}"
 
-XMG_UNINSTALL_DONE=0
+# ===== 服务停止 =====
 
-xmg_uninstall_require_absolute() {
-    local path="$1"
+xmg_uninstall_stop_services() {
+    xmg_info "停止 XMG 托管的服务..."
 
-    case "$path" in
-        /*)
-            return 0
-            ;;
-        *)
-            xmg_die "拒绝操作非绝对路径: $path"
-            ;;
-    esac
+    # 停止 Caddy 服务（如果存在）
+    if command -v systemctl &>/dev/null; then
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+            xmg_info "正在停止 Caddy 服务..."
+            systemctl stop caddy || xmg_warn "停止 Caddy 服务失败"
+        fi
+
+        # 停止 Xray 服务（如果存在）
+        if systemctl is-active --quiet xray 2>/dev/null; then
+            xmg_info "正在停止 Xray 服务..."
+            systemctl stop xray || xmg_warn "停止 Xray 服务失败"
+        fi
+
+        # 禁用自启
+        if systemctl is-enabled --quiet caddy 2>/dev/null; then
+            systemctl disable caddy || xmg_warn "禁用 Caddy 自启失败"
+        fi
+        if systemctl is-enabled --quiet xray 2>/dev/null; then
+            systemctl disable xray || xmg_warn "禁用 Xray 自启失败"
+        fi
+    fi
+
+    xmg_info "服务已停止"
 }
 
-xmg_uninstall_reject_path_traversal() {
-    local path="$1"
+# ===== 文件清理 =====
 
-    case "$path" in
-        *"/../"*|*"/.."|".."|"../"*)
-            xmg_die "拒绝包含路径穿越的路径: $path"
-            ;;
-    esac
-}
-
-xmg_uninstall_reject_dangerous_path() {
-    local path="$1"
-
-    case "$path" in
-        ""|"/"|"/bin"|"/sbin"|"/lib"|"/lib64"|"/usr"|"/usr/bin"|"/usr/sbin"|"/usr/local"|"/etc"|"/var"|"/var/www"|"/var/log"|"/var/backups"|"/run"|"/tmp"|"/home"|"/home/"*)
-            xmg_die "拒绝删除危险路径: $path"
-            ;;
-    esac
-}
-
-xmg_uninstall_validate_path() {
-    local path="$1"
-
-    xmg_uninstall_require_absolute "$path"
-    xmg_uninstall_reject_path_traversal "$path"
-    xmg_uninstall_reject_dangerous_path "$path"
-}
-
-xmg_uninstall_safe_rm_rf() {
-    local path="$1"
-
-    xmg_uninstall_validate_path "$path"
-
-    if [ -e "$path" ] || [ -L "$path" ]; then
-        rm -rf --one-file-system -- "$path" || xmg_die "删除失败: $path"
-        xmg_info "已删除: $path"
+xmg_uninstall_remove_command_link() {
+    # 删除命令入口软链接 /usr/local/bin/xmg
+    if [ -L "$XMG_LINK" ] || [ -e "$XMG_LINK" ]; then
+        rm -f "$XMG_LINK" && xmg_info "已删除命令入口: $XMG_LINK" || xmg_warn "删除命令入口失败: $XMG_LINK"
     else
-        xmg_warn "不存在，跳过: $path"
+        xmg_info "命令入口不存在，跳过: $XMG_LINK"
     fi
 }
 
-xmg_uninstall_safe_rm_f() {
-    local path="$1"
-
-    xmg_uninstall_validate_path "$path"
-
-    if [ -d "$path" ] && [ ! -L "$path" ]; then
-        xmg_die "目标是目录，拒绝按文件删除: $path"
-    fi
-
-    if [ -e "$path" ] || [ -L "$path" ]; then
-        rm -f -- "$path" || xmg_die "删除失败: $path"
-        xmg_info "已删除: $path"
+xmg_uninstall_remove_xmg_home() {
+    # 删除 XMG 统一根目录 /opt/xmg
+    if [ -d "$XMG_HOME" ]; then
+        xmg_info "正在删除 XMG 统一目录: $XMG_HOME"
+        rm -rf "$XMG_HOME" && xmg_info "已删除: $XMG_HOME" || xmg_warn "删除 $XMG_HOME 失败，请手动检查"
     else
-        xmg_warn "不存在，跳过: $path"
+        xmg_info "$XMG_HOME 不存在，跳过"
     fi
 }
 
-xmg_uninstall_print_program_only_plan() {
-    clear
-    echo "XMG 卸载：仅删除程序文件"
-    echo "========================="
-    echo
-    echo "将删除:"
-    echo "  $XMG_BIN_PATH"
-    echo "  $XMG_LIB_INSTALL_DIR"
-    echo
-    echo "不会删除:"
-    echo "  $XMG_ETC_DIR"
-    echo "  $XMG_RUN_DIR"
-    echo "  $XMG_WWW_DIR"
-    echo "  $XMG_LOG_DIR"
-    echo "  $XMG_BACKUP_DIR"
-    echo
-    echo "不会卸载:"
-    echo "  xray"
-    echo "  caddy"
-    echo "  ufw"
-    echo
-}
-
-xmg_uninstall_print_all_plan() {
-    clear
-    echo "XMG 卸载：删除程序和 XMG 数据"
-    echo "============================"
-    echo
-    echo "将删除:"
-    echo "  $XMG_BIN_PATH"
-    echo "  $XMG_LIB_INSTALL_DIR"
-    echo "  $XMG_ETC_DIR"
-    echo "  $XMG_RUN_DIR"
-    echo "  $XMG_WWW_DIR"
-    echo "  $XMG_LOG_DIR"
-    echo "  $XMG_BACKUP_DIR"
-    echo
-    echo "不会卸载:"
-    echo "  xray"
-    echo "  caddy"
-    echo "  ufw"
-    echo
-}
-
-xmg_uninstall_program_only() {
-    xmg_require_root
-    XMG_UNINSTALL_DONE=0
-
-    xmg_uninstall_print_program_only_plan
-
-    if ! xmg_confirm "确认仅删除 XMG 程序文件?"; then
-        xmg_info "已取消"
+xmg_uninstall_cleanup_caddy() {
+    # 清理 Caddy 系统级配置（仅当用户确认时）
+    if [ "$XMG_UNINSTALL_KEEP_CADDY" = "1" ]; then
+        xmg_info "保留 Caddy 配置，跳过清理"
         return 0
     fi
 
-    xmg_uninstall_safe_rm_f "$XMG_BIN_PATH"
-    xmg_uninstall_safe_rm_rf "$XMG_LIB_INSTALL_DIR"
+    local caddy_etc="/etc/caddy"
+    local caddy_unit=""
+    local caddy_keyring="/usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+    local caddy_apt_source="/etc/apt/sources.list.d/caddy-stable.list"
 
-    XMG_UNINSTALL_DONE=1
-    xmg_info "XMG 程序文件已卸载"
-}
+    # 查找 systemd unit
+    for path in "/etc/systemd/system/caddy.service" "/lib/systemd/system/caddy.service" "/usr/lib/systemd/system/caddy.service"; do
+        if [ -f "$path" ]; then
+            caddy_unit="$path"
+            break
+        fi
+    done
 
-xmg_uninstall_all() {
-    xmg_require_root
-    XMG_UNINSTALL_DONE=0
-
-    xmg_uninstall_print_all_plan
-
-    if ! xmg_confirm "确认删除 XMG 程序和 XMG 数据?"; then
-        xmg_info "已取消"
+    if [ -z "$caddy_unit" ] && [ ! -d "$caddy_etc" ] && [ ! -f "$caddy_keyring" ] && [ ! -f "$caddy_apt_source" ]; then
+        xmg_info "未检测到 Caddy 系统级配置，跳过"
         return 0
     fi
 
-    xmg_uninstall_safe_rm_f "$XMG_BIN_PATH"
-    xmg_uninstall_safe_rm_rf "$XMG_LIB_INSTALL_DIR"
-    xmg_uninstall_safe_rm_rf "$XMG_ETC_DIR"
-    xmg_uninstall_safe_rm_rf "$XMG_RUN_DIR"
-    xmg_uninstall_safe_rm_rf "$XMG_WWW_DIR"
-    xmg_uninstall_safe_rm_rf "$XMG_LOG_DIR"
-    xmg_uninstall_safe_rm_rf "$XMG_BACKUP_DIR"
+    xmg_warn "检测到 Caddy 系统级配置："
+    [ -f "$caddy_unit" ] && xmg_warn "  systemd unit: $caddy_unit"
+    [ -d "$caddy_etc" ] && xmg_warn "  /etc/caddy 目录"
+    [ -f "$caddy_keyring" ] && xmg_warn "  APT keyring: $caddy_keyring"
+    [ -f "$caddy_apt_source" ] && xmg_warn "  APT 源: $caddy_apt_source"
 
-    XMG_UNINSTALL_DONE=1
-    xmg_info "XMG 程序和数据已卸载"
-}
+    if xmg_confirm "是否清理 Caddy 系统级配置？这不会影响系统中已安装的 Caddy 二进制"; then
+        if [ -n "$caddy_unit" ]; then
+            rm -f "$caddy_unit" && xmg_info "已删除: $caddy_unit"
+        fi
+        if [ -d "$caddy_etc" ]; then
+            rm -rf "$caddy_etc" && xmg_info "已删除: $caddy_etc"
+        fi
+        if [ -f "$caddy_keyring" ]; then
+            rm -f "$caddy_keyring" && xmg_info "已删除: $caddy_keyring"
+        fi
+        if [ -f "$caddy_apt_source" ]; then
+            rm -f "$caddy_apt_source" && xmg_info "已删除: $caddy_apt_source"
+        fi
 
-xmg_uninstall_after_done() {
-    if [ "${XMG_UNINSTALL_DONE:-0}" = "1" ]; then
-        echo
-        xmg_warn "XMG 文件已被删除，建议退出当前 XMG 会话"
-        xmg_pause
-        clear
-        exit 0
+        if command -v systemctl &>/dev/null; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+
+        xmg_info "Caddy 系统级配置已清理"
+    else
+        xmg_info "保留 Caddy 系统级配置"
     fi
 }
+
+xmg_uninstall_cleanup_xray() {
+    # 清理 Xray 系统级配置（仅当用户确认时）
+    if [ "$XMG_UNINSTALL_KEEP_XRAY" = "1" ]; then
+        xmg_info "保留 Xray 配置，跳过清理"
+        return 0
+    fi
+
+    local xray_etc="/usr/local/etc/xray"
+    local xray_unit=""
+
+    # 查找 systemd unit
+    for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
+        if [ -f "$path" ]; then
+            xray_unit="$path"
+            break
+        fi
+    done
+
+    if [ -z "$xray_unit" ] && [ ! -d "$xray_etc" ]; then
+        xmg_info "未检测到 Xray 系统级配置，跳过"
+        return 0
+    fi
+
+    xmg_warn "检测到 Xray 系统级配置："
+    [ -f "$xray_unit" ] && xmg_warn "  systemd unit: $xray_unit"
+    [ -d "$xray_etc" ] && xmg_warn "  /usr/local/etc/xray 目录"
+
+    if xmg_confirm "是否清理 Xray 系统级配置？这不会影响系统中已安装的 Xray 二进制"; then
+        if [ -n "$xray_unit" ]; then
+            rm -f "$xray_unit" && xmg_info "已删除: $xray_unit"
+        fi
+        if [ -d "$xray_etc" ]; then
+            rm -rf "$xray_etc" && xmg_info "已删除: $xray_etc"
+        fi
+
+        if command -v systemctl &>/dev/null; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+
+        xmg_info "Xray 系统级配置已清理"
+    else
+        xmg_info "保留 Xray 系统级配置"
+    fi
+}
+
+# ===== 卸载主流程 =====
+
+xmg_uninstall_run() {
+    xmg_require_root
+
+    echo
+    echo "========== XMG 卸载 =========="
+    echo "将执行以下操作："
+    echo "  1. 停止 XMG 托管的服务（Caddy、Xray）"
+    echo "  2. 删除命令入口: $XMG_LINK"
+    echo "  3. 删除 XMG 统一目录: $XMG_HOME"
+    echo "  4. 可选清理 Caddy 系统级配置"
+    echo "  5. 可选清理 Xray 系统级配置"
+    echo
+    echo "以下内容将被删除："
+    echo "  - 主程序: $XMG_BIN"
+    echo "  - 模块: $XMG_LIB_DIR"
+    echo "  - 配置: $XMG_ETC_DIR"
+    echo "  - 日志: $XMG_LOG_DIR"
+    echo "  - 站点: $XMG_WWW_DIR"
+    echo "  - 运行时: $XMG_RUN_DIR"
+    echo "  - 备份: $XMG_BACKUP_DIR"
+    echo "  - Caddy 配置: $XMG_CADDY_DIR"
+    echo "  - Xray 配置: $XMG_XRAY_DIR"
+    echo
+
+    if ! xmg_confirm "确认卸载 XMG？此操作不可撤销"; then
+        xmg_info "已取消卸载"
+        return 0
+    fi
+
+    echo
+
+    # 第一步：停止服务
+    xmg_uninstall_stop_services
+
+    # 第二步：删除命令入口
+    xmg_uninstall_remove_command_link
+
+    # 第三步：删除 XMG 统一目录
+    if [ "$XMG_UNINSTALL_KEEP_BACKUPS" = "1" ]; then
+        xmg_info "保留备份目录: $XMG_BACKUP_DIR"
+        # 先删除除备份外的所有子目录
+        for dir in "$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_WWW_DIR" "$XMG_CADDY_DIR" "$XMG_XRAY_DIR"; do
+            if [ -d "$dir" ]; then
+                rm -rf "$dir" && xmg_info "已删除: $dir" || xmg_warn "删除失败: $dir"
+            fi
+        done
+        xmg_warn "备份目录已保留: $XMG_BACKUP_DIR"
+        xmg_warn "如需手动清理，请执行: sudo rm -rf $XMG_BACKUP_DIR"
+    else
+        xmg_uninstall_remove_xmg_home
+    fi
+
+    # 第四步：可选清理 Caddy 系统级配置
+    echo
+    xmg_uninstall_cleanup_caddy
+
+    # 第五步：可选清理 Xray 系统级配置
+    echo
+    xmg_uninstall_cleanup_xray
+
+    # 完成
+    echo
+    xmg_info "========== XMG 卸载完成 =========="
+    echo
+    xmg_info "已删除的 XMG 自身文件："
+    xmg_info "  $XMG_LINK"
+    xmg_info "  $XMG_HOME"
+    echo
+    xmg_warn "如果系统中仍安装有 Caddy 或 Xray 二进制，它们不会受影响"
+    xmg_warn "如需完全移除 Caddy/Xray，请使用系统的包管理器卸载"
+    echo
+    xmg_warn "如果之前通过包管理器安装了 Caddy:"
+    xmg_warn "  apt-get remove caddy"
+    xmg_warn "  dnf remove caddy"
+    xmg_warn "  yum remove caddy"
+    echo
+    xmg_warn "如果之前通过 Xray 官方脚本安装了 Xray:"
+    xmg_warn "  bash <(curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh) remove"
+}
+
+# ===== 卸载菜单 =====
 
 xmg_uninstall_menu() {
     local choice=""
 
     while true; do
         clear
-        echo "========== XMG 卸载 =========="
-        echo "1. 仅卸载 XMG 程序文件"
-        echo "2. 卸载 XMG 程序文件和 XMG 数据"
+        echo "========== XMG 卸载管理 =========="
+        echo "1. 执行标准卸载"
+        echo "2. 执行卸载（保留备份）"
+        echo "3. 执行卸载（保留备份、保留 Caddy/Xray 配置）"
         echo "0. 返回"
         echo
+        echo "当前目录:"
+        echo "  XMG_HOME: $XMG_HOME"
+        echo "  命令入口: $XMG_LINK"
+        echo
         echo "说明:"
-        echo "  - 本卸载器只删除 XMG 自身文件"
-        echo "  - 不会卸载 xray/caddy/ufw"
-        echo "  - 如果站点或备份仍需保留，请选择 1"
+        echo "  - 卸载会删除 $XMG_HOME 下的所有文件"
+        echo "  - 不会删除系统已安装的 Caddy/Xray 二进制"
+        echo "  - 可选项保留备份目录以备未来恢复参考"
         echo
         printf "请选择: "
 
@@ -219,13 +283,24 @@ xmg_uninstall_menu() {
 
         case "$choice" in
             1)
-                xmg_uninstall_program_only
-                xmg_uninstall_after_done
+                XMG_UNINSTALL_KEEP_BACKUPS=0
+                XMG_UNINSTALL_KEEP_CADDY=0
+                XMG_UNINSTALL_KEEP_XRAY=0
+                xmg_uninstall_run
                 xmg_pause
                 ;;
             2)
-                xmg_uninstall_all
-                xmg_uninstall_after_done
+                XMG_UNINSTALL_KEEP_BACKUPS=1
+                XMG_UNINSTALL_KEEP_CADDY=0
+                XMG_UNINSTALL_KEEP_XRAY=0
+                xmg_uninstall_run
+                xmg_pause
+                ;;
+            3)
+                XMG_UNINSTALL_KEEP_BACKUPS=1
+                XMG_UNINSTALL_KEEP_CADDY=1
+                XMG_UNINSTALL_KEEP_XRAY=1
+                xmg_uninstall_run
                 xmg_pause
                 ;;
             0)
@@ -238,3 +313,8 @@ xmg_uninstall_menu() {
         esac
     done
 }
+
+# ===== 直接执行支持 =====
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    xmg_uninstall_menu
+fi
