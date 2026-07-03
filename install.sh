@@ -23,8 +23,28 @@ set -Eeuo pipefail
 #   https://raw.githubusercontent.com/AVA-2568/XMG/main
 XMG_BASE_URL="${XMG_BASE_URL:-https://raw.githubusercontent.com/AVA-2568/xmg/main}"
 
-XMG_BIN="${XMG_BIN:-/usr/local/bin/xmg}"
-XMG_LIB_DIR="${XMG_LIB_DIR:-/usr/local/lib/xmg}"
+# ============================================================
+# XMG 统一安装目录
+# ============================================================
+# 真实安装目录：/opt/xmg
+# 命令入口：/usr/local/bin/xmg -> /opt/xmg/bin/xmg
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+
+XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
+XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
+XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
+XMG_WWW_DIR="${XMG_WWW_DIR:-$XMG_HOME/www}"
+XMG_CADDY_DIR="${XMG_CADDY_DIR:-$XMG_HOME/caddy}"
+XMG_XRAY_DIR="${XMG_XRAY_DIR:-$XMG_HOME/xray}"
+
+XMG_BIN="${XMG_BIN:-$XMG_BIN_DIR/xmg}"
+XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
+
+XMG_CADDYFILE="${XMG_CADDYFILE:-$XMG_CADDY_DIR/Caddyfile}"
+XMG_XRAY_CONFIG="${XMG_XRAY_CONFIG:-$XMG_XRAY_DIR/config.json}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
