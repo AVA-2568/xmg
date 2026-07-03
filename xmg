@@ -7,7 +7,7 @@
 # 说明：
 #   - 默认启动实时监控界面
 #   - 可通过子命令进入菜单、查看系统摘要、显示版本或帮助
-#   - 文件内容应使用 UTF-8 编码保存
+#   - 所有 XMG 管理的文件默认集中放在 /opt/xmg
 #
 
 # 必须在 set -o pipefail 前检查是否为 bash
@@ -18,13 +18,21 @@ fi
 
 set -Eeuo pipefail
 
+XMG_VERSION="${XMG_VERSION:-1.5.0}"
+
+# ============================================================
+# XMG 统一目录配置
+# ============================================================
 # XMG_HOME 是 XMG 的统一根目录。
 # 默认所有 XMG 管理的文件集中放在 /opt/xmg。
 XMG_HOME="${XMG_HOME:-/opt/xmg}"
+
 # 主程序目录和模块目录
 XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
 XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+
 # 导出路径变量，确保被加载的 lib/*.sh 模块使用同一套目录
+export XMG_VERSION
 export XMG_HOME XMG_BIN_DIR XMG_LIB_DIR
 
 if [ ! -d "$XMG_LIB_DIR" ]; then
@@ -48,17 +56,17 @@ xmg_require_core_file system.sh
 xmg_require_core_file menu.sh
 xmg_require_core_file monitor.sh
 
-# shellcheck source=/usr/local/lib/xmg/common.sh
+# shellcheck source=/dev/null
 source "$XMG_LIB_DIR/common.sh"
 xmg_color_init
 
-# shellcheck source=/usr/local/lib/xmg/system.sh
+# shellcheck source=/dev/null
 source "$XMG_LIB_DIR/system.sh"
 
-# shellcheck source=/usr/local/lib/xmg/menu.sh
+# shellcheck source=/dev/null
 source "$XMG_LIB_DIR/menu.sh"
 
-# shellcheck source=/usr/local/lib/xmg/monitor.sh
+# shellcheck source=/dev/null
 source "$XMG_LIB_DIR/monitor.sh"
 
 xmg_usage() {
