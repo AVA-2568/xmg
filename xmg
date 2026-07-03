@@ -78,7 +78,8 @@ XMG $XMG_VERSION
   q                   退出
 
 环境变量:
-  XMG_LIB_DIR          库目录，默认 /usr/local/lib/xmg
+  XMG_HOME             XMG 统一根目录，默认 /opt/xmg
+  XMG_LIB_DIR          模块目录，默认 /opt/xmg/lib
   XMG_CACHE_TTL        基础系统状态缓存秒数，默认 3
   XMG_SERVICE_TTL      服务状态缓存秒数，默认 5
   XMG_MONITOR_INTERVAL UI 刷新间隔，默认 3
