@@ -9,6 +9,7 @@
 #   - 本模块不创建、不编辑、不修改 Caddyfile
 #   - 默认不执行 apt-get update，避免被第三方 APT 源阻塞
 #   - APT 安装失败后，自动回退到 Caddy 官方二进制安装
+#   - 所有 XMG 管理的 Caddy 文件集中放在 /opt/xmg/caddy 下
 #
 
 # ===== 安全加载 =====
@@ -38,6 +39,28 @@ XMG_CADDY_BINARY_INSTALL_PATH="${XMG_CADDY_BINARY_INSTALL_PATH:-/usr/local/bin/c
 
 # Caddy 官方下载 API。
 XMG_CADDY_DOWNLOAD_BASE_URL="${XMG_CADDY_DOWNLOAD_BASE_URL:-https://caddyserver.com/api/download}"
+
+# ===== 依赖 common.sh 的路径变量 =====
+# 如果 common.sh 尚未加载，则设置默认值
+if [ -z "${XMG_HOME:-}" ]; then
+    XMG_HOME="${XMG_HOME:-/opt/xmg}"
+fi
+if [ -z "${XMG_CADDY_DIR:-}" ]; then
+    XMG_CADDY_DIR="${XMG_CADDY_DIR:-$XMG_HOME/caddy}"
+fi
+if [ -z "${XMG_CADDYFILE:-}" ]; then
+    XMG_CADDYFILE="${XMG_CADDYFILE:-$XMG_CADDY_DIR/Caddyfile}"
+fi
+if [ -z "${XMG_LOG_DIR:-}" ]; then
+    XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
+fi
+if [ -z "${XMG_RUN_DIR:-}" ]; then
+    XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
+fi
+
+# Caddy 在 XMG 统一目录下的数据目录和日志目录
+XMG_CADDY_DATA_DIR="${XMG_CADDY_DATA_DIR:-$XMG_CADDY_DIR/data}"
+XMG_CADDY_LOG_DIR="${XMG_CADDY_LOG_DIR:-$XMG_LOG_DIR/caddy}"
 
 # ===== 兼容函数 =====
 
@@ -261,29 +284,30 @@ xmg_caddy_install_by_yum() {
 # ===== 二进制安装准备 =====
 
 xmg_caddy_create_user_and_dirs() {
+    # 创建 caddy 系统用户，home 目录指向 XMG 统一数据目录
     if ! id caddy >/dev/null 2>&1; then
         if xmg_cmd_exists useradd; then
             useradd \
                 --system \
-                --home /var/lib/caddy \
+                --home "$XMG_CADDY_DATA_DIR" \
                 --shell /usr/sbin/nologin \
                 caddy 2>/dev/null \
-                || useradd -r -d /var/lib/caddy -s /sbin/nologin caddy 2>/dev/null \
+                || useradd -r -d "$XMG_CADDY_DATA_DIR" -s /sbin/nologin caddy 2>/dev/null \
                 || true
         fi
     fi
 
-    install -d -m 0755 /etc/caddy \
+    # 创建 XMG 统一目录下的 Caddy 数据目录和日志目录
+    # 注意：Caddyfile 配置目录 $XMG_CADDY_DIR 由 xmg_mkdirs() 统一创建
+    install -d -m 0755 "$XMG_CADDY_DATA_DIR" \
         || return 1
 
-    install -d -m 0755 /var/lib/caddy \
+    install -d -m 0755 "$XMG_CADDY_LOG_DIR" \
         || return 1
 
-    install -d -m 0755 /var/log/caddy \
-        || return 1
-
+    # 设置数据目录和日志目录的归属给 caddy 用户
     if id caddy >/dev/null 2>&1; then
-        chown -R caddy:caddy /var/lib/caddy /var/log/caddy 2>/dev/null || true
+        chown -R caddy:caddy "$XMG_CADDY_DATA_DIR" "$XMG_CADDY_LOG_DIR" 2>/dev/null || true
     fi
 
     return 0
@@ -304,6 +328,7 @@ xmg_caddy_install_systemd_unit_for_binary() {
         return 0
     fi
 
+    # 创建 systemd unit，配置文件和日志路径都指向 XMG 统一目录
     cat > "$unit_path" <<EOF
 [Unit]
 Description=Caddy web server
@@ -315,8 +340,8 @@ Wants=network-online.target
 Type=notify
 User=caddy
 Group=caddy
-ExecStart=${XMG_CADDY_BINARY_INSTALL_PATH} run --environ --config /etc/caddy/Caddyfile
-ExecReload=${XMG_CADDY_BINARY_INSTALL_PATH} reload --config /etc/caddy/Caddyfile --force
+ExecStart=${XMG_CADDY_BINARY_INSTALL_PATH} run --environ --config ${XMG_CADDYFILE}
+ExecReload=${XMG_CADDY_BINARY_INSTALL_PATH} reload --config ${XMG_CADDYFILE} --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 PrivateTmp=true
@@ -324,7 +349,8 @@ ProtectSystem=full
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-WorkingDirectory=/var/lib/caddy
+WorkingDirectory=${XMG_CADDY_DATA_DIR}
+ReadWritePaths=${XMG_CADDY_DATA_DIR} ${XMG_CADDY_LOG_DIR}
 
 [Install]
 WantedBy=multi-user.target
@@ -332,6 +358,9 @@ EOF
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     xmg_info "已创建 systemd service：$unit_path"
+    xmg_info "配置路径：$XMG_CADDYFILE"
+    xmg_info "数据目录：$XMG_CADDY_DATA_DIR"
+    xmg_info "日志目录：$XMG_CADDY_LOG_DIR"
 
     return 0
 }
@@ -489,9 +518,13 @@ xmg_caddy_install_update() {
             xmg_warn "Caddy 已安装，但设置开机自启失败"
         fi
 
-        if [ ! -f /etc/caddy/Caddyfile ]; then
-            xmg_warn "未找到 /etc/caddy/Caddyfile"
+        # 检查 Caddyfile 是否存在，提示用户自行创建
+        if [ ! -f "$XMG_CADDYFILE" ]; then
+            xmg_warn "未找到 $XMG_CADDYFILE"
             xmg_warn "本模块不创建 Caddyfile，因此服务启动可能失败"
+            xmg_warn "请手动创建 Caddyfile，例如:"
+            xmg_warn "  sudo mkdir -p $(dirname "$XMG_CADDYFILE")"
+            xmg_warn "  sudo nano $XMG_CADDYFILE"
         fi
 
         if systemctl start "$XMG_CADDY_SERVICE" >/dev/null 2>&1; then
@@ -509,6 +542,9 @@ xmg_caddy_install_update() {
 
     xmg_info "Caddy 安装/更新完成"
     xmg_warn "XMG 不处理 Caddyfile，请用户自行维护配置"
+    xmg_warn "Caddyfile 路径: $XMG_CADDYFILE"
+    xmg_warn "Caddy 数据目录: $XMG_CADDY_DATA_DIR"
+    xmg_warn "Caddy 日志目录: $XMG_CADDY_LOG_DIR"
 }
 
 # ===== 卸载 =====
@@ -554,7 +590,13 @@ xmg_caddy_uninstall() {
     fi
 
     xmg_info "Caddy 卸载流程完成"
-    xmg_warn "未删除 /etc/caddy/Caddyfile 和 /etc/caddy 目录"
+    xmg_warn "未删除 Caddyfile 和 Caddy 数据目录："
+    xmg_warn "  Caddyfile: $XMG_CADDYFILE"
+    xmg_warn "  数据目录: $XMG_CADDY_DATA_DIR"
+    xmg_warn "  日志目录: $XMG_CADDY_LOG_DIR"
+    xmg_warn "如需手动清理，请执行:"
+    xmg_warn "  sudo rm -rf $XMG_CADDY_DIR"
+    xmg_warn "  sudo rm -rf $XMG_CADDY_LOG_DIR"
 }
 
 # ===== 服务生命周期 =====
@@ -602,10 +644,10 @@ xmg_caddy_validate_config() {
         return 1
     }
 
-    if [ -f /etc/caddy/Caddyfile ]; then
-        "$caddy_bin" validate --config /etc/caddy/Caddyfile || return 1
+    if [ -f "$XMG_CADDYFILE" ]; then
+        "$caddy_bin" validate --config "$XMG_CADDYFILE" || return 1
     else
-        xmg_warn "未找到 /etc/caddy/Caddyfile"
+        xmg_warn "未找到 $XMG_CADDYFILE"
         return 1
     fi
 }
@@ -632,6 +674,14 @@ xmg_caddy_diag() {
     echo "XMG_CADDY_INSTALL_MODE=$XMG_CADDY_INSTALL_MODE"
     echo "XMG_CADDY_ENABLE_BINARY_FALLBACK=$XMG_CADDY_ENABLE_BINARY_FALLBACK"
     echo "XMG_CADDY_BINARY_INSTALL_PATH=$XMG_CADDY_BINARY_INSTALL_PATH"
+
+    echo
+    echo "[XMG 统一目录]"
+    echo "XMG_HOME=$XMG_HOME"
+    echo "XMG_CADDY_DIR=$XMG_CADDY_DIR"
+    echo "XMG_CADDYFILE=$XMG_CADDYFILE"
+    echo "XMG_CADDY_DATA_DIR=$XMG_CADDY_DATA_DIR"
+    echo "XMG_CADDY_LOG_DIR=$XMG_CADDY_LOG_DIR"
 
     echo
     echo "[命令检测]"
@@ -673,6 +723,31 @@ xmg_caddy_diag() {
         sed -n '1,20p' "$XMG_CADDY_APT_SOURCE_PATH"
     else
         echo "不存在：$XMG_CADDY_APT_SOURCE_PATH"
+    fi
+
+    echo
+    echo "[Caddyfile 状态]"
+    if [ -f "$XMG_CADDYFILE" ]; then
+        echo "存在：$XMG_CADDYFILE"
+        wc -l "$XMG_CADDYFILE"
+    else
+        echo "不存在：$XMG_CADDYFILE"
+    fi
+
+    echo
+    echo "[Caddy 数据目录]"
+    if [ -d "$XMG_CADDY_DATA_DIR" ]; then
+        ls -la "$XMG_CADDY_DATA_DIR"
+    else
+        echo "不存在：$XMG_CADDY_DATA_DIR"
+    fi
+
+    echo
+    echo "[Caddy 日志目录]"
+    if [ -d "$XMG_CADDY_LOG_DIR" ]; then
+        ls -la "$XMG_CADDY_LOG_DIR"
+    else
+        echo "不存在：$XMG_CADDY_LOG_DIR"
     fi
 
     echo
@@ -719,6 +794,9 @@ xmg_caddy_menu() {
         echo "  - 默认先尝试 apt-get install caddy"
         echo "  - APT 失败后会回退到官方二进制安装"
         echo "  - 如需完全绕过 APT，可选择 10"
+        echo "  - Caddyfile: $XMG_CADDYFILE"
+        echo "  - 数据目录: $XMG_CADDY_DATA_DIR"
+        echo "  - 日志目录: $XMG_CADDY_LOG_DIR"
         echo
         printf "请选择: "
 
