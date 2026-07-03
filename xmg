@@ -18,8 +18,14 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="1.5.0"
-XMG_LIB_DIR="${XMG_LIB_DIR:-/usr/local/lib/xmg}"
+# XMG_HOME 是 XMG 的统一根目录。
+# 默认所有 XMG 管理的文件集中放在 /opt/xmg。
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+# 主程序目录和模块目录
+XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+# 导出路径变量，确保被加载的 lib/*.sh 模块使用同一套目录
+export XMG_HOME XMG_BIN_DIR XMG_LIB_DIR
 
 if [ ! -d "$XMG_LIB_DIR" ]; then
     echo "错误: XMG lib directory not found: $XMG_LIB_DIR" >&2
