@@ -7,7 +7,19 @@
 # 说明：
 #   - 优先从当前源码目录安装
 #   - 如果未检测到完整本地源码，则从 GitHub Raw 安装
-#   - 文件内容应使用 UTF-8 编码保存
+#   - 所有 XMG 管理的文件集中安装到 /opt/xmg
+#   - /usr/local/bin/xmg 仅作为命令入口软链接
+#
+# 使用方法：
+#   sudo bash install.sh
+#
+# 可选环境变量：
+#   XMG_HOME=/opt/xmg
+#   XMG_BASE_URL=https://raw.githubusercontent.com/AVA-2568/xmg/main
+#
+# 注意事项：
+#   - 需要 root 权限
+#   - 依赖 curl 进行远程安装
 #
 
 # 必须在 set -o pipefail 前检查是否为 Bash
@@ -17,6 +29,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 
 set -Eeuo pipefail
+IFS=$'\n\t'
 
 # 这里请按你的实际 GitHub 仓库 Raw 地址设置
 # 如果你的仓库名实际是大写 XMG，请改为：
@@ -66,7 +79,7 @@ die() {
 }
 
 need_root() {
-    [ "${EUID:-$(id -u)}" -eq 0 ] || die "请使用 root 执行安装，例如: sudo ./install.sh"
+    [ "${EUID:-$(id -u)}" -eq 0 ] || die "请使用 root 执行安装，例如: sudo bash install.sh"
 }
 
 cmd_exists() {
@@ -92,7 +105,8 @@ install_dirs() {
         "$(dirname "$XMG_LINK")"
 
     # 设置基础权限，避免普通用户误写核心目录
-    chmod 755 "$XMG_HOME" \
+    chmod 755 \
+        "$XMG_HOME" \
         "$XMG_BIN_DIR" \
         "$XMG_LIB_DIR" \
         "$XMG_ETC_DIR" \
@@ -222,6 +236,20 @@ install_one_file() {
     install -m "$mode" -o root -g root "$src" "$dst" || die "安装失败: $dst"
 }
 
+install_command_link() {
+    # 如果旧命令入口存在，先删除入口文件或软链接
+    # 注意：这里只删除 /usr/local/bin/xmg，不删除 /opt/xmg 真实文件
+    if [ -e "$XMG_LINK" ] || [ -L "$XMG_LINK" ]; then
+        rm -f -- "$XMG_LINK" || die "删除旧命令入口失败: $XMG_LINK"
+    fi
+
+    # 创建新的命令入口软链接
+    ln -s "$XMG_BIN" "$XMG_LINK" || die "创建命令入口失败: $XMG_LINK -> $XMG_BIN"
+
+    # 确保主程序可执行
+    chmod 755 "$XMG_BIN" || die "设置主程序执行权限失败: $XMG_BIN"
+}
+
 install_local() {
     local manifest=""
     local entry=""
@@ -246,6 +274,8 @@ install_local() {
 
         install_one_file "$src" "$dst" "$mode"
     done < <(read_manifest_file "$manifest")
+
+    install_command_link
 
     return 0
 }
@@ -275,6 +305,8 @@ install_remote() {
     done < <(read_manifest_file "$manifest_tmp")
 
     rm -f -- "$manifest_tmp"
+
+    install_command_link
 }
 
 verify_install() {
@@ -284,6 +316,7 @@ verify_install() {
     local dst=""
     local missing=0
     local used_local=0
+    local link_target=""
 
     if [ -f "$(manifest_local_path)" ] && [ -f "$SCRIPT_DIR/xmg" ] && [ -d "$SCRIPT_DIR/lib" ]; then
         manifest="$(manifest_local_path)"
@@ -309,9 +342,43 @@ verify_install() {
         rm -f -- "$manifest_tmp"
     fi
 
-    if [ "$missing" -ne 0 ]; then
-        die "安装校验失败，缺失 $missing 个文件"
+    if [ ! -L "$XMG_LINK" ]; then
+        red "[MISS] $XMG_LINK 不是软链接"
+        missing=$((missing + 1))
+    else
+        link_target="$(readlink "$XMG_LINK")"
+        if [ "$link_target" != "$XMG_BIN" ]; then
+            red "[MISS] $XMG_LINK 指向错误: $link_target"
+            missing=$((missing + 1))
+        else
+            green "[OK]   $XMG_LINK -> $XMG_BIN"
+        fi
     fi
+
+    if [ "$missing" -ne 0 ]; then
+        die "安装校验失败，缺失或异常 $missing 项"
+    fi
+}
+
+print_summary() {
+    echo
+    green "安装完成"
+    echo "命令入口: $XMG_LINK"
+    echo "真实主程序: $XMG_BIN"
+    echo "模块目录: $XMG_LIB_DIR"
+    echo "配置目录: $XMG_ETC_DIR"
+    echo "运行目录: $XMG_RUN_DIR"
+    echo "日志目录: $XMG_LOG_DIR"
+    echo "备份目录: $XMG_BACKUP_DIR"
+    echo "站点目录: $XMG_WWW_DIR"
+    echo "Caddy 配置目录: $XMG_CADDY_DIR"
+    echo "Xray 配置目录: $XMG_XRAY_DIR"
+    echo
+    echo "执行命令:"
+    echo "  xmg"
+    echo
+    echo "源码目录测试:"
+    echo "  XMG_LIB_DIR=./lib ./xmg"
 }
 
 main() {
@@ -329,10 +396,7 @@ main() {
     echo "安装文件校验："
     verify_install
 
-    echo
-    green "安装完成"
-    echo "命令: xmg"
-    echo "源码目录测试: XMG_LIB_DIR=./lib ./xmg"
+    print_summary
 }
 
 main "$@"
