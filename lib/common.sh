@@ -24,11 +24,29 @@ fi
 XMG_COMMON_SH_LOADED=1
 
 # ===== 全局目录配置 =====
-XMG_ETC_DIR="${XMG_ETC_DIR:-/etc/xmg}"
-XMG_RUN_DIR="${XMG_RUN_DIR:-/run/xmg}"
-XMG_LOG_DIR="${XMG_LOG_DIR:-/var/log/xmg}"
-XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-/var/backups/xmg}"
-XMG_WWW_DIR="${XMG_WWW_DIR:-/var/www/xmg}"
+# XMG_HOME 是 XMG 的统一根目录。
+# 所有 XMG 管理的文件默认集中放在 /opt/xmg。
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+# 主程序与模块目录
+XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+# XMG 自身目录
+XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
+XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
+XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
+XMG_WWW_DIR="${XMG_WWW_DIR:-$XMG_HOME/www}"
+# 由 XMG 托管的外部组件配置
+XMG_CADDY_DIR="${XMG_CADDY_DIR:-$XMG_HOME/caddy}"
+XMG_XRAY_DIR="${XMG_XRAY_DIR:-$XMG_HOME/xray}"
+# 关键配置文件
+XMG_CADDYFILE="${XMG_CADDYFILE:-$XMG_CADDY_DIR/Caddyfile}"
+XMG_XRAY_CONFIG="${XMG_XRAY_CONFIG:-$XMG_XRAY_DIR/config.json}"
+export XMG_HOME
+export XMG_BIN_DIR XMG_LIB_DIR
+export XMG_ETC_DIR XMG_RUN_DIR XMG_LOG_DIR XMG_BACKUP_DIR XMG_WWW_DIR
+export XMG_CADDY_DIR XMG_XRAY_DIR
+export XMG_CADDYFILE XMG_XRAY_CONFIG
 
 # 颜色策略：
 #   auto   - 仅在 TTY 中启用颜色
