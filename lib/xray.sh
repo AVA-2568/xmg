@@ -207,6 +207,9 @@ xmg_xray_install_by_official_script() {
 
 # ===== 自动修改 systemd unit 的 ExecStart =====
 # 确保 Xray 服务启动时读取的是 XMG 统一配置路径
+# ============================================================
+# 修复后的 xmg_xray_patch_systemd_unit 函数
+# ============================================================
 xmg_xray_patch_systemd_unit() {
     local xray_unit=""
     local unit_found=0
@@ -227,29 +230,44 @@ xmg_xray_patch_systemd_unit() {
 
     xmg_info "检测到 Xray systemd unit: $xray_unit"
 
-    # 检查当前 ExecStart 是否已经指向 XMG 统一配置路径
-    if grep -q "$XMG_XRAY_CONFIG" "$xray_unit" 2>/dev/null; then
-        xmg_info "ExecStart 已指向 XMG 统一配置路径，无需修改"
+    # ---- 方案：使用 drop-in 覆盖文件（systemd 推荐方式）----
+    # 创建优先级更高的 drop-in（20-xmg.conf > 10-donot_touch_single_conf.conf）
+    # 这样即使官方脚本重新生成主 unit 和 10-*.conf，XMG 的覆盖仍然生效
+    local dropin_dir="/etc/systemd/system/xray.service.d"
+    local dropin_file="${dropin_dir}/20-xmg.conf"
+
+    mkdir -p "$dropin_dir"
+
+    # 检查 drop-in 是否已经指向 XMG 路径
+    if [ -f "$dropin_file" ] && grep -q "$XMG_XRAY_CONFIG" "$dropin_file" 2>/dev/null; then
+        xmg_info "drop-in 覆盖已存在且指向 XMG 统一配置路径，无需修改"
         return 0
     fi
 
-    # 备份原始 unit 文件
-    local backup_unit="${xray_unit}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
-    cp "$xray_unit" "$backup_unit" && xmg_info "已备份原始 unit 到: $backup_unit" || {
-        xmg_warn "备份 systemd unit 失败，跳过修改"
-        return 1
-    }
+    # 备份现有 drop-in（如果存在）
+    if [ -f "$dropin_file" ]; then
+        local backup_dropin="${dropin_file}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
+        cp "$dropin_file" "$backup_unit" 2>/dev/null && \
+            xmg_info "已备份现有 drop-in 到: $backup_dropin" || true
+    fi
 
-    # 修改 ExecStart 行，将 -c 后面的配置路径替换为 XMG 统一配置路径
-    # 匹配模式：ExecStart=... -c /任意路径/config.json
-    sed -i 's|-c /[^ ]*/config\.json|-c '"$XMG_XRAY_CONFIG"'|g' "$xray_unit"
+    # 写入 drop-in 覆盖文件
+    # ExecStart=  （空值）先清空所有之前的 ExecStart
+    # ExecStart=...  然后设置 XMG 的路径
+    cat > "$dropin_file" <<XMGEOF
+# XMG 管理的 drop-in 覆盖文件
+# 此文件优先级高于官方的 10-donot_touch_single_conf.conf
+# 请勿手动编辑，由 XMG 自动管理
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/xray run -config ${XMG_XRAY_CONFIG}
+XMGEOF
 
-    # 验证修改是否成功
-    if grep -q "$XMG_XRAY_CONFIG" "$xray_unit" 2>/dev/null; then
-        xmg_info "systemd unit 已更新，ExecStart 指向: $XMG_XRAY_CONFIG"
+    # 验证 drop-in 是否写入成功
+    if grep -q "$XMG_XRAY_CONFIG" "$dropin_file" 2>/dev/null; then
+        xmg_info "drop-in 覆盖已创建，ExecStart 指向: $XMG_XRAY_CONFIG"
     else
-        xmg_warn "systemd unit 修改失败，已恢复原始文件"
-        cp "$backup_unit" "$xray_unit" 2>/dev/null || true
+        xmg_warn "drop-in 覆盖文件写入失败"
         return 1
     fi
 
