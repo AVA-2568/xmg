@@ -8,6 +8,8 @@
 #   - 本文件是 Bash 库文件，应由 xmg 主程序 source 加载
 #   - 使用 Bash 数组和正则匹配，因此不支持 sh/dash
 #   - 文件内容应使用 UTF-8 编码保存
+#   - 模块发现：从 xmg.files 清单读取 lib/*.sh 条目，按清单顺序生成菜单
+#   - 标签来源：模块文件内 # XMG_MENU_LABEL: xxx 自声明，兼容旧 case 硬编码
 #
 
 # menu.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
@@ -98,10 +100,51 @@ xmg_menu_find_menu_func() {
     return 1
 }
 
+# 从模块文件中静态扫描菜单标签
+#
+# 约定：在模块文件头部使用注释声明标签
+#   # XMG_MENU_LABEL: 外部工具
+#
+# 注意：
+#   - 只做轻量静态扫描，不执行模块内容
+#   - 与 xmg_menu_find_menu_func() 设计一致
+xmg_menu_find_label() {
+    local path="$1"
+    local line=""
+
+    [ -r "$path" ] || return 1
+
+    while IFS= read -r line; do
+        # 跳过空行
+        case "$line" in
+            '')
+                continue
+                ;;
+        esac
+
+        # 匹配 # XMG_MENU_LABEL: 标签文本
+        if [[ "$line" =~ ^[[:space:]]*\#[[:space:]]*XMG_MENU_LABEL:[[:space:]]*(.+)$ ]]; then
+            printf '%s' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$path"
+
+    return 1
+}
+
 xmg_menu_label_for_file() {
     local file="$1"
     local base="${file%.sh}"
+    local path="$XMG_LIB_DIR/$file"
+    local label=""
 
+    # 第一优先：从模块文件中静态扫描自声明标签
+    if label="$(xmg_menu_find_label "$path")"; then
+        printf '%s' "$label"
+        return
+    fi
+
+    # 第二优先：硬编码标签映射（向后兼容已有模块）
     case "$file" in
         xray.sh)
             printf 'Xray 管理'
@@ -170,20 +213,33 @@ xmg_menu_add_module_if_valid() {
 xmg_menu_discover_modules() {
     local path=""
     local file=""
+    local manifest="${XMG_HOME}/xmg.files"
 
     XMG_MENU_FILES=()
     XMG_MENU_FUNCS=()
     XMG_MENU_LABELS=()
 
-    # 已知模块保持稳定顺序
-    xmg_menu_add_module_if_valid "xray.sh"
-    xmg_menu_add_module_if_valid "caddy.sh"
-    xmg_menu_add_module_if_valid "site.sh"
-    xmg_menu_add_module_if_valid "firewall.sh"
-    xmg_menu_add_module_if_valid "update.sh"
-    xmg_menu_add_module_if_valid "uninstall.sh"
+    # 优先从 xmg.files 清单读取模块列表（顺序即菜单顺序）
+    if [ -r "$manifest" ]; then
+        while IFS= read -r file || [ -n "$file" ]; do
+            # 跳过空行和注释行
+            case "$file" in
+                ''|'#'*)
+                    continue
+                    ;;
+            esac
 
-    # 自动追加未知模块
+            # 只处理 lib/*.sh 条目，提取文件名
+            case "$file" in
+                lib/*.sh)
+                    file="${file##*/}"
+                    xmg_menu_add_module_if_valid "$file"
+                    ;;
+            esac
+        done < "$manifest"
+    fi
+
+    # 容错：追加清单中未列出但存在于 lib/ 的模块
     for path in "$XMG_LIB_DIR"/*.sh; do
         [ -e "$path" ] || continue
 
@@ -336,4 +392,3 @@ xmg_menu_loop() {
         esac
     done
 }
-``
