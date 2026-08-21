@@ -128,7 +128,7 @@ manifest_entry_validate() {
     esac
 
     case "$entry" in
-        xmg|lib/*.sh)
+        xmg|lib/*.sh|xmg.files)
             return 0
             ;;
         *)
@@ -146,7 +146,7 @@ manifest_entry_mode() {
         xmg)
             printf '0755'
             ;;
-        lib/*.sh)
+        lib/*.sh|xmg.files)
             printf '0644'
             ;;
         *)
@@ -168,6 +168,9 @@ manifest_entry_dest() {
         lib/*.sh)
             base="${entry##*/}"
             printf '%s/%s\n' "$XMG_LIB_DIR" "$base"
+            ;;
+        xmg.files)
+            printf '%s/xmg.files\n' "$XMG_HOME"
             ;;
         *)
             die "不支持的清单条目: $entry"

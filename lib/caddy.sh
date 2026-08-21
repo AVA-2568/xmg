@@ -22,10 +22,6 @@ XMG_CADDY_SH_LOADED=1
 # ===== 默认配置 =====
 # 这些变量名属于模块接口，不要改名。
 XMG_CADDY_SERVICE="${XMG_CADDY_SERVICE:-caddy}"
-XMG_CADDY_APT_KEY_URL="${XMG_CADDY_APT_KEY_URL:-https://dl.cloudsmith.io/public/caddy/stable/gpg.key}"
-XMG_CADDY_APT_SOURCE_URL="${XMG_CADDY_APT_SOURCE_URL:-https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt}"
-XMG_CADDY_KEYRING_PATH="${XMG_CADDY_KEYRING_PATH:-/usr/share/keyrings/caddy-stable-archive-keyring.gpg}"
-XMG_CADDY_APT_SOURCE_PATH="${XMG_CADDY_APT_SOURCE_PATH:-/etc/apt/sources.list.d/caddy-stable.list}"
 
 # 新增参数：不破坏旧接口。
 # auto   : 先尝试包管理器，不执行 apt update，失败后走二进制
@@ -780,13 +776,6 @@ xmg_caddy_diag() {
     done
 
     echo
-    echo "[Cloudflare WARP APT 源检测]"
-    grep -R "pkg.cloudflareclient.com" \
-        /etc/apt/sources.list \
-        /etc/apt/sources.list.d \
-        2>/dev/null || echo "未检测到 Cloudflare WARP APT 源"
-
-    echo
     echo "[Caddy 版本]"
     if xmg_caddy_binary_exists; then
         xmg_caddy_print_version || echo "无法获取 caddy version"
@@ -800,15 +789,6 @@ xmg_caddy_diag() {
         ls -l "$XMG_CADDY_BINARY_INSTALL_PATH"
     else
         echo "不存在：$XMG_CADDY_BINARY_INSTALL_PATH"
-    fi
-
-    echo
-    echo "[APT 源文件]"
-    if [ -f "$XMG_CADDY_APT_SOURCE_PATH" ]; then
-        echo "存在：$XMG_CADDY_APT_SOURCE_PATH"
-        sed -n '1,20p' "$XMG_CADDY_APT_SOURCE_PATH"
-    else
-        echo "不存在：$XMG_CADDY_APT_SOURCE_PATH"
     fi
 
     echo

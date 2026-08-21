@@ -40,9 +40,18 @@ fi
 # ===== 预置脚本注册表 =====
 # 这些脚本由 XMG 预置，用户不可删除
 # 使用并行数组存储：名称、URL、描述
-XMG_THIRD_PARTY_PREDEF_NAMES=("IP质量体检")
-XMG_THIRD_PARTY_PREDEF_URLS=("https://IP.Check.Place")
-XMG_THIRD_PARTY_PREDEF_DESCS=("IP 质量检测脚本 (xykt/IPQuality)")
+# 仅收录经实测可访问的脚本地址
+XMG_THIRD_PARTY_PREDEF_NAMES=("IP质量体检" "YABS 综合测试" "融合怪全家桶")
+XMG_THIRD_PARTY_PREDEF_URLS=(
+    "https://IP.Check.Place"
+    "https://yabs.sh"
+    "https://gitlab.com/spiritysdx/za/-/raw/main/ecs.sh"
+)
+XMG_THIRD_PARTY_PREDEF_DESCS=(
+    "IP 质量检测 (xykt/IPQuality)"
+    "系统性能 + 网络测速 (Mason Rowe)"
+    "系统信息/流媒体/质量全家桶 (spiritLHLS/ecs)"
+)
 
 # ===== 兼容函数 =====
 

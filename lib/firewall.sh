@@ -19,7 +19,31 @@ XMG_FIREWALL_SH_LOADED=1
 
 xmg_firewall_need_ufw() {
     if ! xmg_cmd_exists ufw; then
-        xmg_die "ufw 不存在，请先安装 ufw，或使用云安全组 / iptables / nftables 手动管理防火墙"
+        xmg_die "ufw 未安装，请先在菜单中执行「安装 UFW」，或手动: apt-get install -y ufw"
+    fi
+}
+
+# Debian 默认不带 ufw（Ubuntu 预装），提供一键安装
+xmg_firewall_install() {
+    xmg_require_root
+
+    if xmg_cmd_exists ufw; then
+        xmg_info "ufw 已安装: $(command -v ufw)"
+        return 0
+    fi
+
+    if ! xmg_cmd_exists apt-get; then
+        xmg_die "未检测到 apt-get，请手动安装 ufw"
+    fi
+
+    xmg_info "使用 apt 安装 ufw（不执行 apt-get update）"
+
+    if apt-get install -y ufw; then
+        xmg_info "ufw 安装完成"
+    else
+        xmg_warn "apt 安装 ufw 失败，APT 缓存可能过期"
+        xmg_warn "可手动执行: apt-get update && apt-get install -y ufw"
+        return 1
     fi
 }
 
@@ -120,10 +144,12 @@ xmg_firewall_menu() {
         echo "3. 放行自定义端口"
         echo "4. 启用 UFW"
         echo "5. 禁用 UFW"
+        echo "6. 安装 UFW"
         echo "0. 返回"
         echo
         echo "说明:"
         echo "  - 当前模块只做最基础的 UFW 管理"
+        echo "  - Ubuntu 预装 UFW，Debian 可通过选项 6 安装"
         echo "  - 启用前请确认 SSH 端口已经放行，避免远程断连"
         echo "  - 如果服务器还使用云安全组，请同时检查云平台入站规则"
         echo
@@ -150,6 +176,10 @@ xmg_firewall_menu() {
                 ;;
             5)
                 xmg_firewall_disable
+                xmg_pause
+                ;;
+            6)
+                xmg_firewall_install
                 xmg_pause
                 ;;
             0)

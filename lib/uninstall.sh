@@ -137,6 +137,7 @@ xmg_uninstall_cleanup_xray() {
 
     local xray_etc="/usr/local/etc/xray"
     local xray_unit=""
+    local xray_dropin_dir="/etc/systemd/system/xray.service.d"
 
     # 查找 systemd unit
     for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
@@ -146,7 +147,7 @@ xmg_uninstall_cleanup_xray() {
         fi
     done
 
-    if [ -z "$xray_unit" ] && [ ! -d "$xray_etc" ]; then
+    if [ -z "$xray_unit" ] && [ ! -d "$xray_etc" ] && [ ! -d "$xray_dropin_dir" ]; then
         xmg_info "未检测到 Xray 系统级配置，跳过"
         return 0
     fi
@@ -154,6 +155,7 @@ xmg_uninstall_cleanup_xray() {
     xmg_warn "检测到 Xray 系统级配置："
     [ -f "$xray_unit" ] && xmg_warn "  systemd unit: $xray_unit"
     [ -d "$xray_etc" ] && xmg_warn "  /usr/local/etc/xray 目录"
+    [ -d "$xray_dropin_dir" ] && xmg_warn "  XMG drop-in 覆盖: $xray_dropin_dir"
 
     if xmg_confirm "是否清理 Xray 系统级配置？这不会影响系统中已安装的 Xray 二进制"; then
         if [ -n "$xray_unit" ]; then
@@ -161,6 +163,9 @@ xmg_uninstall_cleanup_xray() {
         fi
         if [ -d "$xray_etc" ]; then
             rm -rf "$xray_etc" && xmg_info "已删除: $xray_etc"
+        fi
+        if [ -d "$xray_dropin_dir" ]; then
+            rm -rf "$xray_dropin_dir" && xmg_info "已删除: $xray_dropin_dir"
         fi
 
         if command -v systemctl &>/dev/null; then

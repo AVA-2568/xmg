@@ -161,22 +161,17 @@ xmg_xray_install_by_official_script() {
         xmg_die "缺少 curl 或 wget，无法下载 Xray 安装脚本"
     fi
 
-    # 下载并执行 Xray 官方安装脚本，同时记录日志
-    local install_log
-    install_log="$(mktemp)" || xmg_die "创建临时文件失败"
-
+    # 下载并执行 Xray 官方安装脚本
     xmg_info "下载 Xray 官方安装脚本..."
 
     if xmg_cmd_exists curl; then
-        bash <(curl -fsSL "$XMG_XRAY_INSTALL_URL") 2>&1 | tee "$install_log" || {
+        bash <(curl -fsSL "$XMG_XRAY_INSTALL_URL") || {
             xmg_warn "Xray 官方安装脚本执行失败，请检查网络或手动安装"
-            rm -f "$install_log"
             return 1
         }
     elif xmg_cmd_exists wget; then
-        bash <(wget -qO- "$XMG_XRAY_INSTALL_URL") 2>&1 | tee "$install_log" || {
+        bash <(wget -qO- "$XMG_XRAY_INSTALL_URL") || {
             xmg_warn "Xray 官方安装脚本执行失败，请检查网络或手动安装"
-            rm -f "$install_log"
             return 1
         }
     fi
@@ -191,8 +186,6 @@ xmg_xray_install_by_official_script() {
         xmg_warn "未找到 /usr/local/etc/xray/config.json"
         xmg_warn "XMG 不会自动生成配置，请手动创建: $XMG_XRAY_CONFIG"
     fi
-
-    rm -f "$install_log"
 
     # 确认安装成功
     if xmg_xray_binary_exists; then
@@ -247,7 +240,7 @@ xmg_xray_patch_systemd_unit() {
     # 备份现有 drop-in（如果存在）
     if [ -f "$dropin_file" ]; then
         local backup_dropin="${dropin_file}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
-        cp "$dropin_file" "$backup_unit" 2>/dev/null && \
+        cp "$dropin_file" "$backup_dropin" 2>/dev/null && \
             xmg_info "已备份现有 drop-in 到: $backup_dropin" || true
     fi
 
@@ -277,33 +270,21 @@ XMGEOF
     return 0
 }
 
-# ===== 恢复 systemd unit 备份 =====
+# ===== 移除 XMG drop-in 覆盖（恢复官方 unit 行为）=====
 xmg_xray_restore_systemd_unit() {
-    local xray_unit=""
+    local dropin_dir="/etc/systemd/system/xray.service.d"
+    local dropin_file="${dropin_dir}/20-xmg.conf"
 
-    for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
-        if [ -f "$path" ]; then
-            xray_unit="$path"
-            break
-        fi
-    done
-
-    if [ -z "$xray_unit" ]; then
-        xmg_warn "未找到 Xray systemd unit"
+    if [ ! -f "$dropin_file" ]; then
+        xmg_warn "未找到 XMG drop-in 覆盖: $dropin_file"
         return 1
     fi
 
-    local backup_file=""
-    # 查找最近的备份
-    backup_file=$(ls -t "${xray_unit}.xmg-backup."* 2>/dev/null | head -1)
+    rm -f "$dropin_file" && xmg_info "已移除 XMG drop-in 覆盖: $dropin_file"
+    rmdir "$dropin_dir" 2>/dev/null || true
 
-    if [ -z "$backup_file" ]; then
-        xmg_warn "未找到 systemd unit 的备份文件"
-        return 1
-    fi
-
-    cp "$backup_file" "$xray_unit" && xmg_info "已恢复 systemd unit 备份: $backup_file"
     systemctl daemon-reload >/dev/null 2>&1 || true
+    xmg_info "Xray 已恢复官方 systemd unit 配置（重启服务后生效）"
 }
 
 # ===== 安装 / 更新 =====
@@ -398,6 +379,13 @@ xmg_xray_uninstall() {
                 rm -f "$path" && xmg_info "已删除 systemd unit: $path"
             fi
         done
+
+        # 清理 XMG drop-in 覆盖目录
+        if [ -d "/etc/systemd/system/xray.service.d" ]; then
+            rm -rf "/etc/systemd/system/xray.service.d" \
+                && xmg_info "已删除 drop-in 覆盖目录: /etc/systemd/system/xray.service.d"
+        fi
+
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
@@ -579,7 +567,7 @@ xmg_xray_menu() {
         echo "8. 校验 Xray 配置"
         echo "9. 查看 Xray 配置"
         echo "10. 安装诊断"
-        echo "11. 恢复 systemd unit 备份"
+        echo "11. 移除 XMG 覆盖（恢复官方配置）"
         echo "0. 返回"
         echo
         echo "说明:"

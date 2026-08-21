@@ -216,14 +216,16 @@ xmg_systemctl() {
     local action="$1"
     local service="$2"
 
-    xmg_require_root
-
     if ! xmg_cmd_exists systemctl; then
         xmg_die "当前系统未发现 systemctl，可能不是 systemd 系统"
     fi
 
     case "$action" in
-        start|stop|restart|reload|enable|disable|status|is-active|is-enabled)
+        start|stop|restart|reload|enable|disable)
+            xmg_require_root
+            systemctl "$action" "$service"
+            ;;
+        status|is-active|is-enabled)
             systemctl "$action" "$service"
             ;;
         *)
