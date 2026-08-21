@@ -22,6 +22,15 @@ XMG_UNINSTALL_KEEP_CADDY="${XMG_UNINSTALL_KEEP_CADDY:-0}"
 XMG_UNINSTALL_KEEP_XRAY="${XMG_UNINSTALL_KEEP_XRAY:-0}"
 XMG_UNINSTALL_KEEP_BACKUPS="${XMG_UNINSTALL_KEEP_BACKUPS:-0}"
 
+# ===== 依赖 common.sh 的路径变量 =====
+# common.sh 只定义目录，不含主程序与命令入口路径；set -u 下未定义会直接崩溃
+XMG_BIN="${XMG_BIN:-$XMG_HOME/bin/xmg}"
+XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
+
+# 服务名与 system.sh 保持一致
+XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
+XMG_CADDY_SERVICE="${XMG_CADDY_SERVICE:-caddy}"
+
 # ===== 服务停止 =====
 
 xmg_uninstall_stop_services() {
@@ -29,23 +38,23 @@ xmg_uninstall_stop_services() {
 
     # 停止 Caddy 服务（如果存在）
     if command -v systemctl &>/dev/null; then
-        if systemctl is-active --quiet caddy 2>/dev/null; then
+        if systemctl is-active --quiet "$XMG_CADDY_SERVICE" 2>/dev/null; then
             xmg_info "正在停止 Caddy 服务..."
-            systemctl stop caddy || xmg_warn "停止 Caddy 服务失败"
+            systemctl stop "$XMG_CADDY_SERVICE" || xmg_warn "停止 Caddy 服务失败"
         fi
 
         # 停止 Xray 服务（如果存在）
-        if systemctl is-active --quiet xray 2>/dev/null; then
+        if systemctl is-active --quiet "$XMG_XRAY_SERVICE" 2>/dev/null; then
             xmg_info "正在停止 Xray 服务..."
-            systemctl stop xray || xmg_warn "停止 Xray 服务失败"
+            systemctl stop "$XMG_XRAY_SERVICE" || xmg_warn "停止 Xray 服务失败"
         fi
 
         # 禁用自启
-        if systemctl is-enabled --quiet caddy 2>/dev/null; then
-            systemctl disable caddy || xmg_warn "禁用 Caddy 自启失败"
+        if systemctl is-enabled --quiet "$XMG_CADDY_SERVICE" 2>/dev/null; then
+            systemctl disable "$XMG_CADDY_SERVICE" || xmg_warn "禁用 Caddy 自启失败"
         fi
-        if systemctl is-enabled --quiet xray 2>/dev/null; then
-            systemctl disable xray || xmg_warn "禁用 Xray 自启失败"
+        if systemctl is-enabled --quiet "$XMG_XRAY_SERVICE" 2>/dev/null; then
+            systemctl disable "$XMG_XRAY_SERVICE" || xmg_warn "禁用 Xray 自启失败"
         fi
     fi
 

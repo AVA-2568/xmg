@@ -629,6 +629,12 @@ xmg_tune_dns_verify() {
     getent hosts deb.debian.org >/dev/null 2>&1
 }
 
+# systemd-resolved 服务单元是否存在（Debian 12 精简模板常缺此包）
+xmg_tune_resolved_unit_exists() {
+    systemctl list-unit-files --type=service 2>/dev/null \
+        | grep -q '^systemd-resolved\.service'
+}
+
 # resolved 未运行时的启用迁移（带回退）：
 # 备份 resolv.conf -> 启用 resolved -> 切 stub 软链 -> 验证解析，失败整体回滚
 xmg_tune_dns_enable_resolved() {
@@ -639,10 +645,46 @@ xmg_tune_dns_enable_resolved() {
         return 1
     fi
 
+    # 前置诊断 1：unit 缺失（Debian 12 精简模板未装该包）-> 尝试安装
+    if ! xmg_tune_resolved_unit_exists; then
+        xmg_warn "systemd-resolved 服务单元不存在（系统未安装该组件）"
+        if xmg_cmd_exists apt-get; then
+            if xmg_confirm "是否安装 systemd-resolved?"; then
+                export DEBIAN_FRONTEND=noninteractive
+                if ! apt-get install -y systemd-resolved; then
+                    xmg_error "安装失败，可先执行 apt-get update 后重试"
+                    xmg_info "或改用「一键 DNS 优化 (UDP)」，无需 resolved"
+                    return 1
+                fi
+            else
+                xmg_info "已取消。可改用「一键 DNS 优化 (UDP)」，无需 resolved"
+                return 1
+            fi
+        else
+            xmg_error "非 apt 系统，请手动安装 systemd-resolved 后重试"
+            return 1
+        fi
+    fi
+
+    # 前置诊断 2：被 mask（部分"优化脚本"会禁用它）
+    if [ "$(systemctl is-enabled systemd-resolved 2>/dev/null)" = "masked" ]; then
+        xmg_warn "systemd-resolved 处于 masked 状态，尝试解除"
+        systemctl unmask systemd-resolved >/dev/null 2>&1 || true
+    fi
+
     cp -a /etc/resolv.conf "$resolv_backup" 2>/dev/null || true
 
-    if ! systemctl enable --now systemd-resolved >/dev/null 2>&1; then
-        xmg_error "systemd-resolved 启用失败，未做任何变更"
+    if ! systemctl enable systemd-resolved >/dev/null 2>&1; then
+        xmg_error "systemd-resolved enable 失败"
+        rm -f "$resolv_backup"
+        return 1
+    fi
+
+    if ! systemctl start systemd-resolved >/dev/null 2>&1; then
+        xmg_error "systemd-resolved 启动失败，最近日志:"
+        journalctl -u systemd-resolved -n 10 --no-pager 2>/dev/null || true
+        systemctl disable systemd-resolved >/dev/null 2>&1 || true
+        rm -f "$resolv_backup"
         return 1
     fi
 
