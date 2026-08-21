@@ -208,7 +208,8 @@ net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
 
-    xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_BBR_CONF"
+    xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_BBR_CONF" || \
+        xmg_warn "部分内核参数写入失败（容器/精简内核常见），以验证结果为准"
 
     local cc=""
     local qdisc=""
@@ -299,7 +300,7 @@ xmg_tune_net_optimize() {
         return 0
     fi
 
-    xmg_tune_backup_file "$XMG_TUNE_SYSCTL_NET_CONF"
+    xmg_tune_backup_file "$XMG_TUNE_SYSCTL_NET_CONF" || true
 
     {
         echo "# XMG: 内核网络参数调优（由 xmg tune 生成）"
@@ -340,7 +341,10 @@ xmg_tune_net_optimize() {
         echo "vm.swappiness = 10"
     } > "$XMG_TUNE_SYSCTL_NET_CONF"
 
-    xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_NET_CONF"
+    # 个别 key 在容器/精简内核上不可写属正常现象：警告后继续，保证 limits 仍然落盘
+    if ! xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_NET_CONF"; then
+        xmg_warn "部分内核参数写入失败（容器/精简内核常见），已跳过失败项"
+    fi
 
     xmg_tune_write_limits
 
@@ -395,21 +399,24 @@ EOF
 }
 
 # 输出 "主DNS 备DNS"，取消或无效时返回非零
+# 交互 UI 必须走 stderr：调用方以命令替换捕获 stdout，UI 混入 stdout 会污染返回值
 xmg_tune_dns_pick() {
     local choice=""
     local p1=""
     local p2=""
 
-    echo
-    echo "请选择 DNS 预设:"
-    echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
-    echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
-    echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
-    echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
-    echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
-    echo "  6. Google IPv6  (2001:4860:4860::8888 / ::8844)     [纯 IPv6 机]"
-    echo "  7. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
-    printf "请选择: "
+    {
+        echo
+        echo "请选择 DNS 预设:"
+        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
+        echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
+        echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
+        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
+        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
+        echo "  6. Google IPv6  (2001:4860:4860::8888 / ::8844)     [纯 IPv6 机]"
+        echo "  7. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
+        printf "请选择: "
+    } >&2
     read -r choice || return 1
 
     case "$choice" in
@@ -420,9 +427,9 @@ xmg_tune_dns_pick() {
         5) printf '2606:4700:4700::1111 2606:4700:4700::1001\n' ;;
         6) printf '2001:4860:4860::8888 2001:4860:4860::8844\n' ;;
         7)
-            printf "主 DNS: "
+            printf "主 DNS: " >&2
             read -r p1 || return 1
-            printf "备 DNS: "
+            printf "备 DNS: " >&2
             read -r p2 || return 1
 
             if ! xmg_tune_valid_ip "$p1"; then
@@ -462,7 +469,7 @@ xmg_tune_dns_apply_resolved() {
     local dns2="$2"
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
-    xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF"
+    xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF" || true
 
     cat > "$XMG_TUNE_RESOLVED_CONF" <<EOF
 # XMG: DNS 优化（由 xmg tune 生成）
@@ -486,7 +493,7 @@ xmg_tune_dns_apply_resolvconf() {
     local dns1="$1"
     local dns2="$2"
 
-    xmg_tune_backup_file /etc/resolv.conf
+    xmg_tune_backup_file /etc/resolv.conf || true
 
     # resolv.conf 若为软链接则替换为真实文件，避免写入链接目标
     if [ -L /etc/resolv.conf ]; then
@@ -530,6 +537,11 @@ xmg_tune_dns_optimize() {
     dns1="$1"
     dns2="$2"
 
+    if ! xmg_tune_valid_ip "$dns1" || ! xmg_tune_valid_ip "$dns2"; then
+        xmg_error "DNS 结果无效: '$dns1' / '$dns2'，未做任何变更"
+        return 0
+    fi
+
     echo
     echo "将使用 DNS: $dns1 / $dns2"
 
@@ -563,20 +575,23 @@ xmg_tune_dot_supported() {
 
 # 输出 DoT 上游 "主 备"，取消时返回非零
 # opportunistic 模式不校验证书，纯 IP 即可（IP#证书名 语法需 systemd 246+）
+# 交互 UI 必须走 stderr，理由同 xmg_tune_dns_pick
 xmg_tune_dot_pick() {
     local choice=""
     local p1=""
     local p2=""
 
-    echo
-    echo "请选择 DoT 上游 (DNSOverTLS=opportunistic，失败自动回退明文):"
-    echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
-    echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
-    echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
-    echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
-    echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
-    echo "  6. 自定义 (支持 IPv4 / IPv6)"
-    printf "请选择: "
+    {
+        echo
+        echo "请选择 DoT 上游 (DNSOverTLS=opportunistic，失败自动回退明文):"
+        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
+        echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
+        echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
+        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
+        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
+        echo "  6. 自定义 (支持 IPv4 / IPv6)"
+        printf "请选择: "
+    } >&2
     read -r choice || return 1
 
     case "$choice" in
@@ -586,9 +601,9 @@ xmg_tune_dot_pick() {
         4) printf '223.5.5.5 223.6.6.6\n' ;;
         5) printf '2606:4700:4700::1111 2606:4700:4700::1001\n' ;;
         6)
-            printf "主 DoT 上游 IP: "
+            printf "主 DoT 上游 IP: " >&2
             read -r p1 || return 1
-            printf "备 DoT 上游 IP: "
+            printf "备 DoT 上游 IP: " >&2
             read -r p2 || return 1
 
             if ! xmg_tune_valid_ip "$p1"; then
@@ -654,7 +669,7 @@ xmg_tune_dns_dot_apply() {
     local dns2="$2"
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
-    xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF"
+    xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF" || true
 
     cat > "$XMG_TUNE_RESOLVED_CONF" <<EOF
 # XMG: 加密 DNS DoT（由 xmg tune 生成）
@@ -708,6 +723,11 @@ xmg_tune_dns_dot() {
     dns1="$1"
     dns2="$2"
 
+    if ! xmg_tune_valid_ip "$dns1" || ! xmg_tune_valid_ip "$dns2"; then
+        xmg_error "DoT 上游无效: '$dns1' / '$dns2'，未做任何变更"
+        return 0
+    fi
+
     echo
     echo "将启用 DoT (opportunistic): $dns1 / $dns2"
 
@@ -723,7 +743,7 @@ xmg_tune_dns_dot() {
         fi
     fi
 
-    xmg_tune_dns_dot_apply "$dns1" "$dns2"
+    xmg_tune_dns_dot_apply "$dns1" "$dns2" || true
 }
 
 # ===== 时间同步 =====
@@ -824,7 +844,7 @@ xmg_tune_swap_create() {
         xmg_warn "Swap 过大（>8G），低配 VPS 不建议"
         return 1
     fi
-    xmg_tune_backup_file /etc/fstab
+    xmg_tune_backup_file /etc/fstab || true
 
     xmg_info "创建 ${mb}MB Swap: $XMG_TUNE_SWAPFILE"
 
@@ -898,11 +918,11 @@ xmg_tune_swap_panel() {
                 ;;
             2)
                 clear
-                xmg_tune_swap_create
+                xmg_tune_swap_create || true
                 xmg_pause
                 ;;
             3)
-                xmg_tune_swap_remove
+                xmg_tune_swap_remove || true
                 xmg_pause
                 ;;
             0)
@@ -1007,27 +1027,28 @@ xmg_tune_menu() {
         case "$choice" in
             1)
                 clear
-                xmg_tune_bbr_enable
+                # 动作失败不退出菜单：set -e 下裸调用非零返回会终止整个 xmg
+                xmg_tune_bbr_enable || true
                 xmg_pause
                 ;;
             2)
                 clear
-                xmg_tune_net_optimize
+                xmg_tune_net_optimize || true
                 xmg_pause
                 ;;
             3)
                 clear
-                xmg_tune_dns_optimize
+                xmg_tune_dns_optimize || true
                 xmg_pause
                 ;;
             4)
                 clear
-                xmg_tune_dns_dot
+                xmg_tune_dns_dot || true
                 xmg_pause
                 ;;
             5)
                 clear
-                xmg_tune_time_sync
+                xmg_tune_time_sync || true
                 xmg_pause
                 ;;
             6)
