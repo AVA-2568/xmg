@@ -50,13 +50,11 @@ XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
 XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
 XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
 XMG_WWW_DIR="${XMG_WWW_DIR:-$XMG_HOME/www}"
-XMG_CADDY_DIR="${XMG_CADDY_DIR:-$XMG_HOME/caddy}"
 XMG_XRAY_DIR="${XMG_XRAY_DIR:-$XMG_HOME/xray}"
 
 XMG_BIN="${XMG_BIN:-$XMG_BIN_DIR/xmg}"
 XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
 
-XMG_CADDYFILE="${XMG_CADDYFILE:-$XMG_CADDY_DIR/Caddyfile}"
 XMG_XRAY_CONFIG="${XMG_XRAY_CONFIG:-$XMG_XRAY_DIR/config.json}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,7 +98,6 @@ install_dirs() {
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
         "$XMG_WWW_DIR" \
-        "$XMG_CADDY_DIR" \
         "$XMG_XRAY_DIR" \
         "$(dirname "$XMG_LINK")"
 
@@ -114,7 +111,6 @@ install_dirs() {
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
         "$XMG_WWW_DIR" \
-        "$XMG_CADDY_DIR" \
         "$XMG_XRAY_DIR"
 }
 
@@ -374,7 +370,6 @@ print_summary() {
     echo "日志目录: $XMG_LOG_DIR"
     echo "备份目录: $XMG_BACKUP_DIR"
     echo "站点目录: $XMG_WWW_DIR"
-    echo "Caddy 配置目录: $XMG_CADDY_DIR"
     echo "Xray 配置目录: $XMG_XRAY_DIR"
     echo
     echo "执行命令:"

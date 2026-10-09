@@ -7,13 +7,10 @@ lib/state.sh
 lib/render.sh
 lib/proxy.sh
 lib/core.sh
-lib/caddy.sh
 lib/xray.sh
-lib/site.sh
 lib/firewall.sh
 lib/tune.sh
 lib/ssh.sh
 lib/maint.sh
-lib/third-party.sh
 lib/update.sh
 lib/uninstall.sh
