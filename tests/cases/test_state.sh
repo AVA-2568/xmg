@@ -297,3 +297,52 @@ xmg_state_set "PROXY_SOCKS_USER" "a
 b" 2>/dev/null; t_equals "多行值应返回 1" "$?" "1"
 #两次非法写入都应被拒，用户名仍是先前合法写入的 alice（未被覆盖也未被清空）
 t_equals "非法写入未污染状态" "$(xmg_state_get PROXY_SOCKS_USER)" "alice"
+
+# ============================================================
+# --- 暂存批处理与草稿原子提交 (xmg_state_stage / commit / clear) ---
+# ============================================================
+
+# 1. stage 内存暂存与延迟落盘
+xmg_state_stage "TEST_STAGE_A" "val_a"
+t_equals "stage 后内存可立即读取" "$(xmg_state_get TEST_STAGE_A)" "val_a"
+t_not_contains "stage 尚未提交时磁盘文件不得包含新键" "$(cat "$XMG_STATE_FILE")" "TEST_STAGE_A="
+
+# 2. stage 参数合法性校验
+xmg_state_stage "INVALID KEY" "v" 2>/dev/null; t_equals "stage 非法键名应拒绝" "$?" "1"
+xmg_state_stage "TEST_KEY_BAD" "val"$'\n'"broken" 2>/dev/null; t_equals "stage 换行值应拒绝" "$?" "1"
+t_equals "非法 stage 未污染内存" "$(xmg_state_get TEST_KEY_BAD)" ""
+
+# 3. stage_clear 清空暂存并还原内存
+xmg_state_stage "PROXY_SOCKS_PORT" "9999"
+t_equals "stage 暂存修改端口" "$(xmg_state_get PROXY_SOCKS_PORT)" "9999"
+xmg_state_stage_clear
+t_equals "stage_clear 后恢复磁盘原值" "$(xmg_state_get PROXY_SOCKS_PORT)" "1080"
+t_equals "未提交的新键在 stage_clear 后恢复为空" "$(xmg_state_get TEST_STAGE_A)" ""
+
+# 4. 批量 stage 与 commit_draft 原子事务落盘
+xmg_state_stage "PROXY_SOCKS_USER" "batch_alice"
+xmg_state_stage "PROXY_SOCKS_PORT" "2080"
+xmg_state_stage "BATCH_NEW_KEY" "batch_value"
+# 提交前文件未变
+t_contains "提交前文件仍为原用户名" "$(cat "$XMG_STATE_FILE")" "PROXY_SOCKS_USER=alice"
+t_not_contains "提交前文件不含新键" "$(cat "$XMG_STATE_FILE")" "BATCH_NEW_KEY="
+
+xmg_state_commit_draft
+t_equals "commit_draft 应返回 0" "$?" "0"
+
+# 提交后磁盘文件包含全部更新，且无重复键
+_sf_content="$(cat "$XMG_STATE_FILE")"
+t_contains "commit_draft 后磁盘包含更新后的用户名" "$_sf_content" "PROXY_SOCKS_USER=batch_alice"
+t_contains "commit_draft 后磁盘包含更新后的端口" "$_sf_content" "PROXY_SOCKS_PORT=2080"
+t_contains "commit_draft 后磁盘包含追加的新键" "$_sf_content" "BATCH_NEW_KEY=batch_value"
+t_equals "覆盖写不产生重复 PROXY_SOCKS_USER" "$(grep -c '^PROXY_SOCKS_USER=' "$XMG_STATE_FILE")" "1"
+t_equals "覆盖写不产生重复 PROXY_SOCKS_PORT" "$(grep -c '^PROXY_SOCKS_PORT=' "$XMG_STATE_FILE")" "1"
+
+# 提交后暂存区已清空，再次 commit_draft 返回 0
+xmg_state_commit_draft
+t_equals "空暂存区 commit_draft 恒返回 0" "$?" "0"
+
+# 权限保证
+if [ "$_xmg_perm_ok" = "1" ]; then
+    t_equals "commit_draft 后状态文件权限保持 600" "$(stat -c '%a' "$XMG_STATE_FILE")" "600"
+fi

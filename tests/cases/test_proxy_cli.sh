@@ -142,6 +142,20 @@ xmg_proxy_disable bogus 2>/dev/null
 t_equals "非法方案名应返回 2" "$?" "2"
 
 # ------------------------------------------------------------------
+# acme 来源防损坏与证书文件不存在时的防御性处理
+# ------------------------------------------------------------------
+xmg_proxy_apply --vless on --vless-port 8443 --vless-domain acme.test \
+                --vless-uuid acme-uuid-123 --vless-cert-source acme 2>/dev/null
+t_equals "acme apply 应返回 0" "$?" "0"
+CFG_ACME="$(cat "$XMG_XRAY_CONFIG")"
+t_contains "acme 配置含 inbound-vless" "$CFG_ACME" '"tag": "inbound-vless"'
+t_contains "acme 配置含 serverName" "$CFG_ACME" '"serverName": "acme.test"'
+t_contains "acme 配置以 { 开头" "${CFG_ACME:0:1}" "{"
+t_equals "state 记录来源为 acme" "$(xmg_state_get PROXY_VLESS_CERT_SOURCE)" "acme"
+OUT_ACME="$(xmg_proxy_status 2>&1)"
+t_contains "status 正确展示 acme 证书来源" "$OUT_ACME" "证书: acme"
+
+# ------------------------------------------------------------------
 # 恢复环境
 # ------------------------------------------------------------------
 XMG_ETC_DIR="$_TP_SAVED_ETC"
