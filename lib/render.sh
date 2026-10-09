@@ -161,6 +161,7 @@ xmg_render_outbounds() {
 xmg_render_log() {
     #优先用 xmg.sh 已规范化的 XMG_XRAY_LOG_DIR，未加载时退回拼接
     local dir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
+    mkdir -p "$dir" 2>/dev/null || true
     local errpath="" esc=""
     errpath="$dir/error.log"
     _xmg_json_escape_into esc "$errpath"

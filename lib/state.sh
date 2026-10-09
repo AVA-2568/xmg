@@ -698,8 +698,13 @@ xmg_state_validate_config() {
         return 3
     }
 
-    if ! "$bin" run -test -c "$cfg" >/dev/null 2>&1; then
-        xmg_error "Xray 拒绝了生成的配置（xray run -test 失败）"
+    local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
+    mkdir -p "$logdir" 2>/dev/null || true
+
+    local err_out=""
+    if ! err_out="$("$bin" run -test -c "$cfg" 2>&1)"; then
+        xmg_error "Xray 拒绝了生成的配置（xray run -test 失败）:"
+        [ -n "$err_out" ] && printf '%s\n' "$err_out" >&2
         return 3
     fi
     return 0
@@ -774,6 +779,9 @@ xmg_state_commit() {
     local old_backup=""
     local had_old=0
     local dir_tmp=""
+
+    local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
+    mkdir -p "$logdir" 2>/dev/null || true
 
     # 1. 校验新配置（失败绝不触碰现网配置）
     xmg_state_validate_config "$new_cfg"
