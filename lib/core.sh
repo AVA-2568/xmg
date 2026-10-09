@@ -47,6 +47,19 @@ if ! declare -F xmg_detect_mem_profile >/dev/null 2>&1; then
     if [ -f "$_XMG_CORE_LIBDIR/detect.sh" ]; then
         # shellcheck source=/dev/null
         source "$_XMG_CORE_LIBDIR/detect.sh"
+    elif [ -f "${XMG_LIB_DIR:-/opt/xmg/lib}/detect.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-/opt/xmg/lib}/detect.sh"
+    fi
+fi
+
+if ! declare -F xmg_state_init >/dev/null 2>&1; then
+    if [ -f "$_XMG_CORE_LIBDIR/state.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$_XMG_CORE_LIBDIR/state.sh"
+    elif [ -f "${XMG_LIB_DIR:-/opt/xmg/lib}/state.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-/opt/xmg/lib}/state.sh"
     fi
 fi
 unset _XMG_CORE_LIBDIR
@@ -340,17 +353,30 @@ xmg_core_version() {
         xmg_warn "未检测到 xray 内核，请先安装"
         return 1
     }
-    "$bin" version 2>/dev/null | head -1
+    local out=""
+    out="$("$bin" version 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" | head -n 1
+        return 0
+    fi
+    return 1
 }
 
 xmg_core_status() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local channel
     channel="$(xmg_state_get XRAY_CHANNEL)"
     printf '内核通道: %s\n' "$channel"
     if [ "$channel" = "pinned" ]; then
         printf '锁定版本: %s\n' "$(xmg_state_get XRAY_PINNED_VERSION)"
     fi
-    printf '当前版本: %s\n' "$(xmg_core_version 2>/dev/null || printf '(未安装)')"
+    local v=""
+    v="$(xmg_core_version 2>/dev/null || true)"
+    if [ -n "$v" ]; then
+        printf '当前版本: %s\n' "$v"
+    else
+        printf '当前版本: (未安装)\n'
+    fi
 }
 
 # ===== 内存体检 =====
@@ -431,6 +457,7 @@ xmg_core_memcheck() {
 # ===== 菜单 =====
 # XMG_MENU_LABEL: Xray 内核
 xmg_core_menu() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local choice="" ver=""
     while true; do
         clear

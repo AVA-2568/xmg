@@ -348,6 +348,49 @@ xmg_ssh_enable_password() {
 
 # ===== fail2ban =====
 
+# 生成 fail2ban sshd jail 配置
+_xmg_ssh_write_f2b_conf() {
+    local backend="$1"
+    local port="${2:-22}"
+
+    mkdir -p "$(dirname "$XMG_SSH_F2B_JAIL_CONF")"
+    cat > "$XMG_SSH_F2B_JAIL_CONF" <<EOF
+# XMG: sshd 防爆破（由 xmg ssh 生成）
+[sshd]
+enabled = true
+port = ssh,$port
+backend = $backend
+maxretry = 5
+findtime = 10m
+bantime = 1h
+bantime.increment = true
+bantime.maxtime = 1w
+EOF
+    if [ "$backend" = "auto" ] && [ -f /var/log/auth.log ]; then
+        echo "logpath = /var/log/auth.log" >> "$XMG_SSH_F2B_JAIL_CONF"
+    fi
+}
+
+# 重启 fail2ban 并轮询等待就绪
+_xmg_ssh_restart_and_wait_f2b() {
+    if xmg_cmd_exists systemctl && [ -d /run/systemd/system ]; then
+        systemctl enable fail2ban >/dev/null 2>&1 || true
+        systemctl restart fail2ban >/dev/null 2>&1 || true
+    elif xmg_cmd_exists service; then
+        service fail2ban restart >/dev/null 2>&1 || true
+    fi
+
+    # fail2ban 是 Python 守护进程，启动创建 socket 并加载 jail 需耗时 1-3 秒，轮询最多等待 5 秒
+    local i=0
+    for ((i=1; i<=10; i++)); do
+        if fail2ban-client status sshd >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 xmg_ssh_fail2ban_install() {
     xmg_require_root
 
@@ -366,30 +409,43 @@ xmg_ssh_fail2ban_install() {
         fi
     fi
 
-    # sshd jail：backend=systemd 避免 Debian 12 无 /var/log/auth.log 时起不来
-    mkdir -p "$(dirname "$XMG_SSH_F2B_JAIL_CONF")"
-    cat > "$XMG_SSH_F2B_JAIL_CONF" <<'EOF'
-# XMG: sshd 防爆破（由 xmg ssh 生成）
-[sshd]
-enabled = true
-backend = systemd
-maxretry = 5
-findtime = 10m
-bantime = 1h
-bantime.increment = true
-bantime.maxtime = 1w
-EOF
-
-    systemctl enable --now fail2ban >/dev/null 2>&1 || true
-    systemctl restart fail2ban >/dev/null 2>&1 || true
-
-    if fail2ban-client status sshd >/dev/null 2>&1; then
-        xmg_info "fail2ban sshd jail 已启用（5 次失败封 1 小时，累犯递增最长 1 周）"
-        fail2ban-client status sshd
-    else
-        xmg_error "sshd jail 未正常运行，请检查: systemctl status fail2ban"
-        return 1
+    local current_port="22"
+    if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
+        current_port="$(xmg_ssh_get_port 2>/dev/null || echo 22)"
     fi
+
+    # 选择初始后端：若存在 /var/log/auth.log 则优先 auto，否则 systemd
+    local primary_backend="systemd"
+    if [ -f /var/log/auth.log ]; then
+        primary_backend="auto"
+    fi
+
+    _xmg_ssh_write_f2b_conf "$primary_backend" "$current_port"
+
+    if ! _xmg_ssh_restart_and_wait_f2b; then
+        # 首次启动未就绪，尝试自动 fallback 切换后端
+        local fallback_backend="auto"
+        [ "$primary_backend" = "auto" ] && fallback_backend="systemd"
+        xmg_warn "sshd jail ($primary_backend 后端) 启动超时，尝试切换为 $fallback_backend 后端自适应修复..."
+        _xmg_ssh_write_f2b_conf "$fallback_backend" "$current_port"
+
+        if ! _xmg_ssh_restart_and_wait_f2b; then
+            xmg_error "sshd jail 未正常运行，排查诊断信息如下:"
+            if xmg_cmd_exists systemctl; then
+                systemctl status fail2ban --no-pager 2>/dev/null | head -n 15 || true
+            fi
+            fail2ban-client status 2>/dev/null || true
+            if [ -r /var/log/fail2ban.log ]; then
+                xmg_error "fail2ban.log 最新日志:"
+                tail -n 10 /var/log/fail2ban.log 2>/dev/null || true
+            fi
+            return 1
+        fi
+    fi
+
+    xmg_info "fail2ban sshd jail 已启用（5 次失败封 1 小时，累犯递增最长 1 周，监控端口: $current_port）"
+    fail2ban-client status sshd 2>/dev/null || true
+    return 0
 }
 
 xmg_ssh_fail2ban_status() {

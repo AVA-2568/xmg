@@ -27,6 +27,47 @@ fi
 
 XMG_HOME="${XMG_HOME:-/opt/xmg}"
 
+# 基本日志函数回退
+if ! declare -F xmg_info >/dev/null 2>&1; then
+    xmg_info()  { printf '[INFO] %s\n' "$*"; }
+    xmg_warn()  { printf '[WARN] %s\n' "$*" >&2; }
+    xmg_error() { printf '[ERROR] %s\n' "$*" >&2; }
+fi
+
+# ===== 依赖加载 =====
+# proxy.sh 依赖 state.sh (状态管理与事务)、render.sh (配置渲染) 与 core.sh (内核版本/控制)
+_XMG_PROXY_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -F xmg_state_init >/dev/null 2>&1; then
+    if [ -f "$_XMG_PROXY_LIBDIR/state.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$_XMG_PROXY_LIBDIR/state.sh"
+    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/state.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/state.sh"
+    fi
+fi
+
+if ! declare -F xmg_render_config >/dev/null 2>&1; then
+    if [ -f "$_XMG_PROXY_LIBDIR/render.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$_XMG_PROXY_LIBDIR/render.sh"
+    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/render.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/render.sh"
+    fi
+fi
+
+if ! declare -F xmg_core_version >/dev/null 2>&1; then
+    if [ -f "$_XMG_PROXY_LIBDIR/core.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$_XMG_PROXY_LIBDIR/core.sh"
+    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/core.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/core.sh"
+    fi
+fi
+unset _XMG_PROXY_LIBDIR
+
 # acme.sh 证书申请路径。
 # 安装目录自包含约束：acme.sh 与证书产物都必须落在 XMG_HOME 单一目录树内，
 # 不得散落到 $HOME（默认 ~/.acme.sh）或 /etc/letsencrypt。
@@ -111,6 +152,7 @@ _xmg_stage_onoff() {
 
 # ===== apply =====
 xmg_proxy_apply() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     xmg_proxy_parse_args "$@" || return 2
     _xmg_stage_reset
 
@@ -216,6 +258,7 @@ xmg_proxy_apply() {
 # 只关掉目标方案；另一个方案与其余配置保持不变。
 # 走 apply 的 --socks/--vless off，复用同一套校验与提交逻辑。
 xmg_proxy_disable() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     case "${1:-}" in
         socks) xmg_proxy_apply --socks off ;;
         vless) xmg_proxy_apply --vless off ;;
@@ -229,14 +272,19 @@ xmg_proxy_disable() {
 # ===== status =====
 # 内核版本回显兜底：CLI 子命令按需加载，core.sh 可能未加载。
 _xmg_proxy_kernel_version() {
+    local v=""
     if declare -F xmg_core_version >/dev/null 2>&1; then
-        xmg_core_version 2>/dev/null || printf '(未安装)'
+        v="$(xmg_core_version 2>/dev/null)" || true
+    fi
+    if [ -n "$v" ]; then
+        printf '%s' "$v"
     else
         printf '(未安装)'
     fi
 }
 
 xmg_proxy_status() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local json=0
     [ "${1:-}" = "--json" ] && json=1
 
@@ -308,6 +356,7 @@ xmg_proxy_status() {
 # 输出全部 KEY=VALUE（含密码明文）。仅供重定向到文件使用；
 # 调用方绝不可把它直接打到终端或写进日志。
 xmg_proxy_export() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     xmg_state_all
 }
 
@@ -406,6 +455,7 @@ _xmg_read() {
 
 # XMG_MENU_LABEL: 代理方案
 xmg_proxy_menu() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local choice="" d=""
     while true; do
         clear
