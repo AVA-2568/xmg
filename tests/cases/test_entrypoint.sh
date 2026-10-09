@@ -9,6 +9,7 @@ MAIN="$SRC/xmg"
 FILES="$SRC/xmg.files"
 
 # --- xmg.files 必须登记新模块 ---
+t_contains "清单含 detect.sh" "$(cat "$FILES")" "lib/detect.sh"
 t_contains "清单含 state.sh" "$(cat "$FILES")" "lib/state.sh"
 t_contains "清单含 render.sh" "$(cat "$FILES")" "lib/render.sh"
 t_contains "清单含 proxy.sh" "$(cat "$FILES")" "lib/proxy.sh"

@@ -1,5 +1,6 @@
 xmg
 lib/common.sh
+lib/detect.sh
 lib/system.sh
 lib/monitor.sh
 lib/menu.sh
