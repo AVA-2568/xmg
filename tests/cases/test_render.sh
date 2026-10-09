@@ -17,11 +17,15 @@ _TC_HAS_STATE_DIR="${XMG_XRAY_STATE_DIR+x}"
 _TC_HAS_STATE_FILE="${XMG_STATE_FILE+x}"
 _TC_HAS_LOG_DIR="${XMG_LOG_DIR+x}"
 _TC_HAS_XRAY_LOG_DIR="${XMG_XRAY_LOG_DIR+x}"
+_TC_HAS_NET_IPV4="${XMG_NET_IPV4+x}"
+_TC_HAS_NET_IPV6="${XMG_NET_IPV6+x}"
 _TC_SAVED_ETC="${XMG_ETC_DIR-}"
 _TC_SAVED_STATE_DIR="${XMG_XRAY_STATE_DIR-}"
 _TC_SAVED_STATE_FILE="${XMG_STATE_FILE-}"
 _TC_SAVED_LOG_DIR="${XMG_LOG_DIR-}"
 _TC_SAVED_XRAY_LOG_DIR="${XMG_XRAY_LOG_DIR-}"
+_TC_SAVED_NET_IPV4="${XMG_NET_IPV4-}"
+_TC_SAVED_NET_IPV6="${XMG_NET_IPV6-}"
 
 XMG_TMP="$(mktemp -d)"
 export XMG_ETC_DIR="$XMG_TMP/etc"
@@ -244,6 +248,36 @@ t_equals "共存产物 streamSettings 恰出现在 VLESS 一处" "$_t_c3_ss" "1"
 t_not_contains "仅 SOCKS 产物无 streamSettings" "$C1" 'streamSettings'
 
 # ============================================================================
+# 6. Task 4 加固字段断言 (rejectUnknownSni, domainStrategy, connIdle, IPv6 DoH)
+# ============================================================================
+# 6.1 VLESS TLS rejectUnknownSni 阻断空 SNI 探测
+t_contains "VLESS 产物 tlsSettings 包含 rejectUnknownSni: true" "$C2" '"rejectUnknownSni": true'
+t_contains "共存产物 tlsSettings 包含 rejectUnknownSni: true" "$C3" '"rejectUnknownSni": true'
+
+# 6.2 Freedom 出站闭环 domainStrategy
+t_contains "默认/双栈下 freedom 出站包含 domainStrategy: UseIP" "$C3" '"domainStrategy": "UseIP"'
+
+# 6.3 Policy 连接空闲超时收缩至 60 秒
+t_contains "Policy 配置包含 connIdle: 60" "$C3" '"connIdle": 60'
+
+# 6.4 默认/双栈下 DNS DoH 与 queryStrategy
+t_contains "默认/双栈下 DNS servers 包含 1.1.1.1" "$C3" '"https+local://1.1.1.1/dns-query"'
+t_contains "默认/双栈下 DNS servers 包含 8.8.8.8" "$C3" '"https+local://8.8.8.8/dns-query"'
+t_contains "默认/双栈下 DNS queryStrategy 为 UseIP" "$C3" '"queryStrategy": "UseIP"'
+
+# 6.5 纯 IPv6 场景动态适配 (XMG_NET_IPV4=0 && XMG_NET_IPV6=1)
+XMG_NET_IPV4=0
+XMG_NET_IPV6=1
+C_IPV6="$(xmg_render_config 1 1)"
+t_json_valid "纯 IPv6 场景配置是合法 JSON" "$C_IPV6"
+t_contains "纯 IPv6 下 freedom 出站 domainStrategy 为 UseIPv6" "$C_IPV6" '"domainStrategy": "UseIPv6"'
+t_contains "纯 IPv6 下 DNS servers 包含 Cloudflare IPv6 DoH" "$C_IPV6" '"https+local://[2606:4700:4700::1111]/dns-query"'
+t_contains "纯 IPv6 下 DNS servers 包含 Google IPv6 DoH" "$C_IPV6" '"https+local://[2001:4860:4860::8888]/dns-query"'
+t_contains "纯 IPv6 下 DNS queryStrategy 为 UseIPv6" "$C_IPV6" '"queryStrategy": "UseIPv6"'
+t_not_contains "纯 IPv6 下 DNS servers 不包含 IPv4 1.1.1.1" "$C_IPV6" '"https+local://1.1.1.1/dns-query"'
+unset XMG_NET_IPV4 XMG_NET_IPV6
+
+# ============================================================================
 # 负例：证明 JSON 检查器真的会响（否则「合法 JSON」断言在检查器恒 0 时也会全绿）
 # ============================================================================
 _json_rc=0
@@ -258,16 +292,22 @@ eval "XMG_XRAY_STATE_DIR=\"\$_TC_SAVED_STATE_DIR\""
 eval "XMG_STATE_FILE=\"\$_TC_SAVED_STATE_FILE\""
 eval "XMG_LOG_DIR=\"\$_TC_SAVED_LOG_DIR\""
 eval "XMG_XRAY_LOG_DIR=\"\$_TC_SAVED_XRAY_LOG_DIR\""
+eval "XMG_NET_IPV4=\"\$_TC_SAVED_NET_IPV4\""
+eval "XMG_NET_IPV6=\"\$_TC_SAVED_NET_IPV6\""
 [ -n "$_TC_HAS_ETC" ] || unset XMG_ETC_DIR
 [ -n "$_TC_HAS_STATE_DIR" ] || unset XMG_XRAY_STATE_DIR
 [ -n "$_TC_HAS_STATE_FILE" ] || unset XMG_STATE_FILE
 [ -n "$_TC_HAS_LOG_DIR" ] || unset XMG_LOG_DIR
 [ -n "$_TC_HAS_XRAY_LOG_DIR" ] || unset XMG_XRAY_LOG_DIR
+[ -n "$_TC_HAS_NET_IPV4" ] || unset XMG_NET_IPV4
+[ -n "$_TC_HAS_NET_IPV6" ] || unset XMG_NET_IPV6
 unset _TC_SAVED_ETC _TC_SAVED_STATE_DIR _TC_SAVED_STATE_FILE
 unset _TC_SAVED_LOG_DIR _TC_SAVED_XRAY_LOG_DIR
+unset _TC_SAVED_NET_IPV4 _TC_SAVED_NET_IPV6
 unset _TC_HAS_ETC _TC_HAS_STATE_DIR _TC_HAS_STATE_FILE
 unset _TC_HAS_LOG_DIR _TC_HAS_XRAY_LOG_DIR
+unset _TC_HAS_NET_IPV4 _TC_HAS_NET_IPV6
 unset _t_c3_inbound_tags _t_c3_ports _t_c3_ss _json_rc _json_err
 XMG_STATE=()
 rm -rf "$XMG_TMP"
-unset XMG_TMP CERT KEY C1 C2 C3
+unset XMG_TMP CERT KEY C1 C2 C3 C_IPV6
