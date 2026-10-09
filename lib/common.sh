@@ -163,7 +163,9 @@ xmg_mkdirs() {
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
-        "$XMG_WWW_DIR"
+        "$XMG_WWW_DIR" \
+        "$XMG_XRAY_DIR" \
+        "$XMG_ETC_DIR/xray"
 }
 
 xmg_pause() {

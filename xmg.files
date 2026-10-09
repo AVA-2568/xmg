@@ -3,6 +3,10 @@ lib/common.sh
 lib/system.sh
 lib/monitor.sh
 lib/menu.sh
+lib/state.sh
+lib/render.sh
+lib/proxy.sh
+lib/core.sh
 lib/caddy.sh
 lib/xray.sh
 lib/site.sh

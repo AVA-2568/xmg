@@ -36,6 +36,11 @@ XMG_TUNE_MODULES_LOAD_CONF="${XMG_TUNE_MODULES_LOAD_CONF:-/etc/modules-load.d/xm
 XMG_TUNE_NOFILE="${XMG_TUNE_NOFILE:-1048576}"
 XMG_TUNE_SWAPFILE="${XMG_TUNE_SWAPFILE:-/swapfile}"
 
+# DNS 默认预设（境外优先：本面板多部署于海外服务器，阿里 DNS 直连延迟高）
+XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
+XMG_TUNE_DOT_DEFAULT="${XMG_TUNE_DOT_DEFAULT:-1.1.1.1 1.0.0.1}"
+export XMG_TUNE_DNS_DEFAULT XMG_TUNE_DOT_DEFAULT
+
 # ===== 依赖 common.sh 的兜底 =====
 
 if ! declare -F xmg_info >/dev/null 2>&1; then
@@ -408,19 +413,21 @@ xmg_tune_dns_pick() {
     {
         echo
         echo "请选择 DNS 预设:"
-        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
+        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐·默认]"
         echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
         echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
-        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
+        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐·海外服务器延迟较高]"
         echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
         echo "  6. Google IPv6  (2001:4860:4860::8888 / ::8844)     [纯 IPv6 机]"
         echo "  7. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
-        printf "请选择: "
+        printf "请选择 [1]: "
     } >&2
     read -r choice || return 1
+    # 空输入归一为默认（Cloudflare，境外）
+    [ -z "$choice" ] && choice="1"
 
     case "$choice" in
-        1) printf '1.1.1.1 1.0.0.1\n' ;;
+        1) printf '%s\n' "$XMG_TUNE_DNS_DEFAULT" ;;
         2) printf '8.8.8.8 8.8.4.4\n' ;;
         3) printf '9.9.9.9 149.112.112.112\n' ;;
         4) printf '223.5.5.5 223.6.6.6\n' ;;
@@ -584,18 +591,20 @@ xmg_tune_dot_pick() {
     {
         echo
         echo "请选择 DoT 上游 (DNSOverTLS=opportunistic，失败自动回退明文):"
-        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐]"
+        echo "  1. Cloudflare   (1.1.1.1 / 1.0.0.1)            [境外推荐·默认]"
         echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
         echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
-        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐]"
+        echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐·海外服务器延迟较高]"
         echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
         echo "  6. 自定义 (支持 IPv4 / IPv6)"
-        printf "请选择: "
+        printf "请选择 [1]: "
     } >&2
     read -r choice || return 1
+    # 空输入归一为默认（Cloudflare，境外）
+    [ -z "$choice" ] && choice="1"
 
     case "$choice" in
-        1) printf '1.1.1.1 1.0.0.1\n' ;;
+        1) printf '%s\n' "$XMG_TUNE_DOT_DEFAULT" ;;
         2) printf '8.8.8.8 8.8.4.4\n' ;;
         3) printf '9.9.9.9 149.112.112.112\n' ;;
         4) printf '223.5.5.5 223.6.6.6\n' ;;

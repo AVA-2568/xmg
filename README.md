@@ -16,7 +16,14 @@ xmg #运行
 ## 功能
 
 - **实时监控**：CPU 负载 / 内存 / 磁盘 / 服务状态 / 端口监听，低资源模式
-- **Xray 管理**：官方脚本安装、systemd drop-in 统一配置路径、服务生命周期、诊断
+- **Xray 内核管理**：stable / preview / pinned 三通道，走官方脚本 `--beta` / `--version`（默认 preview 预览版）
+- **代理方案配置**（交互向导 + 非交互 CLI，均幂等）：
+  - **SOCKS5**：公网入口，`auth: password` 强制用户名+密码；⚠️ 协议不加密，账号与流量均为**明文**，仅提供访问控制
+  - **VLESS + XHTTP + TLS**：支持过 CDN（Cloudflare 需在面板启用 gRPC；其它 CDN 建议 `mode: packet-up`）
+  - 两方案可独立启用、也可同时存在（端口与 tag 分离，互不覆盖）
+  - 证书来源二选一：用户提供已签发证书 / 手动调用 acme.sh 申请（低配机型不自动申请）
+- **配置状态层**：`/opt/xmg/etc/xray/state.env` 为唯一真相来源，`config.json` 由其生成；写入前经 `xray run -test` 校验，失败不触碰现网
+- **DNS（两层）**：Xray 内置 `https+local://` DoH（Cloudflare + Google，IP 形式）+ 系统层 systemd-resolved DoT，默认境外上游
 - **Caddy 管理**：APT 优先 + 官方二进制兜底（不执行 apt-get update）、服务生命周期
 - **站点管理**：Git 拉取部署、备份、清空（路径安全校验）
 - **防火墙管理**：UFW 基础管理，Debian 一键安装 UFW（Ubuntu 预装）
@@ -42,10 +49,33 @@ xmg #运行
 - **外部工具**：预置 IP 质量体检 / YABS / 融合怪（仅收录实测可访问地址），支持自定义第三方脚本
 - **更新 / 回滚**：版本对比 GitHub Raw，更新前自动备份，支持回滚
 
+### 常用命令
+
+```bash
+# 非交互配置（幂等）：SOCKS5 与 VLESS+XHTTP+TLS 可分别或同时启用
+xmg proxy apply --socks on --socks-port 1080 --socks-user u --socks-pass 'p'
+xmg proxy apply --vless on --vless-port 443 --vless-domain example.com --vless-uuid <uuid>
+xmg proxy status --json
+xmg proxy disable socks
+xmg proxy export                 # 导出当前状态（含明文密码，勿贴终端）
+xmg proxy acme example.com       # 手动申请并写入证书
+xmg proxy menu                   # 交互向导（等价于菜单内「代理方案」）
+
+# 内核管理
+xmg core install                 # 按记录的通道安装/更新
+xmg core version
+xmg core status
+xmg core menu                    # 交互选择 stable / preview / pinned
+```
+
+退出码：`0` 成功 / `2` 校验失败 / `3` 内核校验失败 / `4` 运行失败（已回滚）。
+
 ## 适配
 
-- 系统：Debian 11/12+、Ubuntu 20.04+
-- 配置：低配 VPS（0.5C / 215MB）到高配机均可用，调优参数按内存自动分档
+- 系统：Debian 11/12+、Ubuntu 20.04+（仅此两类，不做多发行版分支）
+- 配置：低配 VPS（0.5C / 215M）到高配机均可用；调优参数按内存自动分档
+- 架构：x86_64 / aarch64 / armv7l / mips（含 KVM、OpenVZ、NAT 机型）
+- NAT：无独立公网 IPv4 时，SOCKS5 入口需服务商端口映射；VLESS+XHTTP+TLS 过 CDN 不受影响
 
 ---
 

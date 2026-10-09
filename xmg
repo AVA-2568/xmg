@@ -78,6 +78,16 @@ XMG $XMG_VERSION
   xmg monitor         启动 XMG Monitor (Real-Time)
   xmg menu            进入管理菜单
   xmg doctor          输出轻量系统摘要
+  xmg proxy apply [参数]   应用代理方案配置（幂等）
+  xmg proxy status [--json] 查看代理方案状态
+  xmg proxy disable <socks|vless>  停用某方案
+  xmg proxy export         导出当前状态（含明文，勿贴终端）
+  xmg proxy acme <域名>    申请并写入证书
+  xmg proxy menu           代理方案交互向导
+  xmg core install         安装/更新内核（按记录的通道）
+  xmg core version         查看内核版本
+  xmg core status          查看内核状态
+  xmg core menu            内核管理菜单
   xmg version         显示版本
   xmg help            显示帮助
 
@@ -98,12 +108,53 @@ EOF
 }
 
 xmg_main() {
-    case "${1:-monitor}" in
+    local sub="${1:-monitor}"
+    shift || true
+
+    case "$sub" in
         monitor)
             xmg_monitor_loop
             ;;
         menu)
             xmg_menu_loop
+            ;;
+        proxy)
+            xmg_require_core_file state.sh
+            xmg_require_core_file render.sh
+            xmg_require_core_file proxy.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/core.sh"
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/state.sh"
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/render.sh"
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/proxy.sh"
+            xmg_state_init
+            case "${1:-menu}" in
+                apply)   shift; xmg_proxy_apply "$@" ;;
+                status)  shift; xmg_proxy_status "$@" ;;
+                disable) shift; xmg_proxy_disable "$@" ;;
+                export)  shift; xmg_proxy_export "$@" ;;
+                acme)    shift; xmg_proxy_acme_issue "$@" ;;
+                menu)    xmg_proxy_menu ;;
+                *)       xmg_error "未知的 proxy 子命令: $1"; return 2 ;;
+            esac
+            ;;
+        core)
+            xmg_require_core_file state.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/core.sh"
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/state.sh"
+            xmg_state_init
+            case "${1:-menu}" in
+                install) shift; xmg_core_install "$@" ;;
+                version) shift; xmg_core_version "$@" ;;
+                status)  shift; xmg_core_status "$@" ;;
+                menu)    xmg_core_menu ;;
+                *)       xmg_error "未知的 core 子命令: $1"; return 2 ;;
+            esac
             ;;
         doctor)
             xmg_system_refresh_all force
@@ -116,7 +167,7 @@ xmg_main() {
             xmg_usage
             ;;
         *)
-            xmg_error "未知参数: $1"
+            xmg_error "未知参数: $sub"
             echo
             xmg_usage
             exit 2

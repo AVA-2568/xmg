@@ -2,14 +2,13 @@
 # shellcheck shell=bash
 # coding: utf-8
 #
-# xray.sh - Xray 安装与服务生命周期管理
+# xray.sh - Xray 服务生命周期管理
 #
 # 说明：
-#   - 使用 Xray 官方安装脚本安装 Xray 核心
+#   - 安装与更新内核：见 lib/core.sh（支持 stable/preview/pinned 通道）
+#   - 配置能力已迁移至 state.sh / render.sh / proxy.sh
+#   - 本文件只负责 systemd drop-in 与服务生命周期
 #   - 所有 XMG 管理的 Xray 配置集中放在 /opt/xmg/xray 下
-#   - 安装后自动修改 systemd unit，使 ExecStart 指向 /opt/xmg/xray/config.json
-#   - 支持安装、卸载、启动、停止、重启、重载和状态查看
-#   - XMG 不创建、不编辑、不修改 Xray 配置模板
 #
 
 # ===== 安全加载 =====
@@ -42,76 +41,6 @@ fi
 # Xray 在 XMG 统一目录下的日志目录
 XMG_XRAY_LOG_DIR="${XMG_XRAY_LOG_DIR:-$XMG_LOG_DIR/xray}"
 
-# ===== 兼容函数 =====
-
-if ! declare -F xmg_info >/dev/null 2>&1; then
-    xmg_info()  { printf '[INFO] %s\n' "$*"; }
-fi
-if ! declare -F xmg_warn >/dev/null 2>&1; then
-    xmg_warn()  { printf '[WARN] %s\n' "$*" >&2; }
-fi
-if ! declare -F xmg_die >/dev/null 2>&1; then
-    xmg_die()   { printf '[ERROR] %s\n' "$*" >&2; exit 1; }
-fi
-if ! declare -F xmg_error >/dev/null 2>&1; then
-    xmg_error() { printf '[ERROR] %s\n' "$*" >&2; }
-fi
-if ! declare -F xmg_cmd_exists >/dev/null 2>&1; then
-    xmg_cmd_exists() { command -v "$1" >/dev/null 2>&1; }
-fi
-if ! declare -F xmg_require_root >/dev/null 2>&1; then
-    xmg_require_root() {
-        if [ "$(id -u)" -ne 0 ]; then
-            xmg_die "请使用 root 用户运行，或使用 sudo 执行"
-        fi
-    }
-fi
-if ! declare -F xmg_confirm >/dev/null 2>&1; then
-    xmg_confirm() {
-        local prompt="${1:-确认继续?}"
-        local answer=""
-        printf '%s [y/N]: ' "$prompt"
-        read -r answer || return 1
-        case "$answer" in
-            y|Y|yes|YES|Yes) return 0 ;;
-            *) return 1 ;;
-        esac
-    }
-fi
-if ! declare -F xmg_pause >/dev/null 2>&1; then
-    xmg_pause() {
-        printf '\n按回车键继续...'
-        read -r _ || true
-    }
-fi
-if ! declare -F xmg_systemctl >/dev/null 2>&1; then
-    xmg_systemctl() {
-        local action="${1:-}"
-        local service="${2:-}"
-        if [ -z "$action" ] || [ -z "$service" ]; then
-            xmg_die "xmg_systemctl 参数错误"
-        fi
-        if ! xmg_cmd_exists systemctl; then
-            xmg_die "systemctl 不存在，当前系统可能不是 systemd 环境"
-        fi
-        systemctl "$action" "$service" || xmg_die "执行 systemctl ${action} ${service} 失败"
-    }
-fi
-if ! declare -F xmg_mkdirs >/dev/null 2>&1; then
-    xmg_mkdirs() {
-        mkdir -p \
-            "$XMG_BIN_DIR" \
-            "$XMG_LIB_DIR" \
-            "$XMG_ETC_DIR" \
-            "$XMG_RUN_DIR" \
-            "$XMG_LOG_DIR" \
-            "$XMG_BACKUP_DIR" \
-            "$XMG_WWW_DIR" \
-            "$XMG_CADDY_DIR" \
-            "$XMG_XRAY_DIR"
-    }
-fi
-
 # ===== 基础检测 =====
 
 xmg_xray_binary_exists() {
@@ -142,60 +71,6 @@ xmg_xray_print_version() {
     local xray_bin=""
     xray_bin="$(xmg_xray_get_bin)" || return 1
     "$xray_bin" version 2>/dev/null | head -1 || true
-}
-
-# ===== 使用官方脚本安装 Xray =====
-
-xmg_xray_install_by_official_script() {
-    xmg_require_root
-
-    xmg_info "使用 Xray 官方安装脚本安装 Xray..."
-    xmg_warn "Xray 官方脚本会将 xray 二进制安装到 /usr/local/bin/xray"
-    xmg_warn "XMG 会将 Xray 配置目录统一管理到: $XMG_XRAY_DIR"
-
-    # 确保 XMG 统一目录结构存在
-    xmg_mkdirs
-
-    # 检查是否有 curl 或 wget
-    if ! xmg_cmd_exists curl && ! xmg_cmd_exists wget; then
-        xmg_die "缺少 curl 或 wget，无法下载 Xray 安装脚本"
-    fi
-
-    # 下载并执行 Xray 官方安装脚本
-    xmg_info "下载 Xray 官方安装脚本..."
-
-    if xmg_cmd_exists curl; then
-        bash <(curl -fsSL "$XMG_XRAY_INSTALL_URL") || {
-            xmg_warn "Xray 官方安装脚本执行失败，请检查网络或手动安装"
-            return 1
-        }
-    elif xmg_cmd_exists wget; then
-        bash <(wget -qO- "$XMG_XRAY_INSTALL_URL") || {
-            xmg_warn "Xray 官方安装脚本执行失败，请检查网络或手动安装"
-            return 1
-        }
-    fi
-
-    # 安装完成后，将 Xray 配置复制到 XMG 统一配置目录
-    if [ -f /usr/local/etc/xray/config.json ]; then
-        xmg_info "将 Xray 配置复制到 XMG 统一配置目录..."
-        mkdir -p "$XMG_XRAY_DIR"
-        cp /usr/local/etc/xray/config.json "$XMG_XRAY_CONFIG" 2>/dev/null || xmg_warn "复制 config.json 失败"
-        xmg_info "配置已复制到: $XMG_XRAY_CONFIG"
-    else
-        xmg_warn "未找到 /usr/local/etc/xray/config.json"
-        xmg_warn "XMG 不会自动生成配置，请手动创建: $XMG_XRAY_CONFIG"
-    fi
-
-    # 确认安装成功
-    if xmg_xray_binary_exists; then
-        xmg_info "Xray 安装成功"
-        xmg_xray_print_version || true
-        return 0
-    else
-        xmg_error "Xray 安装失败，未检测到 xray 命令"
-        return 1
-    fi
 }
 
 # ===== 自动修改 systemd unit 的 ExecStart =====
@@ -288,43 +163,26 @@ xmg_xray_restore_systemd_unit() {
 }
 
 # ===== 安装 / 更新 =====
-
+# 内核安装/更新委托给 core.sh（按 state 记录的通道装 stable/preview/pinned），
+# 本函数只负责 drop-in 覆盖与开机自启等 systemd 侧收尾。
 xmg_xray_install_update() {
     xmg_require_root
-    xmg_info "安装/更新 Xray"
-
-    # 确保 XMG 统一目录结构存在
     xmg_mkdirs
-
-    # 使用官方脚本安装
-    if xmg_xray_install_by_official_script; then
-        xmg_info "Xray 安装/更新完成"
-    else
-        xmg_die "Xray 安装失败"
-    fi
-
-    # 创建 Xray 日志目录
     mkdir -p "$XMG_XRAY_LOG_DIR"
 
-    # 如果存在 xray 用户，设置目录归属
-    if id xray >/dev/null 2>&1; then
-        chown -R xray:xray "$XMG_XRAY_LOG_DIR" 2>/dev/null || true
-        chown -R xray:xray "$XMG_XRAY_DIR" 2>/dev/null || true
+    if ! xmg_core_install; then
+        xmg_error "Xray 内核安装失败"
+        return 1
     fi
 
-    # 自动修改 systemd unit 的 ExecStart，指向 XMG 统一配置路径
     xmg_xray_patch_systemd_unit
 
-    # 启动服务
     if xmg_xray_is_systemd_available; then
         systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 && xmg_info "Xray 已设置为开机自启" || xmg_warn "设置 Xray 开机自启失败"
-        systemctl start "$XMG_XRAY_SERVICE" >/dev/null 2>&1 && xmg_info "Xray 已启动" || xmg_warn "Xray 启动失败，请检查配置"
+        systemctl enable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 && \
+            xmg_info "Xray 已设置为开机自启" || xmg_warn "设置开机自启失败"
     fi
-
-    xmg_info "Xray 安装/更新完成"
-    xmg_info "配置路径: $XMG_XRAY_CONFIG"
-    xmg_info "日志目录: $XMG_XRAY_LOG_DIR"
+    return 0
 }
 
 # ===== 卸载 =====
@@ -572,8 +430,7 @@ xmg_xray_menu() {
         echo
         echo "说明:"
         echo "  - XMG 管理 Xray 的安装与服务生命周期"
-        echo "  - XMG 不创建、不编辑、不修改 Xray 配置模板"
-        echo "  - Xray 配置由用户自行维护"
+        echo "  - 代理方案配置由 proxy.sh 生成（state.sh + render.sh）"
         echo "  - 配置路径: $XMG_XRAY_CONFIG"
         echo "  - 日志目录: $XMG_XRAY_LOG_DIR"
         echo
@@ -636,6 +493,20 @@ xmg_xray_menu() {
         esac
     done
 }
+
+# ===== 依赖：内核安装能力委托给 core.sh =====
+# core.sh 的 xmg_core_install 会读取 state.sh 记录的通道/锁定版本，故一并按需加载。
+# 用模块自身所在目录解析同级模块，避免依赖可能被外部改写的 XMG_LIB_DIR。
+_XMG_XRAY_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -F xmg_state_get >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$_XMG_XRAY_LIBDIR/state.sh"
+fi
+if ! declare -F xmg_core_install >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$_XMG_XRAY_LIBDIR/core.sh"
+fi
+unset _XMG_XRAY_LIBDIR
 
 # ===== 直接执行支持 =====
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
