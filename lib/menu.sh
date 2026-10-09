@@ -152,6 +152,9 @@ xmg_menu_label_for_file() {
         firewall.sh)
             printf '防火墙管理'
             ;;
+        doctor.sh)
+            printf '系统健康诊断'
+            ;;
         update.sh)
             printf '更新 / 版本'
             ;;

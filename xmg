@@ -77,7 +77,7 @@ XMG $XMG_VERSION
   xmg                 启动 XMG Monitor (Real-Time)
   xmg monitor         启动 XMG Monitor (Real-Time)
   xmg menu            进入管理菜单
-  xmg doctor          输出轻量系统摘要
+  xmg doctor [--dry-run] 运行 VPS 一键健康诊断
   xmg proxy apply [参数]   应用代理方案配置（幂等）
   xmg proxy status [--json] 查看代理方案状态
   xmg proxy disable <socks|vless>  停用某方案
@@ -157,8 +157,10 @@ xmg_main() {
             esac
             ;;
         doctor)
-            xmg_system_refresh_all force
-            xmg_system_print_summary
+            xmg_require_core_file doctor.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/doctor.sh"
+            xmg_doctor_cli "$@"
             ;;
         version|-v|--version)
             echo "XMG $XMG_VERSION"

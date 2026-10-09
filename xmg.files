@@ -11,6 +11,7 @@ lib/core.sh
 lib/xray.sh
 lib/firewall.sh
 lib/tune.sh
+lib/doctor.sh
 lib/ssh.sh
 lib/maint.sh
 lib/update.sh
