@@ -35,11 +35,24 @@ XMG_TUNE_RESOLVED_CONF="${XMG_TUNE_RESOLVED_CONF:-/etc/systemd/resolved.conf.d/x
 XMG_TUNE_MODULES_LOAD_CONF="${XMG_TUNE_MODULES_LOAD_CONF:-/etc/modules-load.d/xmg-bbr.conf}"
 XMG_TUNE_NOFILE="${XMG_TUNE_NOFILE:-1048576}"
 XMG_TUNE_SWAPFILE="${XMG_TUNE_SWAPFILE:-/swapfile}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-${XMG_HOME:-/var/lib/xmg}/backups}"
 
 # DNS 默认预设（境外优先：本面板多部署于海外服务器，阿里 DNS 直连延迟高）
 XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
 XMG_TUNE_DOT_DEFAULT="${XMG_TUNE_DOT_DEFAULT:-1.1.1.1 1.0.0.1}"
 export XMG_TUNE_DNS_DEFAULT XMG_TUNE_DOT_DEFAULT
+
+# ===== 安全加载 detect.sh =====
+if ! declare -F xmg_detect_mem_profile >/dev/null 2>&1; then
+    _XMG_TUNE_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [ -f "$_XMG_TUNE_LIBDIR/detect.sh" ]; then
+        # shellcheck source=lib/detect.sh
+        source "$_XMG_TUNE_LIBDIR/detect.sh"
+    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh" ]; then
+        # shellcheck source=lib/detect.sh
+        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh"
+    fi
+fi
 
 # ===== 依赖 common.sh 的兜底 =====
 
@@ -91,6 +104,11 @@ fi
 
 # 读取总内存（MB）。探测失败时按 512MB 处理（保守档位）
 xmg_tune_mem_total_mb() {
+    if [ -n "${MOCK_MEM_TOTAL_MB:-}" ]; then
+        echo "$MOCK_MEM_TOTAL_MB"
+        return 0
+    fi
+
     local key=""
     local value=""
 
@@ -104,16 +122,26 @@ xmg_tune_mem_total_mb() {
                 return 0
                 ;;
         esac
-    done < /proc/meminfo 2>/dev/null
+    done < "${XMG_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null
 
     echo 512
 }
 
-# 按内存返回调优档位：low (<=512MB) / mid (<=2048MB) / high
+# 按内存返回调优档位：extreme_low (<=256MB) / low (<=512MB) / mid (<=2048MB) / high
 xmg_tune_mem_profile() {
-    local mem_mb="$1"
+    local mem_mb="${1:-}"
 
-    if [ "$mem_mb" -le 512 ]; then
+    if [ -z "$mem_mb" ]; then
+        if declare -F xmg_detect_mem_profile >/dev/null 2>&1; then
+            xmg_detect_mem_profile
+            return 0
+        fi
+        mem_mb="$(xmg_tune_mem_total_mb)"
+    fi
+
+    if [ "$mem_mb" -le 256 ]; then
+        printf 'extreme_low'
+    elif [ "$mem_mb" -le 512 ]; then
         printf 'low'
     elif [ "$mem_mb" -le 2048 ]; then
         printf 'mid'
@@ -138,15 +166,22 @@ xmg_tune_backup_file() {
 }
 
 # 逐行应用 sysctl 配置文件，失败的 key 警告但不中断
-# 个别内核参数（如 conntrack）在模块未加载时不存在，属正常现象
+# 在受限容器环境下（如 OpenVZ/LXC/Docker 只读 sysctl），对不可写参数静默跳过并友情提示，平滑熔断返回 0
 xmg_tune_sysctl_apply() {
     local file="$1"
     local line=""
     local failed=0
+    local is_restricted=0
 
     if [ ! -r "$file" ]; then
         xmg_error "sysctl 配置不可读: $file"
         return 1
+    fi
+
+    if declare -F xmg_detect_container_restricted >/dev/null 2>&1; then
+        if ! xmg_detect_container_restricted; then
+            is_restricted=1
+        fi
     fi
 
     while IFS= read -r line || [ -n "$line" ]; do
@@ -157,10 +192,19 @@ xmg_tune_sysctl_apply() {
         esac
 
         if ! sysctl -q -w "$line" >/dev/null 2>&1; then
-            xmg_warn "sysctl 应用失败: $line"
             failed=$((failed + 1))
+            if [ "$is_restricted" -eq 0 ]; then
+                xmg_warn "sysctl 应用失败: $line"
+            fi
         fi
     done < "$file"
+
+    if [ "$is_restricted" -eq 1 ]; then
+        if [ "$failed" -gt 0 ]; then
+            xmg_info "当前处于受限容器环境，已自动跳过不可写内核参数 ($failed 项)"
+        fi
+        return 0
+    fi
 
     return "$failed"
 }
@@ -244,8 +288,8 @@ EOF
 
     # systemd 服务不受 limits.d 影响，需单独设置 DefaultLimitNOFILE
     if xmg_cmd_exists systemctl; then
-        mkdir -p "$(dirname "$XMG_TUNE_SYSTEMD_LIMITS_CONF")"
-        cat > "$XMG_TUNE_SYSTEMD_LIMITS_CONF" <<EOF
+        mkdir -p "$(dirname "$XMG_TUNE_SYSTEMD_LIMITS_CONF")" 2>/dev/null || true
+        cat > "$XMG_TUNE_SYSTEMD_LIMITS_CONF" 2>/dev/null <<EOF || true
 # XMG: systemd DefaultLimitNOFILE（由 xmg tune 生成）
 [Manager]
 DefaultLimitNOFILE=$XMG_TUNE_NOFILE
@@ -273,6 +317,13 @@ xmg_tune_net_optimize() {
     #   conntrack 每条约 300B，262144 条约 76MB，215MB 内存机不可承受
     #   缓冲区为按需分配上限，低内存机仍收敛突发峰值
     case "$profile" in
+        extreme_low)
+            conntrack_max=8192
+            buf_max=4194304
+            backlog=2048
+            syn_backlog=1024
+            tw_buckets=4096
+            ;;
         low)
             conntrack_max=32768
             buf_max=16777216
@@ -287,7 +338,7 @@ xmg_tune_net_optimize() {
             syn_backlog=8192
             tw_buckets=32768
             ;;
-        high)
+        high|*)
             conntrack_max=262144
             buf_max=33554432
             backlog=16384
@@ -336,7 +387,8 @@ xmg_tune_net_optimize() {
         echo "net.ipv4.tcp_keepalive_probes = 5"
         echo
         # conntrack 参数仅在模块可用时写入，避免 sysctl 报错
-        if [ -r /proc/sys/net/netfilter/nf_conntrack_max ]; then
+        local conntrack_file="${XMG_TUNE_CONNTRACK_FILE:-/proc/sys/net/netfilter/nf_conntrack_max}"
+        if [ -r "$conntrack_file" ]; then
             echo "# --- 连接跟踪 ---"
             echo "net.netfilter.nf_conntrack_max = $conntrack_max"
             echo "net.netfilter.nf_conntrack_tcp_timeout_established = 7200"
@@ -866,6 +918,70 @@ xmg_tune_swap_show() {
     echo "vm.swappiness = $(cat /proc/sys/vm/swappiness 2>/dev/null || echo unknown)"
 }
 
+# 获取目标路径所在挂载点的可用空间（MB）
+xmg_tune_disk_avail_mb() {
+    local target="${1:-/}"
+
+    if [ -n "${XMG_MOCK_DISK_AVAIL_MB:-}" ]; then
+        echo "$XMG_MOCK_DISK_AVAIL_MB"
+        return 0
+    fi
+
+    local dir="$target"
+    while [ ! -d "$dir" ] && [ "$dir" != "/" ] && [ "$dir" != "." ]; do
+        dir="$(dirname "$dir")"
+    done
+    [ -d "$dir" ] || dir="/"
+
+    local avail=""
+    avail="$(df -m -P "$dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$avail" in
+        ''|*[!0-9]*)
+            echo 999999
+            return 0
+            ;;
+    esac
+    echo "$avail"
+}
+
+# 预检并计算安全 Swap 尺寸（MB）
+# 若可用空间不足 1200MB，自动将 Swap 尺寸收缩（如 256MB）或提示跳过，杜绝磁盘打满
+xmg_tune_swap_calc_size() {
+    local req_mb="$1"
+    local target_file="${2:-$XMG_TUNE_SWAPFILE}"
+    local avail_mb=""
+
+    avail_mb="$(xmg_tune_disk_avail_mb "$target_file")"
+
+    # 可用空间不足 1200MB
+    if [ "$avail_mb" -lt 1200 ]; then
+        if [ "$avail_mb" -le 300 ]; then
+            xmg_warn "磁盘可用空间不足 300MB (剩余 ${avail_mb}MB)，跳过创建 Swap 以免打满磁盘"
+            return 1
+        fi
+        if [ "$req_mb" -gt 256 ]; then
+            xmg_warn "磁盘可用空间不足 1200MB (剩余 ${avail_mb}MB)，自动将 Swap 尺寸收缩为 256MB"
+            echo 256
+            return 0
+        fi
+    fi
+
+    # 可用空间充足但请求值接近/超过剩余空间（至少预留 512MB 缓冲）
+    if [ "$req_mb" -ge "$((avail_mb - 512))" ]; then
+        local safe_mb=$((avail_mb - 512))
+        if [ "$safe_mb" -le 0 ]; then
+            xmg_warn "磁盘剩余空间不足 (${avail_mb}MB)，跳过创建 Swap"
+            return 1
+        fi
+        xmg_warn "磁盘空间紧张，自动将 Swap 尺寸收缩为 ${safe_mb}MB"
+        echo "$safe_mb"
+        return 0
+    fi
+
+    echo "$req_mb"
+    return 0
+}
+
 xmg_tune_swap_create() {
     xmg_require_root
 
@@ -895,23 +1011,39 @@ xmg_tune_swap_create() {
         xmg_warn "Swap 过大（>8G），低配 VPS 不建议"
         return 1
     fi
+
+    # 磁盘空间预检与自动收缩
+    local final_mb=""
+    final_mb="$(xmg_tune_swap_calc_size "$mb" "$XMG_TUNE_SWAPFILE")" || {
+        xmg_info "已跳过 Swap 创建"
+        return 0
+    }
+    mb="$final_mb"
+
     xmg_tune_backup_file /etc/fstab || true
 
     xmg_info "创建 ${mb}MB Swap: $XMG_TUNE_SWAPFILE"
 
     # dd 而非 fallocate：fallocate 产生的文件可能含 hole，swapon 会拒绝
     dd if=/dev/zero of="$XMG_TUNE_SWAPFILE" bs=1M count="$mb" status=none \
-        || xmg_die "写入 swapfile 失败"
+        || {
+            rm -f "$XMG_TUNE_SWAPFILE"
+            xmg_warn "写入 swapfile 失败（磁盘空间不足）"
+            return 1
+        }
 
     chmod 600 "$XMG_TUNE_SWAPFILE"
     mkswap "$XMG_TUNE_SWAPFILE" >/dev/null || {
         rm -f "$XMG_TUNE_SWAPFILE"
-        xmg_die "mkswap 失败"
+        xmg_warn "mkswap 失败"
+        return 1
     }
-    swapon "$XMG_TUNE_SWAPFILE" || {
+
+    if ! swapon "$XMG_TUNE_SWAPFILE" 2>/dev/null; then
         rm -f "$XMG_TUNE_SWAPFILE"
-        xmg_die "swapon 失败"
-    }
+        xmg_warn "当前容器环境受宿主机限制无法启用独立 Swap"
+        return 0
+    fi
 
     if ! grep -q "^$XMG_TUNE_SWAPFILE " /etc/fstab; then
         printf '%s none swap sw 0 0\n' "$XMG_TUNE_SWAPFILE" >> /etc/fstab

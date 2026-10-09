@@ -71,6 +71,67 @@ _rc=$?
 t_equals "未安装内核时 version 返回非 0" \
     "$([ "$_rc" -ne 0 ] && printf nonzero || printf zero)" "nonzero"
 
+# ------------------------------------------------------------------
+# Drop-in Go 运行时内存与并发控制
+# ------------------------------------------------------------------
+_dropin="$(xmg_core_generate_dropin_content "/custom/xray/config.json" 2>/dev/null || true)"
+t_contains "drop-in 注入 GOMEMLIMIT=100MiB" "$_dropin" 'Environment="GOMEMLIMIT=100MiB"'
+t_contains "drop-in 注入 GODEBUG=madvdontneed=1" "$_dropin" 'Environment="GODEBUG=madvdontneed=1"'
+t_contains "drop-in 注入 GOMAXPROCS=1" "$_dropin" 'Environment="GOMAXPROCS=1"'
+t_contains "drop-in 指向指定配置文件" "$_dropin" "ExecStart=/usr/local/bin/xray run -config /custom/xray/config.json"
+
+# ------------------------------------------------------------------
+# 215MB 极低内存机器 (extreme_low) 内存体检放行策略
+# ------------------------------------------------------------------
+printf 'MemTotal: 220160 kB\nMemAvailable: 81920 kB\n' > "$XMG_TMP/mi_215m"
+_out="$(XMG_MEMINFO_FILE="$XMG_TMP/mi_215m" xmg_core_memcheck 2>&1)"
+_rc=$?
+t_equals "215MB 机器内存体检应放行 (返回 0)" "$_rc" "0"
+t_contains "215MB 机器提示 extreme_low 模式" "$_out" "extreme_low"
+t_contains "215MB 机器提示已应用 100MiB 内存抑制" "$_out" "100MiB"
+t_not_contains "215MB 机器不强推 swap" "$_out" "建议先配置 swap"
+
+# 对比：大内存机器但可用内存不足时仍应告警返回 1 并建议 swap
+printf 'MemTotal: 1048576 kB\nMemAvailable: 81920 kB\n' > "$XMG_TMP/mi_high_low_avail"
+_out="$(XMG_MEMINFO_FILE="$XMG_TMP/mi_high_low_avail" xmg_core_memcheck 2>&1)"
+_rc=$?
+t_equals "大内存机器可用内存不足时仍返回 1" "$_rc" "1"
+t_contains "大内存机器提示建议配置 swap" "$_out" "建议先配置 swap"
+
+# ------------------------------------------------------------------
+# 极低内存与 tmpfs 容量不足时解压临时目录推导为物理目录
+# ------------------------------------------------------------------
+export XMG_HOME="$XMG_TMP/home"
+_td="$(MOCK_MEM_TOTAL_KB=220160 xmg_core_resolve_tmpdir 2>/dev/null || true)"
+t_equals "215MB 极小内存应推导物理临时目录" "$_td" "$XMG_HOME/tmp"
+
+_td="$(MOCK_TMP_FS=tmpfs MOCK_TMP_AVAIL_KB=51200 MOCK_MEM_TOTAL_KB=1048576 xmg_core_resolve_tmpdir 2>/dev/null || true)"
+t_equals "tmpfs 空间紧张时应推导物理临时目录" "$_td" "$XMG_HOME/tmp"
+
+_td="$(MOCK_TMP_FS=tmpfs MOCK_TMP_AVAIL_KB=524288 MOCK_MEM_TOTAL_KB=2097152 xmg_core_resolve_tmpdir 2>/dev/null || true)"
+t_equals "正常大内存且 tmpfs 充裕应使用默认 /tmp" "$_td" "/tmp"
+
+# ------------------------------------------------------------------
+# drop-in 文件写入与移除端到端验证
+# ------------------------------------------------------------------
+export XMG_SYSTEMD_DIR="$XMG_TMP/systemd"
+mkdir -p "$XMG_SYSTEMD_DIR"
+touch "$XMG_SYSTEMD_DIR/xray.service"
+export XMG_XRAY_CONFIG="$XMG_TMP/home/xray/config.json"
+
+xmg_core_patch_systemd_unit >/dev/null 2>&1
+_conf_file="$XMG_SYSTEMD_DIR/xray.service.d/20-xmg.conf"
+t_assert "drop-in 覆盖文件已创建" "[ -f '$_conf_file' ]"
+_conf_content="$(cat "$_conf_file" 2>/dev/null || true)"
+t_contains "落地文件含 GOMEMLIMIT=100MiB" "$_conf_content" 'Environment="GOMEMLIMIT=100MiB"'
+t_contains "落地文件含 GODEBUG=madvdontneed=1" "$_conf_content" 'Environment="GODEBUG=madvdontneed=1"'
+t_contains "落地文件含 GOMAXPROCS=1" "$_conf_content" 'Environment="GOMAXPROCS=1"'
+t_contains "落地文件含 ExecStart" "$_conf_content" "ExecStart=/usr/local/bin/xray run -config $XMG_XRAY_CONFIG"
+
+# 移除覆盖
+xmg_core_restore_systemd_unit >/dev/null 2>&1
+t_assert "drop-in 覆盖文件已移除" "[ ! -f '$_conf_file' ]"
+
 # 注意：不 unset XMG_TMP —— 文件头的 EXIT trap 会在退出时引用它，
 # 在 run.sh 的 set -u 下 unset 会让 trap 报 unbound variable。
-unset _rc _out
+unset _rc _out _dropin _td _conf_file _conf_content XMG_SYSTEMD_DIR

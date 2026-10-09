@@ -9,10 +9,16 @@ MAIN="$SRC/xmg"
 FILES="$SRC/xmg.files"
 
 # --- xmg.files 必须登记新模块 ---
+t_contains "清单含 detect.sh" "$(cat "$FILES")" "lib/detect.sh"
 t_contains "清单含 state.sh" "$(cat "$FILES")" "lib/state.sh"
 t_contains "清单含 render.sh" "$(cat "$FILES")" "lib/render.sh"
 t_contains "清单含 proxy.sh" "$(cat "$FILES")" "lib/proxy.sh"
 t_contains "清单含 core.sh" "$(cat "$FILES")" "lib/core.sh"
+
+# --- 废弃与臃肿模块不得出现在清单中 ---
+t_not_contains "caddy.sh 不应出现在 xmg.files" "$(cat "$FILES")" "caddy.sh"
+t_not_contains "site.sh 不应出现在 xmg.files" "$(cat "$FILES")" "site.sh"
+t_not_contains "third-party.sh 不应出现在 xmg.files" "$(cat "$FILES")" "third-party.sh"
 
 # 清单顺序决定菜单顺序：新模块必须在清单中
 ORDER="$(grep -n 'lib/proxy.sh' "$FILES" | cut -d: -f1)"
@@ -62,6 +68,9 @@ xmg_menu_discover_modules
 _MENU_FUNCS="$(printf '%s\n' "${XMG_MENU_FUNCS[@]}")"
 t_contains "静态扫描发现 proxy 菜单" "$_MENU_FUNCS" "xmg_proxy_menu"
 t_contains "静态扫描发现 core 菜单" "$_MENU_FUNCS" "xmg_core_menu"
+t_not_contains "静态扫描不应包含 caddy 菜单" "$_MENU_FUNCS" "xmg_caddy_menu"
+t_not_contains "静态扫描不应包含 site 菜单" "$_MENU_FUNCS" "xmg_site_menu"
+t_not_contains "静态扫描不应包含 third_party 菜单" "$_MENU_FUNCS" "xmg_third_party_menu"
 
 # --- 环境恢复 ---
 XMG_HOME="$_TE_SAVED_HOME"

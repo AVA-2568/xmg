@@ -83,20 +83,14 @@ _xmg_onoff() {
 
 # ===== 事务式草稿 =====
 # apply 先在内存里改 state，schema 校验通过才落盘。
-# 记录被暂存的键，供校验通过后逐个 xmg_state_set 持久化。
-declare -ga XMG_PROXY_STAGE_KEYS=()
-declare -ga XMG_PROXY_STAGE_VALS=()
-
+# 采用 lib/state.sh 提供的暂存与单一事务落盘机制，消除 N+1 写放大。
 _xmg_stage_reset() {
-    XMG_PROXY_STAGE_KEYS=()
-    XMG_PROXY_STAGE_VALS=()
+    xmg_state_stage_clear
 }
 
 _xmg_stage() {
     local __k="$1" __v="$2"
-    XMG_STATE["$__k"]="$__v"
-    XMG_PROXY_STAGE_KEYS+=("$__k")
-    XMG_PROXY_STAGE_VALS+=("$__v")
+    xmg_state_stage "$__k" "$__v"
 }
 
 # 暂存一个"可空"参数：空值视为未提供，不暂存。
@@ -152,45 +146,63 @@ xmg_proxy_apply() {
 
     if [ -n "${PARAMS[socks]:-}" ]; then
         _xmg_stage_onoff PROXY_SOCKS_ENABLED "${PARAMS[socks]}" || {
-            xmg_state_load >/dev/null 2>&1; return 2
+            xmg_state_stage_clear; return 2
         }
     fi
     if [ -n "${PARAMS[socks_udp]:-}" ]; then
         _xmg_stage_onoff PROXY_SOCKS_UDP "${PARAMS[socks_udp]}" || {
-            xmg_state_load >/dev/null 2>&1; return 2
+            xmg_state_stage_clear; return 2
         }
     fi
     if [ -n "${PARAMS[vless]:-}" ]; then
         _xmg_stage_onoff PROXY_VLESS_ENABLED "${PARAMS[vless]}" || {
-            xmg_state_load >/dev/null 2>&1; return 2
+            xmg_state_stage_clear; return 2
         }
     fi
 
     # schema 校验：读内存草稿。失败时丢弃草稿（state 文件从未被写），绝不触碰现网。
     if ! xmg_state_validate; then
-        xmg_state_load >/dev/null 2>&1
+        xmg_state_stage_clear
         return 2
     fi
 
+    # 完善 ACME 状态一致性：检查 PROXY_VLESS_CERT_SOURCE=acme 时防御性处理
+    local vless_on="${XMG_STATE[PROXY_VLESS_ENABLED]:-0}"
+    local cert_src="${XMG_STATE[PROXY_VLESS_CERT_SOURCE]:-user}"
+    if [ "$vless_on" = "1" ] && [ "$cert_src" = "acme" ]; then
+        local cf="${XMG_STATE[PROXY_VLESS_CERT_FILE]:-}"
+        local kf="${XMG_STATE[PROXY_VLESS_KEY_FILE]:-}"
+        if [ -z "$cf" ]; then
+            cf="$XMG_ACME_CERT_FILE"
+            _xmg_stage PROXY_VLESS_CERT_FILE "$cf"
+        fi
+        if [ -z "$kf" ]; then
+            kf="$XMG_ACME_KEY_FILE"
+            _xmg_stage PROXY_VLESS_KEY_FILE "$kf"
+        fi
+        if [ ! -f "$cf" ] || [ ! -f "$kf" ]; then
+            xmg_warn "ACME 证书文件尚未就绪: $cf（请执行 xmg proxy acme <域名> 签发证书）"
+        fi
+    fi
+
     # 渲染到临时文件（从已通过校验的草稿读出）
-    local socks_on vless_on tmp rc i
+    local socks_on tmp rc
     socks_on="${XMG_STATE[PROXY_SOCKS_ENABLED]:-0}"
     vless_on="${XMG_STATE[PROXY_VLESS_ENABLED]:-0}"
-    tmp="$(mktemp)" || { xmg_error "无法创建临时文件"; return 4; }
+    tmp="$(mktemp)" || { xmg_error "无法创建临时文件"; xmg_state_stage_clear; return 4; }
     if ! xmg_render_config "$socks_on" "$vless_on" > "$tmp"; then
         rm -f "$tmp"
+        xmg_state_stage_clear
         xmg_error "渲染配置失败"
         return 4
     fi
 
-    # 校验通过：先把草稿落盘（幂等：相同键值重写后文件内容不变）
-    if [ "${#XMG_PROXY_STAGE_KEYS[@]}" -gt 0 ]; then
-        for i in "${!XMG_PROXY_STAGE_KEYS[@]}"; do
-            if ! xmg_state_set "${XMG_PROXY_STAGE_KEYS[$i]}" "${XMG_PROXY_STAGE_VALS[$i]}"; then
-                rm -f "$tmp"
-                return 4
-            fi
-        done
+    # 校验通过：一次性原子落盘草稿（消除 N+1 磁盘写放大与半提交风险）
+    if ! xmg_state_commit_draft; then
+        rm -f "$tmp"
+        xmg_state_stage_clear
+        xmg_error "状态草稿落盘失败"
+        return 4
     fi
 
     # 原子提交 config.json：含内核校验(3)/备份/原子替换/reload 失败回滚(4)
@@ -371,9 +383,10 @@ xmg_proxy_acme_issue() {
     fi
 
     # 到这里签发已成功，才写入 state（失败路径已在上面 return）
-    xmg_state_set PROXY_VLESS_CERT_SOURCE "user" || return 4
-    xmg_state_set PROXY_VLESS_CERT_FILE "$XMG_ACME_CERT_FILE" || return 4
-    xmg_state_set PROXY_VLESS_KEY_FILE "$XMG_ACME_KEY_FILE" || return 4
+    xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || return 4
+    xmg_state_stage PROXY_VLESS_CERT_FILE "$XMG_ACME_CERT_FILE" || return 4
+    xmg_state_stage PROXY_VLESS_KEY_FILE "$XMG_ACME_KEY_FILE" || return 4
+    xmg_state_commit_draft || return 4
     xmg_info "证书已就绪: $XMG_ACME_CERT_FILE（执行 apply 后生效）"
     return 0
 }

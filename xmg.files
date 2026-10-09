@@ -1,5 +1,6 @@
 xmg
 lib/common.sh
+lib/detect.sh
 lib/system.sh
 lib/monitor.sh
 lib/menu.sh
@@ -7,13 +8,11 @@ lib/state.sh
 lib/render.sh
 lib/proxy.sh
 lib/core.sh
-lib/caddy.sh
 lib/xray.sh
-lib/site.sh
 lib/firewall.sh
 lib/tune.sh
+lib/doctor.sh
 lib/ssh.sh
 lib/maint.sh
-lib/third-party.sh
 lib/update.sh
 lib/uninstall.sh

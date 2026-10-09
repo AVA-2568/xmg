@@ -49,6 +49,8 @@ fi
 
 # 已载入的键值
 declare -gA XMG_STATE=()
+# 内存暂存区（草稿），用于状态批处理与原子提交
+declare -gA XMG_STATE_STAGE=()
 
 # ===== 默认值 =====
 # 文档依据见 docs/superpowers/specs/2026-10-08-xray-config-layer-design.md
@@ -285,11 +287,12 @@ _state_val() {
     printf -v "$__vname" '%s' "$_xmg_state_v"
 }
 
-# 写入单个键并立即落盘（临时文件 + mv 原子替换，中断不会留下半个文件）。
-# 外部命令只有 chmod 与 mv 两个，其余全部是 bash 内建。
-xmg_state_set() {
+# ===== 状态批处理与暂存机制 =====
+
+# 在内存/暂存区批处理暂存键值对，消除循环落盘。
+# 校验合法性，更新内存状态与暂存区，延迟落盘。
+xmg_state_stage() {
     local key="${1:-}" val="${2:-}"
-    local tmp="" line="" found=0
 
     if ! _xmg_state_key_ok "$key"; then
         xmg_error "非法状态键名: '$key'（只允许字母、数字、下划线，且不以数字开头）"
@@ -300,22 +303,32 @@ xmg_state_set() {
         return 1
     fi
 
+    XMG_STATE_STAGE["$key"]="$val"
+    XMG_STATE["$key"]="$val"
+    return 0
+}
+
+# 清空未提交的暂存内容，并将内存状态重新恢复为磁盘真相。
+xmg_state_stage_clear() {
+    XMG_STATE_STAGE=()
+    xmg_state_load >/dev/null 2>&1 || true
+}
+
+# 将当前暂存区中的所有键一次性合并并原子写入 state.env（单一事务落盘）。
+# 外部命令只有 chmod 与 mv 两个，其余全部走 bash 内建。
+xmg_state_commit_draft() {
+    [ "${#XMG_STATE_STAGE[@]}" -gt 0 ] || return 0
+
     if [ ! -d "$XMG_XRAY_STATE_DIR" ]; then
         mkdir -p "$XMG_XRAY_STATE_DIR" || {
             xmg_error "无法创建状态目录: $XMG_XRAY_STATE_DIR"
             return 1
         }
     fi
-    # 与 xmg_state_init 同理：不只在目录刚创建时收紧。
-    # set 可能被 CLI 在没有走 init 的路径上直接调用，那时目录已存在且可能是 755。
     chmod 700 "$XMG_XRAY_STATE_DIR" 2>/dev/null || true
-    # 未初始化时直接写入会丢默认值，这里补齐后再改
     [ -f "$XMG_STATE_FILE" ] || xmg_state_defaults > "$XMG_STATE_FILE" || return 1
 
-    # 临时名用 $$ + noclobber，不引入 mktemp：
-    #   目录是 root 属主 700，外部无法在里面预置符号链接，故不存在 mktemp 要防的竞态；
-    #   mktemp 在 BusyBox 上要求模板至少 6 个 X，与 GNU 的习惯不一致，容易踩坑。
-    #   noclobber 保证同名文件已存在时不会覆盖它。
+    local tmp="" line="" k=""
     tmp="$XMG_XRAY_STATE_DIR/.state.$$"
     if ( set -o noclobber; : > "$tmp" ) 2>/dev/null; then
         :
@@ -327,21 +340,33 @@ xmg_state_set() {
         }
     fi
 
-    # 逐行复制，替换目标键或追加。保留注释与既有键顺序。
-    # set -o noclobber 只作用于上面那个子 shell，此处重定向可正常追加。
+    local -A written=()
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
-            "$key="*)
-                printf '%s=%s\n' "$key" "$val" >> "$tmp"
-                found=1
+            ''|'#'*)
+                printf '%s\n' "$line" >> "$tmp"
                 ;;
-            *) printf '%s\n' "$line" >> "$tmp" ;;
+            *=*)
+                k="${line%%=*}"
+                if [ -n "${XMG_STATE_STAGE[$k]+set}" ]; then
+                    printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$tmp"
+                    written["$k"]=1
+                else
+                    printf '%s\n' "$line" >> "$tmp"
+                fi
+                ;;
+            *)
+                printf '%s\n' "$line" >> "$tmp"
+                ;;
         esac
     done < "$XMG_STATE_FILE"
 
-    [ "$found" -eq 1 ] || printf '%s=%s\n' "$key" "$val" >> "$tmp"
+    for k in "${!XMG_STATE_STAGE[@]}"; do
+        if [ -z "${written[$k]+set}" ]; then
+            printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$tmp"
+        fi
+    done
 
-    # 临时文件里含密码，必须先收紧权限再就位
     chmod 600 "$tmp" 2>/dev/null || true
     mv -f "$tmp" "$XMG_STATE_FILE" || {
         rm -f "$tmp"
@@ -349,8 +374,15 @@ xmg_state_set() {
         return 1
     }
 
-    XMG_STATE["$key"]="$val"
+    XMG_STATE_STAGE=()
     return 0
+}
+
+# 写入单个键并立即落盘（复用 stage + commit_draft 单一事务落盘）。
+xmg_state_set() {
+    local key="${1:-}" val="${2:-}"
+    xmg_state_stage "$key" "$val" || return 1
+    xmg_state_commit_draft || return 1
 }
 
 # 输出全部 KEY=VALUE 行，按键名排序（排序保证输出确定，便于 diff 与幂等比较）。

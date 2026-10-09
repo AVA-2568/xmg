@@ -71,26 +71,41 @@ xmg_json_escape() {
 #   - "https+local://host/dns-query" 即 DOHL，文档称"一般适合在服务端使用"，
 #     且 DOH 请求不经路由组件、直接由 freedom 出站，对本方案最省一跳
 #   - IP 形式合法：文档原文"有些服务商拥有 IP 别名的证书，可以直接写 IP 形式"
+#   - 动态双栈适配：纯 IPv6 机器（XMG_NET_IPV4=0 && XMG_NET_IPV6=1）下渲染为
+#     IPv6 DoH 地址（Cloudflare/Google IPv6）且 queryStrategy 设为 UseIPv6；
+#     双栈或 IPv4 场景使用 IPv4 DoH (1.1.1.1/8.8.8.8) 且 queryStrategy 为 UseIP
 #   - 全局 queryStrategy 优先：文档原文"全局值优先，当子项中的值与全局值冲突时，
 #     子项的查询将空响应" -> 子项一律不写 queryStrategy
 #   - 不用 localhost：文档原文"本机的 DNS 请求不受 Xray 控制"
 #   - 不开 enableParallelQuery：并发查询在215MB 机器上是净内存损失
 #   - 不写 hosts/tag：本方案不启用 routing，写了也无人匹配
 xmg_render_dns() {
-    printf '%s\n' \
-        '  "dns": {' \
-        '    "servers": [' \
-        '      "https+local://1.1.1.1/dns-query",' \
-        '      "https+local://8.8.8.8/dns-query"' \
-        '    ],' \
-        '    "queryStrategy": "UseIP"' \
-        '  },'
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        printf '%s\n' \
+            '  "dns": {' \
+            '    "servers": [' \
+            '      "https+local://[2606:4700:4700::1111]/dns-query",' \
+            '      "https+local://[2001:4860:4860::8888]/dns-query"' \
+            '    ],' \
+            '    "queryStrategy": "UseIPv6"' \
+            '  },'
+    else
+        printf '%s\n' \
+            '  "dns": {' \
+            '    "servers": [' \
+            '      "https+local://1.1.1.1/dns-query",' \
+            '      "https+local://8.8.8.8/dns-query"' \
+            '    ],' \
+            '    "queryStrategy": "UseIP"' \
+            '  },'
+    fi
 }
 
 # ===== policy 块 =====
 # 依据 config_policy.md:
 #   - bufferSize 单位 KB，平台默认 ARM=0 / ARM64=4 / 其它=512
 #   - 统一走 XMG_BUFFER_SIZE（默认 4）：x86 低配机上 512KB/连接 的池子太奢侈
+#   - connIdle: 60（默认 300 秒收缩至 60 秒）：迅速回收失效或半开套接字，防止 215M 小内存耗尽
 #   - 键是字符串形式的数字（JSON 的要求），"0" 的双引号不可省略
 xmg_render_policy() {
     local bufsz
@@ -106,7 +121,8 @@ xmg_render_policy() {
     printf '  "policy": {\n'
     printf '    "levels": {\n'
     printf '      "0": {\n'
-    printf '        "bufferSize": %s\n' "$bufsz"
+    printf '        "bufferSize": %s,\n' "$bufsz"
+    printf '        "connIdle": 60\n'
     printf '      }\n'
     printf '    }\n'
     printf '  },\n'
@@ -116,15 +132,24 @@ xmg_render_policy() {
 # 依据 config_outbound.md: 列表中的第一个元素作为主 outbound
 # 依据 config_transport.md: 出站的 streamSettings 只对"有传输层"的协议有意义，
 #   freedom 直接出站只有 sockopt 可配，故不写 streamSettings。
-# 依据 config_outbounds_freedom.md: settings 里的 domainStrategy/redirect/
-#   userLevel 均为可选且默认值即所要（AsIs），故不写 settings。
+# 依据 config_outbounds_freedom.md: settings 声明 domainStrategy 为 "UseIP"
+#   （纯 IPv6 机器下动态适配为 "UseIPv6"），打通出站代理对内置 DoH 的依赖，
+#   终结系统 /etc/resolv.conf 旁路问题。
 #   本方案不开 routing，因此也不需要 block 出站。
 xmg_render_outbounds() {
+    local ds="UseIP"
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        ds="UseIPv6"
+    fi
+
     printf '%s\n' \
         '  "outbounds": [' \
         '    {' \
         '      "protocol": "freedom",' \
-        '      "tag": "direct"' \
+        '      "tag": "direct",' \
+        '      "settings": {' \
+        "        \"domainStrategy\": \"$ds\"" \
+        '      }' \
         '    }' \
         '  ]'
 }
@@ -272,6 +297,7 @@ xmg_render_vless() {
     printf '        "security": "tls",\n'
     printf '        "tlsSettings": {\n'
     printf '          "serverName": "%s",\n' "$(xmg_json_escape "$domain")"
+    printf '          "rejectUnknownSni": true,\n'
     printf '          "alpn": ["h2", "http/1.1"],\n'
     printf '          "minVersion": "1.2",\n'
     printf '          "maxVersion": "1.3",\n'

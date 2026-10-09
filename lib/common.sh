@@ -235,3 +235,23 @@ xmg_systemctl() {
             ;;
     esac
 }
+
+# ===== 安全加载 detect.sh =====
+if [ -r "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh" ]; then
+    # shellcheck source=/dev/null
+    source "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh"
+elif [ -r "$(dirname "${BASH_SOURCE[0]}")/detect.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/detect.sh"
+fi
+
+# ===== 安全加载 doctor.sh =====
+if [ -r "${XMG_LIB_DIR:-$XMG_HOME/lib}/doctor.sh" ]; then
+    # shellcheck source=/dev/null
+    source "${XMG_LIB_DIR:-$XMG_HOME/lib}/doctor.sh"
+elif [ -r "$(dirname "${BASH_SOURCE[0]}")/doctor.sh" ]; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/doctor.sh"
+fi
+
+
