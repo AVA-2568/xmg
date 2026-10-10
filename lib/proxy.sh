@@ -484,21 +484,43 @@ xmg_proxy_menu() {
                     --socks-port "$(_xmg_read "监听端口" "$(xmg_state_get PROXY_SOCKS_PORT)")" \
                     --socks-listen "$(_xmg_read "监听地址" "$(xmg_state_get PROXY_SOCKS_LISTEN)")" \
                     --socks-user "$(_xmg_read "用户名" "")" \
-                    --socks-pass "$(_xmg_read "密码(至少8位)" "")"
+                    --socks-pass "$(_xmg_read "密码(至少8位)" "")" || true
                 xmg_pause
                 ;;
             2)
+                local v_port v_listen v_domain v_uuid v_path v_mode v_src v_cert v_key
+                v_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_VLESS_PORT)")"
+                v_listen="$(_xmg_read "监听地址" "$(xmg_state_get PROXY_VLESS_LISTEN)")"
+                v_domain="$(_xmg_read "域名(用于SNI/CDN回源)" "$(xmg_state_get PROXY_VLESS_DOMAIN)")"
+                v_uuid="$(_xmg_read "UUID" "$(xmg_state_get PROXY_VLESS_UUID)")"
+                v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")")"
+                v_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_VLESS_MODE "auto")")"
+                v_src="$(_xmg_read "证书来源(user/acme)" "$(xmg_state_get PROXY_VLESS_CERT_SOURCE "user")")"
+                if [ "$v_src" = "user" ]; then
+                    v_cert="$(_xmg_read "证书路径" "$(xmg_state_get PROXY_VLESS_CERT_FILE)")"
+                    v_key="$(_xmg_read "私钥路径" "$(xmg_state_get PROXY_VLESS_KEY_FILE)")"
+                else
+                    v_cert="$XMG_ACME_CERT_FILE"
+                    v_key="$XMG_ACME_KEY_FILE"
+                    if [ ! -f "$v_cert" ] || [ ! -f "$v_key" ]; then
+                        echo
+                        xmg_warn "检测到域名 $v_domain 的 ACME 证书尚未签发"
+                        if xmg_confirm "是否立即申请证书 (acme.sh)?"; then
+                            xmg_proxy_acme_issue "$v_domain" || true
+                        fi
+                    fi
+                fi
                 xmg_proxy_apply \
                     --vless on \
-                    --vless-port "$(_xmg_read "监听端口" "$(xmg_state_get PROXY_VLESS_PORT)")" \
-                    --vless-listen "$(_xmg_read "监听地址" "$(xmg_state_get PROXY_VLESS_LISTEN)")" \
-                    --vless-domain "$(_xmg_read "域名(用于SNI/CDN回源)" "")" \
-                    --vless-uuid "$(_xmg_read "UUID" "")" \
-                    --vless-path "$(_xmg_read "path" "/")" \
-                    --vless-mode "$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "auto")" \
-                    --vless-cert-source "$(_xmg_read "证书来源(user/acme)" "user")" \
-                    --vless-cert-file "$(_xmg_read "证书路径(来源 user 时)" "")" \
-                    --vless-key-file "$(_xmg_read "私钥路径(来源 user 时)" "")"
+                    --vless-port "$v_port" \
+                    --vless-listen "$v_listen" \
+                    --vless-domain "$v_domain" \
+                    --vless-uuid "$v_uuid" \
+                    --vless-path "$v_path" \
+                    --vless-mode "$v_mode" \
+                    --vless-cert-source "$v_src" \
+                    --vless-cert-file "$v_cert" \
+                    --vless-key-file "$v_key" || true
                 echo
                 echo "过 CDN 提示：客户端 path 必须与服务器一致；"
                 echo "客户端 alpn 可选 h3 使用 QUIC；连不上 CF 请在 CF 面板启用 gRPC；"
@@ -506,11 +528,11 @@ xmg_proxy_menu() {
                 xmg_pause
                 ;;
             3)
-                xmg_proxy_disable socks
+                xmg_proxy_disable socks || true
                 xmg_pause
                 ;;
             4)
-                xmg_proxy_disable vless
+                xmg_proxy_disable vless || true
                 xmg_pause
                 ;;
             5)

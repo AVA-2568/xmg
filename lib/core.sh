@@ -476,25 +476,25 @@ xmg_core_menu() {
 
         case "$choice" in
             1)
-                xmg_core_channel_set preview && xmg_core_install
+                { xmg_core_channel_set preview && xmg_core_install; } || true
                 xmg_pause
                 ;;
             2)
-                xmg_core_channel_set stable && xmg_core_install
+                { xmg_core_channel_set stable && xmg_core_install; } || true
                 xmg_pause
                 ;;
             3)
                 printf "请输入版本号 (如 v25.8.3): " >&2
                 read -r ver || return 0
-                xmg_core_channel_set pinned "$ver" && xmg_core_install
+                { xmg_core_channel_set pinned "$ver" && xmg_core_install; } || true
                 xmg_pause
                 ;;
             4)
-                xmg_core_version
+                xmg_core_version || true
                 xmg_pause
                 ;;
             5)
-                xmg_core_status
+                xmg_core_status || true
                 xmg_pause
                 ;;
             0)

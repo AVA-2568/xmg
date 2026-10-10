@@ -192,81 +192,69 @@ xmg_render_config() {
     }]
   end
 ) |
-(
-  (if $socks_on then [
-    {
-      "tag": "inbound-socks",
-      "listen": $socks_listen,
-      "port": ($socks_port | tonumber),
-      "protocol": "socks",
-      "settings": {
-        "auth": "password",
-        "users": [
-          {
-            "user": $socks_user,
-            "pass": $socks_pass
-          }
-        ],
-        "udp": $socks_udp
-      }
-    }
-  ] else [] end) +
-  (if $vless_on then [
-    {
-      "tag": "inbound-vless",
-      "listen": $vless_listen,
-      "port": ($vless_port | tonumber),
-      "protocol": "vless",
-      "settings": {
-        "users": [
-          {
-            "id": $vless_uuid,
-            "level": 0
-          }
-        ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "method": "xhttp",
-        "xhttpSettings": {
-          "path": $vless_path,
-          "mode": $vless_mode
-        },
-        "security": "tls",
-        "tlsSettings": {
-          "serverName": $vless_domain,
-          "rejectUnknownSni": true,
-          "alpn": [
-            "h2",
-            "http/1.1"
-          ],
-          "minVersion": "1.2",
-          "maxVersion": "1.3",
-          "certificates": [
-            {
-              "usage": "encipherment",
-              "certificateFile": $vless_cert_file,
-              "keyFile": $vless_key_file
-            }
-          ]
-        }
-      }
-    }
-  ] else [] end)
-) as $active_inbounds |
-.inbounds = (
-  if ($active_inbounds | length) > 0 then
-    $active_inbounds
-  else
-    [
-      {
-        "protocol": "tunnel",
-        "port": 0,
-        "tag": "empty"
-      }
-    ]
-  end
-)'
+	(
+	  (if $socks_on then [
+	    {
+	      "tag": "inbound-socks",
+	      "listen": $socks_listen,
+	      "port": ($socks_port | tonumber),
+	      "protocol": "socks",
+	      "settings": {
+	        "auth": "password",
+	        "users": [
+	          {
+	            "user": $socks_user,
+	            "pass": $socks_pass
+	          }
+	        ],
+	        "udp": $socks_udp
+	      }
+	    }
+	  ] else [] end) +
+	  (if $vless_on then [
+	    {
+	      "tag": "inbound-vless",
+	      "listen": $vless_listen,
+	      "port": ($vless_port | tonumber),
+	      "protocol": "vless",
+	      "settings": {
+	        "users": [
+	          {
+	            "id": $vless_uuid,
+	            "level": 0
+	          }
+	        ],
+	        "decryption": "none"
+	      },
+	      "streamSettings": {
+	        "method": "xhttp",
+	        "xhttpSettings": {
+	          "path": $vless_path,
+	          "mode": $vless_mode
+	        },
+	        "security": "tls",
+	        "tlsSettings": {
+	          "serverName": $vless_domain,
+	          "rejectUnknownSni": true,
+	          "alpn": [
+	            "h2",
+	            "http/1.1"
+	          ],
+	          "minVersion": "1.2",
+	          "maxVersion": "1.3",
+	          "certificates": [
+	            {
+	              "usage": "encipherment",
+	              "certificateFile": $vless_cert_file,
+	              "keyFile": $vless_key_file
+	            }
+	          ]
+	        }
+	      }
+	    }
+	  ] else [] end)
+	) as $active_inbounds |
+	.inbounds = $active_inbounds'
 
     local jq_args=(
         --arg error_log "$error_log"

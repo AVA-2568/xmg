@@ -225,20 +225,20 @@ _t_c3_ports="$(printf '%s' "$C3" | grep -oE '"port": [0-9]+' | awk '{print $2}' 
 t_equals "共存时两入站端口不同" "$_t_c3_ports" "2"
 
 # ============================================================================
-# 3. 铁律禁止字段（对产物，不对源码）：XHTTP 方案不得出现这些写法
-#    network（字段名应为 method）/ mux（XHTTP 下不可用）/ flow（仅 TCP+TLS 可用）
-#    extra、email（用户确认不暴露）/ accounts、noauth（SOCKS 必须强口令）
-#    tcpSettings（原 TCP 传输字段名为 rawSettings）
+# 3. 铁律禁止字段（对产物，不对源码）：依据 https://lcuwx2016.github.io/xtls/config 规范
+#    network（传输字段应为 method）/ mux（XHTTP 下不可用）/ flow（仅 TCP+TLS 可用）
+#    extra、email（用户确认不暴露）/ accounts（入站用户列表应为 users）/ noauth（SOCKS 必须强口令）
+#    tcpSettings（传输字段名为 rawSettings）
 # ============================================================================
 t_assert "共存产物不含铁律禁止字段" \
     _t_absent_tokens "$C3" \
     '"network"' '"mux"' '"flow"' '"extra"' '"email"' '"accounts"' 'noauth' 'tcpSettings'
 
 # ============================================================================
-# 4. 必备字段必须出现
+# 4. 必备字段必须出现（依据 https://lcuwx2016.github.io/xtls/config 规范）
 # ============================================================================
-t_assert "共存产物含必备字段 method/decryption/auth" \
-    _t_has_all "$C3" '"method": "xhttp"' '"decryption": "none"' '"auth": "password"'
+t_assert "共存产物含必备字段 method/users/decryption/auth" \
+    _t_has_all "$C3" '"method": "xhttp"' '"users"' '"decryption": "none"' '"auth": "password"'
 
 # ============================================================================
 # 5. SOCKS 入站不得带 streamSettings：全产物中 streamSettings 只应出现 1 次（VLESS）
@@ -277,12 +277,11 @@ t_contains "纯 IPv6 下 DNS queryStrategy 为 UseIPv6" "$C_IPV6" '"queryStrateg
 t_not_contains "纯 IPv6 下 DNS servers 不包含 IPv4 1.1.1.1" "$C_IPV6" '"https+local://1.1.1.1/dns-query"'
 unset XMG_NET_IPV4 XMG_NET_IPV6
 
-# 6.6 无方案启用 (0 0) 时生成 tunnel 占位节点
+# 6.6 无方案启用 (0 0) 时生成空 inbounds 列表（合法且不含非法 tunnel 协议）
 C0="$(xmg_render_config 0 0)"
 t_json_valid "两方案均未启用配置是合法 JSON" "$C0"
-t_contains "两方案均未启用时包含 tunnel 占位协议" "$C0" '"protocol": "tunnel"'
-t_contains "两方案均未启用时包含 tag empty" "$C0" '"tag": "empty"'
-t_contains "两方案均未启用时 port 为 0" "$C0" '"port": 0'
+t_contains "两方案均未启用时 inbounds 为空列表" "$C0" '"inbounds": []'
+t_not_contains "两方案均未启用时不包含 tunnel 协议" "$C0" '"tunnel"'
 
 # 6.7 环境变量指定自定义模板生效
 C_CUSTOM_TPL="$XMG_TMP/custom_template.json"

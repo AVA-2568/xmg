@@ -489,28 +489,28 @@ xmg_ssh_menu() {
         case "$choice" in
             1)
                 clear
-                xmg_ssh_show
+                xmg_ssh_show || true
                 xmg_pause
                 ;;
             2)
-                xmg_ssh_change_port
+                xmg_ssh_change_port || true
                 xmg_pause
                 ;;
             3)
-                xmg_ssh_disable_password
+                xmg_ssh_disable_password || true
                 xmg_pause
                 ;;
             4)
-                xmg_ssh_enable_password
+                xmg_ssh_enable_password || true
                 xmg_pause
                 ;;
             5)
-                xmg_ssh_fail2ban_install
+                xmg_ssh_fail2ban_install || true
                 xmg_pause
                 ;;
             6)
                 clear
-                xmg_ssh_fail2ban_status
+                xmg_ssh_fail2ban_status || true
                 xmg_pause
                 ;;
             0)

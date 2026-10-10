@@ -117,6 +117,9 @@ xmg_error() {
 
 xmg_die() {
     xmg_error "$*"
+    if [ -t 0 ] && [ -t 1 ]; then
+        xmg_pause
+    fi
     exit 1
 }
 
@@ -181,7 +184,14 @@ xmg_systemctl() {
     case "$action" in
         start|stop|restart|reload|enable|disable)
             xmg_require_root
-            systemctl "$action" "$service"
+            if ! systemctl "$action" "$service"; then
+                xmg_error "systemctl $action $service 执行失败！"
+                if command -v journalctl >/dev/null 2>&1; then
+                    xmg_warn "--- $service 最近 15 行系统日志 ---"
+                    journalctl -u "$service" -n 15 --no-pager 2>&1 | sed 's/^/  /' >&2 || true
+                fi
+                return 1
+            fi
             ;;
         status|is-active|is-enabled)
             systemctl "$action" "$service"

@@ -159,27 +159,27 @@ xmg_firewall_menu() {
 
         case "$choice" in
             1)
-                xmg_firewall_status
+                xmg_firewall_status || true
                 xmg_pause
                 ;;
             2)
-                xmg_firewall_allow_basic
+                xmg_firewall_allow_basic || true
                 xmg_pause
                 ;;
             3)
-                xmg_firewall_allow_custom_port
+                xmg_firewall_allow_custom_port || true
                 xmg_pause
                 ;;
             4)
-                xmg_firewall_enable
+                xmg_firewall_enable || true
                 xmg_pause
                 ;;
             5)
-                xmg_firewall_disable
+                xmg_firewall_disable || true
                 xmg_pause
                 ;;
             6)
-                xmg_firewall_install
+                xmg_firewall_install || true
                 xmg_pause
                 ;;
             0)
