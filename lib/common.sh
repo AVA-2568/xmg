@@ -140,9 +140,13 @@ xmg_mkdirs() {
         "$XMG_ETC_DIR" \
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
+        "$XMG_LOG_DIR/xray" \
         "$XMG_BACKUP_DIR" \
         "$XMG_XRAY_DIR" \
         "$XMG_ETC_DIR/xray"
+    chmod 777 "$XMG_LOG_DIR" "$XMG_LOG_DIR/xray" 2>/dev/null || true
+    touch "$XMG_LOG_DIR/xray/error.log" 2>/dev/null || true
+    chmod 666 "$XMG_LOG_DIR/xray/error.log" 2>/dev/null || true
 }
 
 xmg_pause() {

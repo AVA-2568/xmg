@@ -176,6 +176,7 @@ xmg_core_generate_dropin_content() {
 # 此文件优先级高于官方的 10-donot_touch_single_conf.conf
 # 请勿手动编辑，由 XMG 自动管理
 [Service]
+User=root
 Environment="GOMEMLIMIT=100MiB"
 Environment="GODEBUG=madvdontneed=1"
 Environment="GOMAXPROCS=1"

@@ -153,7 +153,10 @@ xmg_render_config() {
     local logdir error_log
     logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
+    chmod 777 "$logdir" 2>/dev/null || true
     error_log="$logdir/error.log"
+    touch "$error_log" 2>/dev/null || true
+    chmod 666 "$error_log" 2>/dev/null || true
 
     # IPv6 模式判断
     local is_ipv6_only=false
