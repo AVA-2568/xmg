@@ -208,22 +208,35 @@ xmg_proxy_apply() {
         return 2
     fi
 
-    # 完善 ACME 状态一致性：检查 PROXY_VLESS_CERT_SOURCE=acme 时防御性处理
+    # 完善证书一致性与自动回退兜底
     local vless_on="${XMG_STATE[PROXY_VLESS_ENABLED]:-0}"
     local cert_src="${XMG_STATE[PROXY_VLESS_CERT_SOURCE]:-user}"
-    if [ "$vless_on" = "1" ] && [ "$cert_src" = "acme" ]; then
+    if [ "$vless_on" = "1" ]; then
         local cf="${XMG_STATE[PROXY_VLESS_CERT_FILE]:-}"
         local kf="${XMG_STATE[PROXY_VLESS_KEY_FILE]:-}"
-        if [ -z "$cf" ]; then
-            cf="$XMG_ACME_CERT_FILE"
-            _xmg_stage PROXY_VLESS_CERT_FILE "$cf"
+        if [ "$cert_src" = "acme" ]; then
+            if [ -z "$cf" ]; then
+                cf="$XMG_ACME_CERT_FILE"
+                _xmg_stage PROXY_VLESS_CERT_FILE "$cf"
+            fi
+            if [ -z "$kf" ]; then
+                kf="$XMG_ACME_KEY_FILE"
+                _xmg_stage PROXY_VLESS_KEY_FILE "$kf"
+            fi
         fi
-        if [ -z "$kf" ]; then
-            kf="$XMG_ACME_KEY_FILE"
-            _xmg_stage PROXY_VLESS_KEY_FILE "$kf"
-        fi
-        if [ ! -f "$cf" ] || [ ! -f "$kf" ]; then
-            xmg_warn "ACME 证书文件尚未就绪: $cf（请执行 xmg proxy acme <域名> 签发证书）"
+        # 生产环境若证书文件不存在，自动通过 acme 申请或自签名保底
+        if [ "${XMG_TEST_MODE:-0}" != "1" ] && { [ ! -f "$cf" ] || [ ! -f "$kf" ]; }; then
+            local v_domain="${XMG_STATE[PROXY_VLESS_DOMAIN]:-example.com}"
+            if [ "$cert_src" = "acme" ]; then
+                xmg_info "检测到 ACME 证书未就绪，正在尝试申请证书..."
+                if ! xmg_proxy_acme_issue "$v_domain"; then
+                    xmg_warn "acme.sh 签发未通过（NAT机通常无80端口），自动回退为生成自签名证书..."
+                    xmg_proxy_self_sign_cert "$v_domain" "$cf" "$kf" || true
+                fi
+            else
+                xmg_warn "证书文件不存在: $cf，自动生成自签名证书保底..."
+                xmg_proxy_self_sign_cert "$v_domain" "$cf" "$kf" || true
+            fi
         fi
     fi
 
@@ -442,6 +455,71 @@ xmg_proxy_acme_issue() {
     return 0
 }
 
+# ===== 一键生成自签名证书（配合 Cloudflare Full 模式穿透 NAT）=====
+xmg_proxy_self_sign_cert() {
+    local domain="${1:-}"
+    if [ -z "$domain" ]; then
+        domain="$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")"
+    fi
+    local cert="${2:-$XMG_ACME_CERT_FILE}"
+    local key="${3:-$XMG_ACME_KEY_FILE}"
+
+    mkdir -p "$(dirname "$cert")" "$(dirname "$key")" 2>/dev/null || true
+    if command -v openssl >/dev/null 2>&1; then
+        if openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1 2>/dev/null) \
+            -keyout "$key" -out "$cert" \
+            -subj "/CN=$domain" -days 3650 >/dev/null 2>&1; then
+            :
+        else
+            openssl req -x509 -nodes -newkey rsa:2048 \
+                -keyout "$key" -out "$cert" \
+                -subj "/CN=$domain" -days 3650 >/dev/null 2>&1 || true
+        fi
+        if [ -f "$cert" ] && [ -f "$key" ]; then
+            chmod 644 "$cert" 2>/dev/null || true
+            chmod 600 "$key" 2>/dev/null || true
+            xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || true
+            xmg_state_stage PROXY_VLESS_CERT_FILE "$cert" || true
+            xmg_state_stage PROXY_VLESS_KEY_FILE "$key" || true
+            xmg_state_commit_draft || true
+            xmg_info "自签名证书已生成就绪: $cert"
+            xmg_info "提示：请在 Cloudflare 后台 SSL/TLS 模式选择 Full（完全）"
+            return 0
+        fi
+    fi
+    xmg_error "未检测到 openssl 或生成证书失败"
+    return 1
+}
+
+# ===== CDN 回源与非标端口提示 =====
+_xmg_proxy_cf_port_hint() {
+    local port="$1"
+    local is_cf_standard=0
+    case "$port" in
+        443|8443|2053|2083|2087|2096)
+            is_cf_standard=1
+            ;;
+    esac
+
+    echo
+    echo "==================== CDN 与证书配置说明 ===================="
+    echo "1. 证书与验证："
+    echo "   - 走 CDN 代理时：客户端【无需】开启跳过证书验证（Cloudflare 官方证书完全受信任）；"
+    echo "     同时请在 Cloudflare 仪表盘 [SSL/TLS] 设为 [Full (完全)] 模式。"
+    echo "   - 若直接连接 VPS IP：客户端必须开启【跳过证书验证 (AllowInsecure)】。"
+    if [ "$is_cf_standard" -eq 1 ]; then
+        echo "2. 回源端口：当前端口 $port 为 Cloudflare 官方支持的标准 HTTPS 端口，小黄云开启直接连通。"
+    else
+        printf '%s2. 回源端口：%s当前端口 %s 为非标准 CDN 端口（NAT 机映射端口）！\n' "$XMG_C_YELLOW" "$XMG_C_RESET" "$port"
+        echo "   由于使用了非标端口，配合 Cloudflare CDN 必须配置端口回源："
+        echo "   -> 打开 Cloudflare 域名控制台 -> 规则 (Rules) -> 源服务器规则 (Origin Rules)"
+        echo "   -> 新建规则：匹配主机名 (Hostname)，在 [目标端口 (Destination Port)] 勾选重写为: $port"
+        echo "   -> 客户端外部即可通过标准 443 端口连接域名！"
+    fi
+    echo "3. 路径匹配：客户端 path 必须与服务端一致，alpn 建议填 h2,http/1.1。"
+    echo "============================================================"
+}
+
 # ===== 交互向导 =====
 _xmg_read() {
     local prompt="$1" def="${2:-}" ans=""
@@ -469,6 +547,7 @@ xmg_proxy_menu() {
         echo "4. 停用 VLESS"
         echo "5. 导出当前状态到文件"
         echo "6. 申请证书 (acme.sh)"
+        echo "7. 一键生成自签名证书 (供 CDN Full 模式)"
         echo "0. 返回"
         echo
         printf "请选择: "
@@ -489,6 +568,8 @@ xmg_proxy_menu() {
                 ;;
             2)
                 local v_port v_listen v_domain v_uuid v_path v_mode v_src v_cert v_key
+                local def_cf="${XMG_ACME_CERT_FILE:-$XMG_HOME/etc/xray/certs/fullchain.crt}"
+                local def_kf="${XMG_ACME_KEY_FILE:-$XMG_HOME/etc/xray/certs/priv.key}"
                 v_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_VLESS_PORT)")"
                 v_listen="$(_xmg_read "监听地址" "$(xmg_state_get PROXY_VLESS_LISTEN)")"
                 v_domain="$(_xmg_read "域名(用于SNI/CDN回源)" "$(xmg_state_get PROXY_VLESS_DOMAIN)")"
@@ -497,8 +578,15 @@ xmg_proxy_menu() {
                 v_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_VLESS_MODE "auto")")"
                 v_src="$(_xmg_read "证书来源(user/acme)" "$(xmg_state_get PROXY_VLESS_CERT_SOURCE "user")")"
                 if [ "$v_src" = "user" ]; then
-                    v_cert="$(_xmg_read "证书路径" "$(xmg_state_get PROXY_VLESS_CERT_FILE)")"
-                    v_key="$(_xmg_read "私钥路径" "$(xmg_state_get PROXY_VLESS_KEY_FILE)")"
+                    v_cert="$(_xmg_read "证书路径" "$(xmg_state_get PROXY_VLESS_CERT_FILE "$def_cf")")"
+                    v_key="$(_xmg_read "私钥路径" "$(xmg_state_get PROXY_VLESS_KEY_FILE "$def_kf")")"
+                    if [ ! -f "$v_cert" ] || [ ! -f "$v_key" ]; then
+                        echo
+                        xmg_warn "检测到证书或私钥文件不存在: $v_cert"
+                        if xmg_confirm "是否立即一键生成自签名证书（配合 Cloudflare Full 模式）?"; then
+                            xmg_proxy_self_sign_cert "$v_domain" "$v_cert" "$v_key" || true
+                        fi
+                    fi
                 else
                     v_cert="$XMG_ACME_CERT_FILE"
                     v_key="$XMG_ACME_KEY_FILE"
@@ -521,10 +609,7 @@ xmg_proxy_menu() {
                     --vless-cert-source "$v_src" \
                     --vless-cert-file "$v_cert" \
                     --vless-key-file "$v_key" || true
-                echo
-                echo "过 CDN 提示：客户端 path 必须与服务器一致；"
-                echo "客户端 alpn 可选 h3 使用 QUIC；连不上 CF 请在 CF 面板启用 gRPC；"
-                echo "其他 CDN 不兼容时把 mode 改为 packet-up。"
+                _xmg_proxy_cf_port_hint "$v_port"
                 xmg_pause
                 ;;
             3)
@@ -554,6 +639,13 @@ xmg_proxy_menu() {
                 if xmg_proxy_acme_issue "$d"; then
                     xmg_info "证书路径已写入 state，请到方案 2 或直接执行 apply 生效"
                 fi
+                xmg_pause
+                ;;
+            7)
+                printf "请输入域名 (默认 %s): " "$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")" >&2
+                read -r d || return 0
+                [ -z "$d" ] && d="$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")"
+                xmg_proxy_self_sign_cert "$d" || true
                 xmg_pause
                 ;;
             0)
