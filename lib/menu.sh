@@ -278,7 +278,12 @@ xmg_menu_open_module_by_index() {
     fn="${XMG_MENU_FUNCS[$idx]}"
 
     xmg_menu_load_module_func "$file" "$fn"
-    "$fn"
+    local rc=0
+    "$fn" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        xmg_warn "模块 '$file' 执行退出（返回码: $rc）"
+        xmg_pause
+    fi
 }
 
 xmg_menu_show() {

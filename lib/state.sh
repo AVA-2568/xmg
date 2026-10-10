@@ -685,9 +685,10 @@ xmg_state_validate_config() {
     }
 
     # 测试桩只在显式开启测试模式时生效：xmg 以 root 运行，环境变量就是命令
-    # 执行面，加这道开关后生产环境即使存在同名变量也不会 eval 任意命令。
+    # 执行面，加这道开关后生产环境即使存在同名变量也不会执行任意命令。
     if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -n "${XMG_XRAY_CONFIG_TESTCMD:-}" ]; then
-        if eval "$XMG_XRAY_CONFIG_TESTCMD" >/dev/null 2>&1; then
+        local -a _cfg_cmd=($XMG_XRAY_CONFIG_TESTCMD)
+        if "${_cfg_cmd[@]}" >/dev/null 2>&1; then
             return 0
         fi
         return 3
@@ -748,28 +749,40 @@ xmg_backup_prune() {
     return 0
 }
 
-# ===== 服务重载 =====
+# ===== 服务重启生效 =====
 # 测试可注入 XMG_XRAY_RELOAD_TESTCMD 桩替换真实 systemctl（仅 XMG_TEST_MODE=1 时生效，
-# 与校验桩同理：生产环境即使存在同名变量也不 eval 任意命令）；
-# 生产无 systemctl 时视为无需重载（返回 0）。
+# 与校验桩同理：生产环境即使存在同名变量也不执行任意命令）；
+# 生产无 systemctl 时视为无需重启（返回 0）。
+# 注意：Xray 官方不支持 SIGHUP 平滑重载配置，必须使用 systemctl restart。
 _xmg_xray_reload() {
     if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -n "${XMG_XRAY_RELOAD_TESTCMD:-}" ]; then
-        eval "$XMG_XRAY_RELOAD_TESTCMD" >/dev/null 2>&1
+        local -a _reload_cmd=($XMG_XRAY_RELOAD_TESTCMD)
+        "${_reload_cmd[@]}" >/dev/null 2>&1
         return $?
     fi
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl reload xray >/dev/null 2>&1
-        return $?
+        local svc="${XMG_XRAY_SERVICE:-xray}"
+        local s_err=""
+        if ! s_err="$(systemctl restart "$svc" 2>&1)"; then
+            xmg_error "重启 $svc 服务失败 (systemctl restart $svc):"
+            [ -n "$s_err" ] && printf '%s\n' "$s_err" >&2
+            if command -v journalctl >/dev/null 2>&1; then
+                xmg_warn "--- $svc 最近 15 行系统日志 ---"
+                journalctl -u "$svc" -n 15 --no-pager 2>&1 | sed 's/^/  /' >&2 || true
+            fi
+            return 1
+        fi
+        return 0
     fi
     return 0
 }
 
 # ===== 原子提交 =====
-# 顺序：校验新配置 → 备份旧配置 → 清理旧备份 → 原子替换 → reload → 失败回滚。
+# 顺序：校验新配置 → 备份旧配置 → 清理旧备份 → 原子替换 → restart 重启服务 → 失败回滚。
 #
 # 核心不变量：进入「替换」阶段前，只要现网存在旧配置，旧配置必已备份成功；
 # 备份失败立即中止、绝不替换——无法保证可回滚，就不动现网。
-# 首次安装（原本无现网配置）是唯一没有旧备份的合法情形，reload 失败时
+# 首次安装（原本无现网配置）是唯一没有旧备份的合法情形，重启失败时
 # 如实报告「新配置已写入但未生效」，不再谎称已回滚。
 #
 # 返回：0 成功 / 3 校验失败（现网未被触碰）/ 4 运行失败
@@ -826,13 +839,13 @@ xmg_state_commit() {
         return 4
     }
 
-    # 5. reload
+    # 5. 重启服务加载新配置
     _xmg_xray_reload && return 0
 
-    # reload 失败。文案必须与实际行为一致，任何分支都不谎称已回滚。
+    # 重启失败。文案必须与实际行为一致，任何分支都不谎称已回滚。
     if [ "$had_old" -ne 1 ]; then
         # 首次安装：原本没有配置，没有旧配置可回滚。如实报告，默认保留新配置。
-        xmg_error "服务重载失败；本次为首次安装，原状态为无配置，新配置已写入但未生效：$XMG_XRAY_CONFIG（未自动删除，便于排查）"
+        xmg_error "Xray 服务重启失败；本次为首次安装，原状态为无配置，新配置已写入但未生效：$XMG_XRAY_CONFIG（未自动删除，便于排查）"
         return 4
     fi
 
@@ -842,13 +855,13 @@ xmg_state_commit() {
         && cp -a "$old_backup" "$rb_staged" 2>/dev/null \
         && mv -f "$rb_staged" "$XMG_XRAY_CONFIG" 2>/dev/null; then
         _xmg_xray_reload >/dev/null 2>&1 || \
-            xmg_warn "已回滚到原配置，但重载仍然失败，请检查 xray 服务状态"
-        xmg_error "服务重载失败，已回滚到原配置"
+            xmg_warn "已回滚到原配置，但重启服务仍然失败，请检查 xray 服务状态"
+        xmg_error "Xray 服务重启失败，已回滚到原配置"
     else
         if [ -n "$rb_staged" ]; then
             rm -f "$rb_staged" 2>/dev/null || true
         fi
-        xmg_error "服务重载失败，且回滚未能完成；现网配置可能未生效，请立即检查 $XMG_XRAY_CONFIG"
+        xmg_error "Xray 服务重启失败，且回滚未能完成；现网配置可能未生效，请立即检查 $XMG_XRAY_CONFIG"
     fi
     return 4
 }

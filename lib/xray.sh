@@ -222,8 +222,8 @@ xmg_xray_restart() {
 
 xmg_xray_reload() {
     xmg_require_root
-    xmg_systemctl reload "$XMG_XRAY_SERVICE"
-    xmg_info "Xray 已重载"
+    xmg_info "Xray 不支持平滑重载配置，正在重启服务以生效新配置..."
+    xmg_xray_restart
 }
 
 xmg_xray_status() {
@@ -362,47 +362,47 @@ xmg_xray_menu() {
 
         case "$choice" in
             1)
-                xmg_xray_install_update
+                xmg_xray_install_update || true
                 xmg_pause
                 ;;
             2)
-                xmg_xray_uninstall
+                xmg_xray_uninstall || true
                 xmg_pause
                 ;;
             3)
-                xmg_xray_start
+                xmg_xray_start || true
                 xmg_pause
                 ;;
             4)
-                xmg_xray_stop
+                xmg_xray_stop || true
                 xmg_pause
                 ;;
             5)
-                xmg_xray_restart
+                xmg_xray_restart || true
                 xmg_pause
                 ;;
             6)
-                xmg_xray_reload
+                xmg_xray_reload || true
                 xmg_pause
                 ;;
             7)
-                xmg_xray_status
+                xmg_xray_status || true
                 xmg_pause
                 ;;
             8)
-                xmg_xray_validate_config
+                xmg_xray_validate_config || true
                 xmg_pause
                 ;;
             9)
-                xmg_xray_show_config
+                xmg_xray_show_config || true
                 xmg_pause
                 ;;
             10)
-                xmg_xray_diag
+                xmg_xray_diag || true
                 xmg_pause
                 ;;
             11)
-                xmg_xray_restore_systemd_unit
+                xmg_xray_restore_systemd_unit || true
                 xmg_pause
                 ;;
             0)
