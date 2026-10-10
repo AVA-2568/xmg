@@ -839,6 +839,16 @@ xmg_state_commit() {
         return 4
     }
 
+    # 4.1 自动同步 systemd 配置路径与双重兜底
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+            xmg_core_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
+        fi
+        if [ -d /usr/local/etc/xray ] && [ "$XMG_XRAY_CONFIG" != "/usr/local/etc/xray/config.json" ]; then
+            ln -sf "$XMG_XRAY_CONFIG" /usr/local/etc/xray/config.json 2>/dev/null || true
+        fi
+    fi
+
     # 5. 重启服务加载新配置
     _xmg_xray_reload && return 0
 
