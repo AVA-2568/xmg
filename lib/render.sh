@@ -36,7 +36,8 @@ _XMG_DEFAULT_CONFIG_TEMPLATE='{
   "dns": {
     "servers": [
       "https+local://1.1.1.1/dns-query",
-      "https+local://8.8.8.8/dns-query"
+      "https+local://8.8.8.8/dns-query",
+      "localhost"
     ],
     "queryStrategy": "UseIP"
   },
@@ -176,9 +177,9 @@ xmg_render_config() {
 .policy.levels["0"].connIdle = 60 |
 .dns.servers = (
   if $is_ipv6_only then
-    ["https+local://[2606:4700:4700::1111]/dns-query", "https+local://[2001:4860:4860::8888]/dns-query"]
+    ["https+local://[2606:4700:4700::1111]/dns-query", "https+local://[2001:4860:4860::8888]/dns-query", "localhost"]
   else
-    ["https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query"]
+    ["https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query", "localhost"]
   end
 ) |
 .dns.queryStrategy = (if $is_ipv6_only then "UseIPv6" else "UseIP" end) |

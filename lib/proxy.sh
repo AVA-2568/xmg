@@ -301,14 +301,14 @@ xmg_proxy_vless_link() {
     local enc_path=""
     enc_path="${path//\//%2F}"
 
-    # 1. CDN 代理模式（推荐：客户端连接 443 端口，走 Cloudflare CDN 隐藏真实 IP，免开跳过证书验证）
-    local cdn_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}#XMG-VLESS-CDN"
+    # 1. CDN 代理模式（推荐：客户端连接 443 端口，走 Cloudflare CDN 隐藏真实 IP，支持 HTTP/3 QUIC 极速连接）
+    local cdn_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h3%2Ch2&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}#XMG-VLESS-CDN"
 
     # 2. 直连模式（直连当前主机端口，若用自签证书需在客户端开启跳过证书验证）
     local direct_link="vless://${uuid}@${domain}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}&allowInsecure=1#XMG-VLESS-Direct"
 
     echo "==================== 客户端节点分享链接 ===================="
-    echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口，客户端无需跳过证书):"
+    echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口，默认已启用 HTTP/3 QUIC 加速):"
     printf '%s\n' "$cdn_link"
     echo
     printf '[方案 B：源站直连模式] (直连端口 %s，若用自签证书需客户端开启跳过证书验证):\n' "$port"
