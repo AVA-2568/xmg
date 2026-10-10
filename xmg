@@ -83,6 +83,7 @@ XMG $XMG_VERSION
   xmg proxy disable <socks|vless>  停用某方案
   xmg proxy export         导出当前状态（含明文，勿贴终端）
   xmg proxy acme <域名>    申请并写入证书
+  xmg proxy link           查看客户端节点分享链接 (VLESS)
   xmg proxy menu           代理方案交互向导
   xmg core install         安装/更新内核（按记录的通道）
   xmg core version         查看内核版本
@@ -138,6 +139,7 @@ xmg_main() {
                 disable) shift; xmg_proxy_disable "$@" ;;
                 export)  shift; xmg_proxy_export "$@" ;;
                 acme)    shift; xmg_proxy_acme_issue "$@" ;;
+                link)    shift; xmg_proxy_vless_link "$@" ;;
                 menu)    set +e; xmg_proxy_menu ;;
                 *)       xmg_error "未知的 proxy 子命令: $1"; return 2 ;;
             esac

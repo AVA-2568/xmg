@@ -284,6 +284,39 @@ xmg_proxy_disable() {
     esac
 }
 
+# ===== 客户端节点分享链接生成器 =====
+xmg_proxy_vless_link() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
+    local uuid domain path mode port
+    uuid="$(xmg_state_get PROXY_VLESS_UUID)"
+    domain="$(xmg_state_get PROXY_VLESS_DOMAIN)"
+    path="$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")"
+    mode="$(xmg_state_get PROXY_VLESS_MODE "auto")"
+    port="$(xmg_state_get PROXY_VLESS_PORT "443")"
+
+    if [ -z "$uuid" ] || [ -z "$domain" ]; then
+        return 1
+    fi
+
+    local enc_path=""
+    enc_path="${path//\//%2F}"
+
+    # 1. CDN 代理模式（推荐：客户端连接 443 端口，走 Cloudflare CDN 隐藏真实 IP，免开跳过证书验证）
+    local cdn_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}#XMG-VLESS-CDN"
+
+    # 2. 直连模式（直连当前主机端口，若用自签证书需在客户端开启跳过证书验证）
+    local direct_link="vless://${uuid}@${domain}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}&allowInsecure=1#XMG-VLESS-Direct"
+
+    echo "==================== 客户端节点分享链接 ===================="
+    echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口，客户端无需跳过证书):"
+    printf '%s\n' "$cdn_link"
+    echo
+    printf '[方案 B：源站直连模式] (直连端口 %s，若用自签证书需客户端开启跳过证书验证):\n' "$port"
+    printf '%s\n' "$direct_link"
+    echo "============================================================"
+    return 0
+}
+
 # ===== status =====
 # 内核版本回显兜底：CLI 子命令按需加载，core.sh 可能未加载。
 _xmg_proxy_kernel_version() {
@@ -351,6 +384,8 @@ xmg_proxy_status() {
         echo "  path: $vless_path"
         echo "  mode: $vless_mode"
         echo "  证书: $(xmg_state_get PROXY_VLESS_CERT_SOURCE)"
+        echo
+        xmg_proxy_vless_link 2>/dev/null || true
     else
         echo "  状态: 未启用"
     fi
@@ -548,6 +583,7 @@ xmg_proxy_menu() {
         echo "5. 导出当前状态到文件"
         echo "6. 申请证书 (acme.sh)"
         echo "7. 一键生成自签名证书 (供 CDN Full 模式)"
+        echo "8. 查看客户端节点分享链接 (VLESS)"
         echo "0. 返回"
         echo
         printf "请选择: "
@@ -646,6 +682,13 @@ xmg_proxy_menu() {
                 read -r d || return 0
                 [ -z "$d" ] && d="$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")"
                 xmg_proxy_self_sign_cert "$d" || true
+                xmg_pause
+                ;;
+            8)
+                clear
+                if ! xmg_proxy_vless_link; then
+                    xmg_warn "VLESS 尚未配置或未提供有效域名/UUID"
+                fi
                 xmg_pause
                 ;;
             0)
