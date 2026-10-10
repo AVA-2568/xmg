@@ -424,13 +424,14 @@ xmg_proxy_acme_install() {
         return 4
     }
 
+    local raw_url="https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
     if command -v curl >/dev/null 2>&1; then
-        curl -fsSL https://get.acme.sh -o "$XMG_ACME_DIR/acme.sh" || {
+        curl -fsSL "$raw_url" -o "$XMG_ACME_DIR/acme.sh" || {
             xmg_error "下载 acme.sh 失败"
             return 4
         }
     elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$XMG_ACME_DIR/acme.sh" https://get.acme.sh || {
+        wget -qO "$XMG_ACME_DIR/acme.sh" "$raw_url" || {
             xmg_error "下载 acme.sh 失败"
             return 4
         }
@@ -479,6 +480,12 @@ xmg_proxy_acme_issue() {
             xmg_error "证书安装失败"
             return 4
         }
+    fi
+
+    # 物理文件存在性与非空严格检查：避免异常未产出却误写 state
+    if [ ! -s "$XMG_ACME_CERT_FILE" ] || [ ! -s "$XMG_ACME_KEY_FILE" ]; then
+        xmg_error "证书文件未生成或为空: $XMG_ACME_CERT_FILE"
+        return 4
     fi
 
     # 到这里签发已成功，才写入 state（失败路径已在上面 return）
