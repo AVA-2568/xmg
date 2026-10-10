@@ -701,6 +701,9 @@ xmg_state_validate_config() {
 
     local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
+    chmod 777 "$logdir" 2>/dev/null || true
+    touch "$logdir/error.log" 2>/dev/null || true
+    chmod 666 "$logdir/error.log" 2>/dev/null || true
 
     local err_out=""
     if ! err_out="$("$bin" run -test -format json -c "$cfg" 2>&1)"; then
@@ -795,6 +798,9 @@ xmg_state_commit() {
 
     local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
+    chmod 777 "$logdir" 2>/dev/null || true
+    touch "$logdir/error.log" 2>/dev/null || true
+    chmod 666 "$logdir/error.log" 2>/dev/null || true
 
     # 1. 校验新配置（失败绝不触碰现网配置）
     xmg_state_validate_config "$new_cfg"
