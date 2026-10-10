@@ -84,6 +84,25 @@ cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+ensure_jq() {
+    if cmd_exists jq; then
+        return 0
+    fi
+
+    yellow "未检测到 jq，尝试安装 jq..."
+    if cmd_exists apt-get; then
+        apt-get update -y && apt-get install -y jq
+    elif cmd_exists yum; then
+        yum install -y jq
+    elif cmd_exists apk; then
+        apk add jq
+    else
+        (apt-get update -y && apt-get install -y jq) || yum install -y jq || apk add jq || true
+    fi
+
+    cmd_exists jq || die "缺少依赖 jq 且自动安装失败，请手动安装 jq 后重试"
+}
+
 manifest_local_path() {
     printf '%s\n' "$SCRIPT_DIR/xmg.files"
 }
@@ -94,6 +113,7 @@ install_dirs() {
         "$XMG_BIN_DIR" \
         "$XMG_LIB_DIR" \
         "$XMG_ETC_DIR" \
+        "$XMG_ETC_DIR/xray" \
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
@@ -107,6 +127,7 @@ install_dirs() {
         "$XMG_BIN_DIR" \
         "$XMG_LIB_DIR" \
         "$XMG_ETC_DIR" \
+        "$XMG_ETC_DIR/xray" \
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
@@ -124,7 +145,7 @@ manifest_entry_validate() {
     esac
 
     case "$entry" in
-        xmg|lib/*.sh|xmg.files)
+        xmg|lib/*.sh|xmg.files|templates/*.json)
             return 0
             ;;
         *)
@@ -142,7 +163,7 @@ manifest_entry_mode() {
         xmg)
             printf '0755'
             ;;
-        lib/*.sh|xmg.files)
+        lib/*.sh|xmg.files|templates/*.json)
             printf '0644'
             ;;
         *)
@@ -167,6 +188,10 @@ manifest_entry_dest() {
             ;;
         xmg.files)
             printf '%s/xmg.files\n' "$XMG_HOME"
+            ;;
+        templates/*.json)
+            base="${entry##*/}"
+            printf '%s/xray/%s\n' "$XMG_ETC_DIR" "$base"
             ;;
         *)
             die "不支持的清单条目: $entry"
@@ -256,6 +281,8 @@ install_local() {
     local dst=""
     local mode=""
 
+    ensure_jq
+
     manifest="$(manifest_local_path)"
 
     [ -f "$SCRIPT_DIR/xmg" ] || return 1
@@ -286,6 +313,8 @@ install_remote() {
     local dst=""
     local mode=""
     local url=""
+
+    ensure_jq
 
     install_dirs
 

@@ -702,7 +702,7 @@ xmg_state_validate_config() {
     mkdir -p "$logdir" 2>/dev/null || true
 
     local err_out=""
-    if ! err_out="$("$bin" run -test -c "$cfg" 2>&1)"; then
+    if ! err_out="$("$bin" run -test -format json -c "$cfg" 2>&1)"; then
         xmg_error "Xray 拒绝了生成的配置（xray run -test 失败）:"
         [ -n "$err_out" ] && printf '%s\n' "$err_out" >&2
         return 3

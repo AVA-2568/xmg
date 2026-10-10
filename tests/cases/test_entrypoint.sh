@@ -26,12 +26,12 @@ t_assert "proxy.sh 在清单中存在且有行号" test -n "$ORDER"
 ORDER_CORE="$(grep -n 'lib/core.sh' "$FILES" | cut -d: -f1)"
 t_assert "core.sh 在清单中存在且有行号" test -n "$ORDER_CORE"
 
-# 清单条目类别必须全部落在 install.sh 允许的集合内（xmg / lib/*.sh / xmg.files）
+# 清单条目类别必须全部落在 install.sh 允许的集合内（xmg / lib/*.sh / xmg.files / templates/*.json）
 _BAD=""
 while IFS= read -r _e || [ -n "$_e" ]; do
     [ -z "$_e" ] && continue
     case "$_e" in
-        xmg|lib/*.sh|xmg.files) ;;
+        xmg|lib/*.sh|xmg.files|templates/*.json) ;;
         *) _BAD="$_e" ;;
     esac
 done < "$FILES"

@@ -277,6 +277,29 @@ t_contains "纯 IPv6 下 DNS queryStrategy 为 UseIPv6" "$C_IPV6" '"queryStrateg
 t_not_contains "纯 IPv6 下 DNS servers 不包含 IPv4 1.1.1.1" "$C_IPV6" '"https+local://1.1.1.1/dns-query"'
 unset XMG_NET_IPV4 XMG_NET_IPV6
 
+# 6.6 无方案启用 (0 0) 时生成 tunnel 占位节点
+C0="$(xmg_render_config 0 0)"
+t_json_valid "两方案均未启用配置是合法 JSON" "$C0"
+t_contains "两方案均未启用时包含 tunnel 占位协议" "$C0" '"protocol": "tunnel"'
+t_contains "两方案均未启用时包含 tag empty" "$C0" '"tag": "empty"'
+t_contains "两方案均未启用时 port 为 0" "$C0" '"port": 0'
+
+# 6.7 环境变量指定自定义模板生效
+C_CUSTOM_TPL="$XMG_TMP/custom_template.json"
+printf '{"log":{},"dns":{},"policy":{"levels":{"0":{}}},"inbounds":[],"outbounds":[],"customMarker":"customValue"}\n' > "$C_CUSTOM_TPL"
+XMG_CONFIG_TEMPLATE="$C_CUSTOM_TPL"
+C_CUSTOM="$(xmg_render_config 1 0)"
+t_json_valid "自定义模板配置是合法 JSON" "$C_CUSTOM"
+t_contains "自定义模板字段正确透传" "$C_CUSTOM" '"customMarker": "customValue"'
+unset XMG_CONFIG_TEMPLATE
+
+# 6.8 模板文件不存在时回退到内置骨架
+XMG_CONFIG_TEMPLATE="$XMG_TMP/nonexistent_template.json"
+C_FALLBACK="$(xmg_render_config 1 0)"
+t_json_valid "回退内置骨架模板配置是合法 JSON" "$C_FALLBACK"
+t_contains "回退内置骨架时包含 socks 入站" "$C_FALLBACK" '"inbound-socks"'
+unset XMG_CONFIG_TEMPLATE
+
 # ============================================================================
 # 负例：证明 JSON 检查器真的会响（否则「合法 JSON」断言在检查器恒 0 时也会全绿）
 # ============================================================================

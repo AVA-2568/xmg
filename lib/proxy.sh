@@ -228,12 +228,14 @@ xmg_proxy_apply() {
     fi
 
     # 渲染到临时文件（从已通过校验的草稿读出）
-    local socks_on tmp rc
+    # 注意：Xray 依赖 .json 后缀识别配置格式（无后缀时 xray run -test 会报 Failed to get format）
+    local socks_on vless_on tmpdir tmp rc
     socks_on="${XMG_STATE[PROXY_SOCKS_ENABLED]:-0}"
     vless_on="${XMG_STATE[PROXY_VLESS_ENABLED]:-0}"
-    tmp="$(mktemp)" || { xmg_error "无法创建临时文件"; xmg_state_stage_clear; return 4; }
+    tmpdir="$(mktemp -d)" || { xmg_error "无法创建临时目录"; xmg_state_stage_clear; return 4; }
+    tmp="$tmpdir/config.json"
     if ! xmg_render_config "$socks_on" "$vless_on" > "$tmp"; then
-        rm -f "$tmp"
+        rm -rf "$tmpdir"
         xmg_state_stage_clear
         xmg_error "渲染配置失败"
         return 4
@@ -241,7 +243,7 @@ xmg_proxy_apply() {
 
     # 校验通过：一次性原子落盘草稿（消除 N+1 磁盘写放大与半提交风险）
     if ! xmg_state_commit_draft; then
-        rm -f "$tmp"
+        rm -rf "$tmpdir"
         xmg_state_stage_clear
         xmg_error "状态草稿落盘失败"
         return 4
@@ -250,7 +252,7 @@ xmg_proxy_apply() {
     # 原子提交 config.json：含内核校验(3)/备份/原子替换/reload 失败回滚(4)
     xmg_state_commit "$tmp"
     rc=$?
-    rm -f "$tmp"
+    rm -rf "$tmpdir"
     return "$rc"
 }
 
