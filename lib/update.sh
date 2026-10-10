@@ -346,7 +346,8 @@ xmg_update_run() {
         xmg_update_verify
     fi
 
-    xmg_info "更新完成"
+    hash -r 2>/dev/null || true
+    xmg_info "更新完成！"
     xmg_info "路径摘要:"
     xmg_info "  XMG_HOME:       $XMG_HOME"
     xmg_info "  命令入口:       $XMG_LINK"
@@ -355,6 +356,13 @@ xmg_update_run() {
     xmg_info "  配置目录:       $XMG_ETC_DIR"
     xmg_info "  日志目录:       $XMG_LOG_DIR"
     xmg_info "  Xray配置:       $XMG_XRAY_CONFIG"
+
+    if [ -t 0 ] && [ -t 1 ]; then
+        echo
+        if xmg_confirm "是否立即原地重新载入最新版 XMG 菜单 (免断开重连)?"; then
+            exec "$XMG_BIN" menu
+        fi
+    fi
 
     return 0
 }

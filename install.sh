@@ -386,8 +386,9 @@ verify_install() {
 }
 
 print_summary() {
+    hash -r 2>/dev/null || true
     echo
-    green "安装完成"
+    green "安装/更新完成"
     echo "命令入口: $XMG_LINK"
     echo "真实主程序: $XMG_BIN"
     echo "模块目录: $XMG_LIB_DIR"
@@ -397,7 +398,7 @@ print_summary() {
     echo "备份目录: $XMG_BACKUP_DIR"
     echo "Xray 配置目录: $XMG_XRAY_DIR"
     echo
-    echo "执行命令:"
+    echo "执行命令 (当前终端已刷新，无需断开重连):"
     echo "  xmg"
     echo
     echo "源码目录测试:"

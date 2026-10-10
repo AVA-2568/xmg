@@ -453,48 +453,61 @@ xmg_proxy_acme_issue() {
         return 2
     fi
 
+    local acme_success=0
     if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -n "${XMG_ACME_TESTCMD:-}" ]; then
-        # 测试桩：仅在测试模式生效，生产环境即使存在同名变量也不会 eval 任意命令
-        if ! eval "$XMG_ACME_TESTCMD" >/dev/null 2>&1; then
+        # 测试桩：仅在测试模式生效，生产环境即使存在同名变量也不会执行任意命令
+        local -a acme_test=($XMG_ACME_TESTCMD)
+        if ! "${acme_test[@]}" >/dev/null 2>&1; then
             xmg_error "证书签发失败"
             return 4
         fi
         mkdir -p "$(dirname "$XMG_ACME_CERT_FILE")" 2>/dev/null || true
         printf 'stub\n' > "$XMG_ACME_CERT_FILE" 2>/dev/null || true
         printf 'stub\n' > "$XMG_ACME_KEY_FILE" 2>/dev/null || true
+        acme_success=1
     else
-        xmg_proxy_acme_install || return 4
+        xmg_proxy_acme_install || true
 
-        "$XMG_ACME_DIR/acme.sh" --issue --server letsencrypt \
-            -d "$domain" --keylength ec-256 || {
-            xmg_error "证书签发失败"
-            return 4
-        }
-        mkdir -p "$(dirname "$XMG_ACME_CERT_FILE")" || {
-            xmg_error "无法创建证书目录: $(dirname "$XMG_ACME_CERT_FILE")"
-            return 4
-        }
-        "$XMG_ACME_DIR/acme.sh" --install-cert -d "$domain" \
-            --fullchain-file "$XMG_ACME_CERT_FILE" \
-            --key-file "$XMG_ACME_KEY_FILE" || {
-            xmg_error "证书安装失败"
-            return 4
-        }
+        if [ -x "$XMG_ACME_DIR/acme.sh" ]; then
+            "$XMG_ACME_DIR/acme.sh" --issue --server letsencrypt \
+                -d "$domain" --keylength ec-256 >/dev/null 2>&1 || true
+            mkdir -p "$(dirname "$XMG_ACME_CERT_FILE")" 2>/dev/null || true
+            "$XMG_ACME_DIR/acme.sh" --install-cert -d "$domain" \
+                --fullchain-file "$XMG_ACME_CERT_FILE" \
+                --key-file "$XMG_ACME_KEY_FILE" >/dev/null 2>&1 || true
+        fi
+
+        if [ -s "$XMG_ACME_CERT_FILE" ] && [ -s "$XMG_ACME_KEY_FILE" ]; then
+            acme_success=1
+        fi
     fi
 
-    # 物理文件存在性与非空严格检查：避免异常未产出却误写 state
-    if [ ! -s "$XMG_ACME_CERT_FILE" ] || [ ! -s "$XMG_ACME_KEY_FILE" ]; then
-        xmg_error "证书文件未生成或为空: $XMG_ACME_CERT_FILE"
+    # 签发成功路径
+    if [ "$acme_success" -eq 1 ]; then
+        xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || return 4
+        xmg_state_stage PROXY_VLESS_CERT_FILE "$XMG_ACME_CERT_FILE" || return 4
+        xmg_state_stage PROXY_VLESS_KEY_FILE "$XMG_ACME_KEY_FILE" || return 4
+        xmg_state_commit_draft || return 4
+        xmg_info "ACME 正规证书已就绪: $XMG_ACME_CERT_FILE（执行 apply 后生效）"
+        return 0
+    fi
+
+    # 测试模式失败断言保持
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        xmg_error "证书签发失败"
         return 4
     fi
 
-    # 到这里签发已成功，才写入 state（失败路径已在上面 return）
-    xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || return 4
-    xmg_state_stage PROXY_VLESS_CERT_FILE "$XMG_ACME_CERT_FILE" || return 4
-    xmg_state_stage PROXY_VLESS_KEY_FILE "$XMG_ACME_KEY_FILE" || return 4
-    xmg_state_commit_draft || return 4
-    xmg_info "证书已就绪: $XMG_ACME_CERT_FILE（执行 apply 后生效）"
-    return 0
+    # 生产环境真实失败（NAT机无80端口或域名为内网名称）：自动回退生成自签名证书
+    echo
+    xmg_warn "ACME 证书签发未通过（NAT机无80端口或域名无法解析），自动回退为生成自签名证书..."
+    if xmg_proxy_self_sign_cert "$domain" "$XMG_ACME_CERT_FILE" "$XMG_ACME_KEY_FILE"; then
+        xmg_info "已自动回退生成自签名证书并写入配置！"
+        return 0
+    else
+        xmg_error "回退生成自签名证书失败"
+        return 4
+    fi
 }
 
 # ===== 一键生成自签名证书（配合 Cloudflare Full 模式穿透 NAT）=====
