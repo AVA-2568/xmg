@@ -26,7 +26,6 @@ XMG_CACHE_TTL="${XMG_CACHE_TTL:-3}"
 XMG_SERVICE_TTL="${XMG_SERVICE_TTL:-5}"
 
 XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
-XMG_CADDY_SERVICE="${XMG_CADDY_SERVICE:-caddy}"
 
 XMG_CACHE_TS=0
 XMG_SERVICE_CACHE_TS=0
@@ -40,7 +39,6 @@ XMG_STATUS_MEM_PERCENT="unknown"
 XMG_STATUS_MEM_DETAIL="unknown"
 XMG_STATUS_DISK_ROOT="unknown"
 XMG_STATUS_XRAY="unknown"
-XMG_STATUS_CADDY="unknown"
 XMG_STATUS_PORT_22="unknown"
 XMG_STATUS_PORT_80="unknown"
 XMG_STATUS_PORT_443="unknown"
@@ -195,21 +193,6 @@ xmg_read_mem() {
         "$((total_kb / 1024))"
 }
 
-# 兼容旧调用。
-xmg_read_mem_percent() {
-    local r=""
-
-    r="$(xmg_read_mem)"
-    printf '%s' "${r%%|*}"
-}
-
-xmg_read_mem_detail() {
-    local r=""
-
-    r="$(xmg_read_mem)"
-    printf '%s' "${r##*|}"
-}
-
 xmg_read_disk_root() {
     local fs=""
     local size=""
@@ -346,7 +329,6 @@ xmg_system_refresh_services() {
     XMG_SERVICE_CACHE_TS="$now"
 
     XMG_STATUS_XRAY="$(xmg_service_active_read "$XMG_XRAY_SERVICE")"
-    XMG_STATUS_CADDY="$(xmg_service_active_read "$XMG_CADDY_SERVICE")"
 }
 
 xmg_system_refresh_all() {
@@ -398,7 +380,6 @@ Services:
 EOF
 
     xmg_system_print_status_line "Xray" "$XMG_STATUS_XRAY"
-    xmg_system_print_status_line "Caddy" "$XMG_STATUS_CADDY"
 
     cat <<EOF
 

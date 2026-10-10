@@ -103,7 +103,6 @@ XMG $XMG_VERSION
   XMG_MONITOR_INTERVAL UI 刷新间隔，默认 3
   XMG_COLOR            auto/always/never，默认 auto
   XMG_XRAY_SERVICE     Xray 服务名，默认 xray
-  XMG_CADDY_SERVICE    Caddy 服务名，默认 caddy
 EOF
 }
 

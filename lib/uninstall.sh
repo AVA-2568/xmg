@@ -139,7 +139,6 @@ xmg_uninstall_run() {
     echo "  - 模块: $XMG_LIB_DIR"
     echo "  - 配置: $XMG_ETC_DIR"
     echo "  - 日志: $XMG_LOG_DIR"
-    echo "  - 站点: $XMG_WWW_DIR"
     echo "  - 运行时: $XMG_RUN_DIR"
     echo "  - 备份: $XMG_BACKUP_DIR"
     echo "  - Xray 配置: $XMG_XRAY_DIR"
@@ -162,7 +161,7 @@ xmg_uninstall_run() {
     if [ "$XMG_UNINSTALL_KEEP_BACKUPS" = "1" ]; then
         xmg_info "保留备份目录: $XMG_BACKUP_DIR"
         # 先删除除备份外的所有子目录
-        for dir in "$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_WWW_DIR" "$XMG_XRAY_DIR"; do
+        for dir in "$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_XRAY_DIR"; do
             if [ -d "$dir" ]; then
                 rm -rf "$dir" && xmg_info "已删除: $dir" || xmg_warn "删除失败: $dir"
             fi

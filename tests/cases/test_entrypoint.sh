@@ -72,6 +72,27 @@ t_not_contains "静态扫描不应包含 caddy 菜单" "$_MENU_FUNCS" "xmg_caddy
 t_not_contains "静态扫描不应包含 site 菜单" "$_MENU_FUNCS" "xmg_site_menu"
 t_not_contains "静态扫描不应包含 third_party 菜单" "$_MENU_FUNCS" "xmg_third_party_menu"
 
+# --- Caddy 彻底剥离与零残留断言 ---
+t_not_contains "common.sh 不再引用 XMG_CADDY_DIR" "$(cat "$SRC/lib/common.sh")" "XMG_CADDY_DIR"
+t_not_contains "common.sh 不再引用 XMG_CADDYFILE" "$(cat "$SRC/lib/common.sh")" "XMG_CADDYFILE"
+t_not_contains "update.sh 不再引用 XMG_CADDY_DIR" "$(cat "$SRC/lib/update.sh")" "XMG_CADDY_DIR"
+t_not_contains "update.sh 不再引用 XMG_CADDYFILE" "$(cat "$SRC/lib/update.sh")" "XMG_CADDYFILE"
+t_not_contains "system.sh 不再包含 XMG_STATUS_CADDY" "$(cat "$SRC/lib/system.sh")" "XMG_STATUS_CADDY"
+t_not_contains "system.sh 不再包含 XMG_CADDY_SERVICE" "$(cat "$SRC/lib/system.sh")" "XMG_CADDY_SERVICE"
+t_not_contains "monitor.sh 不再打印 Caddy 状态" "$(cat "$SRC/lib/monitor.sh")" "Caddy"
+t_not_contains "xmg 入口帮助不含 XMG_CADDY_SERVICE" "$(cat "$SRC/xmg")" "XMG_CADDY_SERVICE"
+
+# --- 废弃站点与死代码彻底剥离断言 ---
+t_not_contains "common.sh 不再引用 XMG_WWW_DIR" "$(cat "$SRC/lib/common.sh")" "XMG_WWW_DIR"
+t_not_contains "update.sh 不再引用 XMG_WWW_DIR" "$(cat "$SRC/lib/update.sh")" "XMG_WWW_DIR"
+t_not_contains "install.sh 不再引用 XMG_WWW_DIR" "$(cat "$SRC/install.sh")" "XMG_WWW_DIR"
+t_not_contains "uninstall.sh 不再引用 XMG_WWW_DIR" "$(cat "$SRC/lib/uninstall.sh")" "XMG_WWW_DIR"
+t_not_contains "common.sh 不再包含 xmg_color 兼容死代码" "$(cat "$SRC/lib/common.sh")" "xmg_color()"
+t_not_contains "common.sh 不再包含 xmg_backup_file 死代码" "$(cat "$SRC/lib/common.sh")" "xmg_backup_file()"
+t_not_contains "system.sh 不再包含 xmg_read_mem_percent 兼容死代码" "$(cat "$SRC/lib/system.sh")" "xmg_read_mem_percent()"
+t_not_contains "menu.sh 不再包含 xmg_menu_load_modules 兼容死代码" "$(cat "$SRC/lib/menu.sh")" "xmg_menu_load_modules()"
+t_not_contains "render.sh 不再包含 xmg_render_dns 兼容死代码" "$(cat "$SRC/lib/render.sh")" "xmg_render_dns()"
+
 # --- 环境恢复 ---
 XMG_HOME="$_TE_SAVED_HOME"
 XMG_LIB_DIR="$_TE_SAVED_LIB_DIR"

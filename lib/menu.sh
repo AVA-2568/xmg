@@ -257,17 +257,6 @@ xmg_menu_load_module_func() {
     xmg_menu_require_func "$fn"
 }
 
-# 兼容旧调用：预加载全部已发现模块
-xmg_menu_load_modules() {
-    local i=0
-
-    xmg_menu_discover_modules
-
-    for i in "${!XMG_MENU_FILES[@]}"; do
-        xmg_menu_load_module_func "${XMG_MENU_FILES[$i]}" "${XMG_MENU_FUNCS[$i]}"
-    done
-}
-
 xmg_menu_open_module_by_index() {
     local idx="$1"
     local file=""
@@ -287,15 +276,6 @@ xmg_menu_open_module_by_index() {
 
     file="${XMG_MENU_FILES[$idx]}"
     fn="${XMG_MENU_FUNCS[$idx]}"
-
-    xmg_menu_load_module_func "$file" "$fn"
-    "$fn"
-}
-
-# 兼容旧接口：按文件和函数打开模块
-xmg_menu_open_module() {
-    local file="$1"
-    local fn="$2"
 
     xmg_menu_load_module_func "$file" "$fn"
     "$fn"

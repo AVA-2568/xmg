@@ -35,18 +35,15 @@ XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
 XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
 XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
 XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
-XMG_WWW_DIR="${XMG_WWW_DIR:-$XMG_HOME/www}"
 # 由 XMG 托管的外部组件配置
-XMG_CADDY_DIR="${XMG_CADDY_DIR:-$XMG_HOME/caddy}"
 XMG_XRAY_DIR="${XMG_XRAY_DIR:-$XMG_HOME/xray}"
 # 关键配置文件
-XMG_CADDYFILE="${XMG_CADDYFILE:-$XMG_CADDY_DIR/Caddyfile}"
 XMG_XRAY_CONFIG="${XMG_XRAY_CONFIG:-$XMG_XRAY_DIR/config.json}"
 export XMG_HOME
 export XMG_BIN_DIR XMG_LIB_DIR
-export XMG_ETC_DIR XMG_RUN_DIR XMG_LOG_DIR XMG_BACKUP_DIR XMG_WWW_DIR
-export XMG_CADDY_DIR XMG_XRAY_DIR
-export XMG_CADDYFILE XMG_XRAY_CONFIG
+export XMG_ETC_DIR XMG_RUN_DIR XMG_LOG_DIR XMG_BACKUP_DIR
+export XMG_XRAY_DIR
+export XMG_XRAY_CONFIG
 
 # 颜色策略：
 #   auto   - 仅在 TTY 中启用颜色
@@ -103,21 +100,6 @@ xmg_color_init() {
     fi
 }
 
-# 保留兼容函数，供少量一次性脚本使用
-xmg_color() {
-    local code="$1"
-
-    if xmg_color_enabled; then
-        printf '\033[%sm' "$code"
-    fi
-}
-
-xmg_reset() {
-    if xmg_color_enabled; then
-        printf '\033[0m'
-    fi
-}
-
 # ===== 控制台提示接口 =====
 # 这是公共 API，其他模块依赖这些函数名，尽量保持稳定。
 
@@ -142,13 +124,6 @@ xmg_cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-xmg_require_bash() {
-    if [ -z "${BASH_VERSION:-}" ]; then
-        echo "错误: 需要 bash 运行" >&2
-        exit 1
-    fi
-}
-
 xmg_is_root() {
     [ "${EUID:-$(id -u)}" -eq 0 ]
 }
@@ -163,7 +138,6 @@ xmg_mkdirs() {
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
-        "$XMG_WWW_DIR" \
         "$XMG_XRAY_DIR" \
         "$XMG_ETC_DIR/xray"
 }
@@ -194,24 +168,6 @@ xmg_confirm() {
 
 xmg_timestamp() {
     date '+%Y%m%d-%H%M%S'
-}
-
-xmg_backup_file() {
-    local file="$1"
-    local base=""
-    local dst=""
-    local ts=""
-
-    [ -e "$file" ] || [ -L "$file" ] || return 0
-
-    xmg_mkdirs
-
-    base="$(basename "$file")"
-    ts="$(xmg_timestamp)"
-    dst="$XMG_BACKUP_DIR/${base}.${ts}.bak"
-
-    cp -a -- "$file" "$dst" || return 1
-    xmg_info "已备份 $file -> $dst"
 }
 
 xmg_systemctl() {

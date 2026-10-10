@@ -70,7 +70,6 @@ xmg_monitor_draw() {
 
     printf '%s服务%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"
     xmg_monitor_print_status_line "Xray" "$XMG_STATUS_XRAY"
-    xmg_monitor_print_status_line "Caddy" "$XMG_STATUS_CADDY"
     printf '\n'
 
     printf '%s监听端口%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"

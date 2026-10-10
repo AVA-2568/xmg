@@ -200,6 +200,15 @@ xmg_update_pull_impl() {
             install -m 0644 -o root -g root "$file" "$XMG_LIB_DIR/" || xmg_warn "安装模块失败: $file"
         done
 
+        # 同步配置模板（xray 配置渲染依赖）
+        if [ -d "$tmp_dir/templates" ]; then
+            mkdir -p "$XMG_ETC_DIR/xray"
+            for file in "$tmp_dir/templates"/*.json; do
+                [ -f "$file" ] || continue
+                install -m 0644 -o root -g root "$file" "$XMG_ETC_DIR/xray/" || xmg_warn "安装模板失败: $file"
+            done
+        fi
+
         # 同步模块清单（menu 模块发现依赖 $XMG_HOME/xmg.files）
         if [ -f "$tmp_dir/xmg.files" ]; then
             install -m 0644 -o root -g root "$tmp_dir/xmg.files" "$XMG_HOME/xmg.files" \
@@ -248,7 +257,28 @@ xmg_update_verify() {
     fi
 
     # 检查核心模块
-    local core_modules=("common.sh" "system.sh" "menu.sh" "monitor.sh")
+    local core_modules=()
+    local manifest="${XMG_HOME}/xmg.files"
+    local line=""
+    if [ -r "$manifest" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*) continue ;;
+                lib/*.sh) core_modules+=("${line#lib/}") ;;
+            esac
+        done < "$manifest"
+    fi
+
+    # 清单不存在时的兜底核心模块列表
+    if [ "${#core_modules[@]}" -eq 0 ]; then
+        core_modules=(
+            "common.sh" "detect.sh" "system.sh" "monitor.sh" "menu.sh"
+            "state.sh" "render.sh" "proxy.sh" "core.sh" "xray.sh"
+            "firewall.sh" "tune.sh" "doctor.sh" "ssh.sh" "maint.sh"
+            "update.sh" "uninstall.sh"
+        )
+    fi
+
     local module=""
     for module in "${core_modules[@]}"; do
         if [ ! -f "$XMG_LIB_DIR/$module" ]; then
@@ -260,7 +290,7 @@ xmg_update_verify() {
     done
 
     # 检查统一目录结构
-    local required_dirs=("$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_BACKUP_DIR" "$XMG_WWW_DIR" "$XMG_CADDY_DIR" "$XMG_XRAY_DIR")
+    local required_dirs=("$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_ETC_DIR/xray" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_BACKUP_DIR" "$XMG_XRAY_DIR")
     local dir=""
     for dir in "${required_dirs[@]}"; do
         if [ ! -d "$dir" ]; then
@@ -324,8 +354,6 @@ xmg_update_run() {
     xmg_info "  模块目录:       $XMG_LIB_DIR"
     xmg_info "  配置目录:       $XMG_ETC_DIR"
     xmg_info "  日志目录:       $XMG_LOG_DIR"
-    xmg_info "  站点目录:       $XMG_WWW_DIR"
-    xmg_info "  Caddy配置:      $XMG_CADDYFILE"
     xmg_info "  Xray配置:       $XMG_XRAY_CONFIG"
 
     return 0

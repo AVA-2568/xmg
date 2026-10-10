@@ -49,7 +49,6 @@ XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
 XMG_RUN_DIR="${XMG_RUN_DIR:-$XMG_HOME/run}"
 XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
 XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
-XMG_WWW_DIR="${XMG_WWW_DIR:-$XMG_HOME/www}"
 XMG_XRAY_DIR="${XMG_XRAY_DIR:-$XMG_HOME/xray}"
 
 XMG_BIN="${XMG_BIN:-$XMG_BIN_DIR/xmg}"
@@ -117,7 +116,6 @@ install_dirs() {
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
-        "$XMG_WWW_DIR" \
         "$XMG_XRAY_DIR" \
         "$(dirname "$XMG_LINK")"
 
@@ -131,7 +129,6 @@ install_dirs() {
         "$XMG_RUN_DIR" \
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
-        "$XMG_WWW_DIR" \
         "$XMG_XRAY_DIR"
 }
 
@@ -398,7 +395,6 @@ print_summary() {
     echo "运行目录: $XMG_RUN_DIR"
     echo "日志目录: $XMG_LOG_DIR"
     echo "备份目录: $XMG_BACKUP_DIR"
-    echo "站点目录: $XMG_WWW_DIR"
     echo "Xray 配置目录: $XMG_XRAY_DIR"
     echo
     echo "执行命令:"

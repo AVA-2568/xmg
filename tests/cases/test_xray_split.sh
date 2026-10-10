@@ -26,9 +26,7 @@ export XMG_XRAY_STATE_DIR="$XMG_ETC_DIR/xray"
 export XMG_STATE_FILE="$XMG_XRAY_STATE_DIR/state.env"
 export XMG_BACKUP_DIR="$XMG_TMP/home/backups"
 export XMG_BIN_DIR="$XMG_TMP/home/bin"
-export XMG_CADDY_DIR="$XMG_TMP/home/caddy"
 export XMG_XRAY_DIR="$XMG_TMP/home/xray"
-export XMG_WWW_DIR="$XMG_TMP/home/www"
 export XMG_XRAY_CONFIG="$XMG_XRAY_DIR/config.json"
 
 # 注意实际相对层级：本文件在 tests/cases/，lib 在 xmg/lib，故是 ../lib
