@@ -163,11 +163,29 @@ xmg_warp_install_tools() {
 
     if xmg_cmd_exists apt-get; then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get update -y >/dev/null 2>&1 || xmg_warn "apt-get update 存在警告"
-        apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" wireguard-tools iproute2 resolvconf curl || {
-            xmg_error "wireguard-tools 安装失败"
-            return 1
-        }
+        if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
+            xmg_apt_wait_lock 60 || true
+        fi
+
+        # 优化策略: 优先尝试直接安装 (命中本地缓存，免跑耗时甚至超时的 update)
+        if ! apt-get -o DPkg::Lock::Timeout=60 \
+                     -o Dpkg::Options::="--force-confdef" \
+                     -o Dpkg::Options::="--force-confold" \
+                     install -y wireguard-tools iproute2 curl >/dev/null 2>&1; then
+            xmg_info "本地包缓存未包含 wireguard-tools，更新软件源后重试..."
+            apt-get -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || xmg_warn "apt-get update 存在警告"
+            apt-get -o DPkg::Lock::Timeout=60 \
+                    -o Dpkg::Options::="--force-confdef" \
+                    -o Dpkg::Options::="--force-confold" \
+                    install -y wireguard-tools iproute2 curl || {
+                xmg_error "wireguard-tools 安装失败 (dpkg 锁占用或网络不可达)"
+                return 1
+            }
+        fi
+        apt-get -o DPkg::Lock::Timeout=30 \
+                -o Dpkg::Options::="--force-confdef" \
+                -o Dpkg::Options::="--force-confold" \
+                install -y resolvconf >/dev/null 2>&1 || true
     elif xmg_cmd_exists dnf; then
         dnf install -y epel-release 2>/dev/null || true
         dnf install -y wireguard-tools iproute curl || {

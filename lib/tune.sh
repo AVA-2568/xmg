@@ -857,7 +857,7 @@ xmg_tune_dns_enable_resolved() {
         if xmg_cmd_exists apt-get; then
             if xmg_confirm "是否安装 systemd-resolved?"; then
                 export DEBIAN_FRONTEND=noninteractive
-                if ! apt-get install -y systemd-resolved; then
+                if ! apt-get -o DPkg::Lock::Timeout=60 -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y systemd-resolved; then
                     xmg_error "安装失败，可先执行 apt-get update 后重试"
                     xmg_info "或改用「一键 DNS 优化 (UDP)」，无需 resolved"
                     return 1

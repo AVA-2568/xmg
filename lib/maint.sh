@@ -86,11 +86,12 @@ xmg_maint_update() {
     if xmg_cmd_exists apt-get; then
         export DEBIAN_FRONTEND=noninteractive
 
+        if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then xmg_apt_wait_lock 60 || true; fi
         xmg_info "apt-get update..."
-        apt-get update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
+        apt-get -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
 
         xmg_info "apt-get upgrade..."
-        apt-get upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || xmg_error "apt-get upgrade 失败"
+        apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || xmg_error "apt-get upgrade 失败"
 
         xmg_info "apt-get autoremove..."
         apt-get autoremove --purge -y >/dev/null 2>&1 || true
@@ -221,7 +222,7 @@ xmg_maint_vnstat() {
         xmg_info "尝试安装 vnstat 流量统计工具..."
         if xmg_cmd_exists apt-get; then
             export DEBIAN_FRONTEND=noninteractive
-            apt-get install -y vnstat || { xmg_error "vnstat 安装失败，可先执行 apt-get update 后重试"; return 1; }
+            apt-get -o DPkg::Lock::Timeout=60 install -y vnstat || { xmg_error "vnstat 安装失败，可先执行 apt-get update 后重试"; return 1; }
         elif xmg_cmd_exists dnf; then
             dnf install -y epel-release 2>/dev/null || true
             dnf install -y vnstat || { xmg_error "vnstat 安装失败"; return 1; }
