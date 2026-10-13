@@ -177,69 +177,134 @@ xmg_timestamp() {
     date '+%Y%m%d-%H%M%S'
 }
 
-# ===== 包管理器与 apt 锁等待机制 =====
+# ===== 包管理器与 apt 锁等待与自动修复机制 =====
 
-# 等待 dpkg / apt 锁释放，避免后台 unattended-upgrades 或并发 apt 导致安装失败
-xmg_apt_wait_lock() {
-    local timeout="${1:-60}"
-    local waited=0
-    local lock_files=(
-        "/var/lib/dpkg/lock-frontend"
-        "/var/lib/dpkg/lock"
-        "/var/lib/apt/lists/lock"
-    )
+# 获取持有 dpkg / apt 锁的进程 PID 列表
+xmg_apt_find_lock_pids() {
+    local pids=""
 
-    while [ "$waited" -lt "$timeout" ]; do
-        local locked=0
-        local lock_f=""
-        local pid=""
-        for lock_f in "${lock_files[@]}"; do
-            if [ -e "$lock_f" ]; then
-                if command -v fuser >/dev/null 2>&1; then
-                    pid="$(fuser "$lock_f" 2>/dev/null | awk '{print $1}')"
-                    if [ -n "$pid" ]; then
-                        locked=1
-                        break
-                    fi
-                elif command -v lsof >/dev/null 2>&1; then
-                    pid="$(lsof -t "$lock_f" 2>/dev/null | head -1)"
-                    if [ -n "$pid" ]; then
-                        locked=1
-                        break
-                    fi
-                fi
+    # 方法 1: fuser
+    if command -v fuser >/dev/null 2>&1; then
+        pids="$(fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null || true)"
+        if [ -n "$pids" ]; then
+            echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+            return 0
+        fi
+    fi
+
+    # 方法 2: lsof
+    if command -v lsof >/dev/null 2>&1; then
+        pids="$(lsof -t /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null || true)"
+        if [ -n "$pids" ]; then
+            echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+            return 0
+        fi
+    fi
+
+    # 方法 3: 检查 /proc/[0-9]*/fd
+    if [ -d /proc ]; then
+        local pid_dir=""
+        for pid_dir in /proc/[0-9]*; do
+            [ -d "$pid_dir/fd" ] || continue
+            local cur_pid="${pid_dir##*/}"
+            [ "$cur_pid" = "$$" ] && continue
+
+            local comm=""
+            if [ -r "$pid_dir/comm" ]; then
+                comm="$(cat "$pid_dir/comm" 2>/dev/null || true)"
+            fi
+            case "$comm" in
+                apt*|dpkg*|unattended-upgr*)
+                    pids="$pids $cur_pid"
+                    ;;
+            esac
+        done
+    fi
+
+    # 方法 4: pgrep 兜底
+    if [ -z "$pids" ] && command -v pgrep >/dev/null 2>&1; then
+        local p=""
+        for p in $(pgrep -f "apt-get|apt|dpkg|unattended-upgrades" 2>/dev/null || true); do
+            [ "$p" != "$$" ] && pids="$pids $p"
+        done
+    fi
+
+    echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+}
+
+# 安全解除僵死 apt 锁并自动修复 dpkg 数据库状态
+xmg_apt_unlock_and_repair() {
+    xmg_require_root
+
+    xmg_info "正在排查并解除 apt / dpkg 锁占用..."
+    local pids=""
+    pids="$(xmg_apt_find_lock_pids)"
+
+    if [ -n "$pids" ]; then
+        xmg_warn "检测到占用包管理器锁的残留进程 PID: $pids"
+        local p=""
+        for p in $pids; do
+            [ "$p" = "$$" ] && continue
+            local cmd=""
+            if [ -r "/proc/$p/cmdline" ]; then
+                cmd="$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null || true)"
+            fi
+            xmg_warn "正在终止残留进程: PID $p (${cmd:-未知})"
+            kill -15 "$p" 2>/dev/null || true
+        done
+        sleep 2
+        for p in $pids; do
+            [ "$p" = "$$" ] && continue
+            if kill -0 "$p" 2>/dev/null; then
+                xmg_warn "强制终止顽固进程: PID $p"
+                kill -9 "$p" 2>/dev/null || true
             fi
         done
+    fi
 
-        if [ "$locked" -eq 0 ] && command -v pgrep >/dev/null 2>&1; then
-            pid="$(pgrep -x apt-get || pgrep -x dpkg || pgrep -x apt || true)"
-            if [ -n "$pid" ]; then
-                if [ "$pid" != "$" ]; then
-                    locked=1
-                fi
-            fi
-        fi
+    # 清理孤儿锁文件
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
 
-        if [ "$locked" -eq 0 ]; then
+    # 关键自愈：修复被中断的 dpkg 数据库状态与依赖
+    xmg_info "正在修复 dpkg 数据库状态 (dpkg --configure -a)..."
+    export DEBIAN_FRONTEND=noninteractive
+    dpkg --configure -a >/dev/null 2>&1 || true
+
+    xmg_info "正在修复可能损坏的包依赖 (apt-get install -f)..."
+    apt-get -o DPkg::Lock::Timeout=30 -f install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" >/dev/null 2>&1 || true
+
+    xmg_info "dpkg 锁已解除，软件包数据库修复完成！"
+    return 0
+}
+
+# 等待 dpkg / apt 锁释放，超时自动解除死锁并自愈
+xmg_apt_wait_lock() {
+    local timeout="${1:-15}"
+    local waited=0
+    local pids=""
+
+    while [ "$waited" -lt "$timeout" ]; do
+        pids="$(xmg_apt_find_lock_pids)"
+        if [ -z "$pids" ]; then
             return 0
         fi
 
         if [ "$waited" -eq 0 ]; then
-            xmg_info "检测到系统后台正在运行包管理器 (PID: ${pid:-运行中})，等待锁释放中 (最多等待 ${timeout}s)..."
+            xmg_info "检测到系统后台正在运行包管理器 (PID: $pids)，等待释放中 (最多等待 ${timeout}s)..."
         fi
 
         sleep 2
         waited=$((waited + 2))
     done
 
-    xmg_warn "等待 apt/dpkg 锁超时 (${timeout}s)，将通过锁超时参数排队继续..."
-    return 1
+    xmg_warn "包管理器锁等待超时 (${timeout}s)，可能存在挂起/死锁进程，自动介入解除死锁并修复..."
+    xmg_apt_unlock_and_repair
 }
 
 # 包装安全的 apt-get 安装，自动带锁等待、配置合并保护和锁超时
 xmg_apt_install() {
     xmg_require_root
-    xmg_apt_wait_lock 60 || true
+    xmg_apt_wait_lock 15 || true
 
     export DEBIAN_FRONTEND=noninteractive
     apt-get -o DPkg::Lock::Timeout=60 \

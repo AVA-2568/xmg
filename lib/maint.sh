@@ -86,12 +86,23 @@ xmg_maint_update() {
     if xmg_cmd_exists apt-get; then
         export DEBIAN_FRONTEND=noninteractive
 
-        if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then xmg_apt_wait_lock 60 || true; fi
+        if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
+            xmg_apt_wait_lock 15 || true
+        fi
         xmg_info "apt-get update..."
         apt-get -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
 
+        if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
+            xmg_apt_wait_lock 15 || true
+        fi
         xmg_info "apt-get upgrade..."
-        apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || xmg_error "apt-get upgrade 失败"
+        apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
+            xmg_warn "upgrade 初次受阻，尝试自动解除死锁后重试一次..."
+            if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
+                xmg_apt_unlock_and_repair || true
+            fi
+            apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || xmg_error "apt-get upgrade 失败"
+        }
 
         xmg_info "apt-get autoremove..."
         apt-get autoremove --purge -y >/dev/null 2>&1 || true
@@ -366,6 +377,7 @@ xmg_maint_menu() {
         echo "4. 磁盘占用概览"
         echo "5. 进程与资源异常排查 (TOP 5 负载 / 僵尸进程)"
         echo "6. 一键释放内存缓存 (drop_caches)"
+        echo "7. 一键解除 apt/dpkg 锁并修复状态 (处理 lock-frontend 死锁卡死)"
         echo "0. 返回"
         echo
         echo "说明:"
@@ -405,6 +417,15 @@ xmg_maint_menu() {
             6)
                 clear
                 xmg_maint_drop_caches
+                xmg_pause
+                ;;
+            7)
+                clear
+                if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
+                    xmg_apt_unlock_and_repair
+                else
+                    xmg_warn "当前函数不可用"
+                fi
                 xmg_pause
                 ;;
             0)

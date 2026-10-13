@@ -172,13 +172,16 @@ xmg_warp_install_tools() {
                      -o Dpkg::Options::="--force-confdef" \
                      -o Dpkg::Options::="--force-confold" \
                      install -y wireguard-tools iproute2 curl >/dev/null 2>&1; then
-            xmg_info "本地包缓存未包含 wireguard-tools，更新软件源后重试..."
+            xmg_warn "wireguard-tools 初次安装受阻 (可能存在死锁或缓存缺失)，正在尝试自动解除锁并更新重试..."
+            if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
+                xmg_apt_unlock_and_repair || true
+            fi
             apt-get -o DPkg::Lock::Timeout=60 update -y >/dev/null 2>&1 || xmg_warn "apt-get update 存在警告"
             apt-get -o DPkg::Lock::Timeout=60 \
                     -o Dpkg::Options::="--force-confdef" \
                     -o Dpkg::Options::="--force-confold" \
                     install -y wireguard-tools iproute2 curl || {
-                xmg_error "wireguard-tools 安装失败 (dpkg 锁占用或网络不可达)"
+                xmg_error "wireguard-tools 安装失败"
                 return 1
             }
         fi
