@@ -256,10 +256,17 @@ _xmg_warp_register() {
         local cur_time=""
         cur_time="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
         local req_body="{\"key\":\"$pubkey\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$cur_time\",\"model\":\"Linux\",\"type\":\"Android\",\"locale\":\"zh_CN\"}"
-        resp="$(curl -sSL --max-time 15 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
+        # 优先 v0a2158，若失败回退 v0a884
+        resp="$(curl -sSL --connect-timeout 8 --max-time 15 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
             -H "Content-Type: application/json; charset=UTF-8" \
             -H "User-Agent: okhttp/3.12.1" \
             -d "$req_body" 2>/dev/null || true)"
+        if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
+            resp="$(curl -sSL --connect-timeout 8 --max-time 15 -X POST "https://api.cloudflareclient.com/v0a884/reg" \
+                -H "Content-Type: application/json; charset=UTF-8" \
+                -H "User-Agent: okhttp/3.12.1" \
+                -d "$req_body" 2>/dev/null || true)"
+        fi
     fi
 
     if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
@@ -332,6 +339,12 @@ _xmg_warp_generate_conf() {
 
     mkdir -p "$(dirname "$XMG_WARP_CONF")"
 
+    local dns_entry=""
+    # 仅当系统具备 resolvectl 或 resolvconf 时写入 DNS 行，避免 wg-quick 因无 resolvconf 报错崩溃
+    if [ "${XMG_TEST_MODE:-0}" = "1" ] || command -v resolvectl >/dev/null 2>&1 || command -v resolvconf >/dev/null 2>&1; then
+        dns_entry="DNS = 1.1.1.1, 2606:4700:4700::1111"
+    fi
+
     if xmg_warp_is_ipv6_only; then
         # 纯 IPv6 保护原则：仅 AllowedIPs = 0.0.0.0/0，对端走 IPv6，绝无 ::/0
         if [[ "$ep_v6" =~ :0$ ]]; then
@@ -341,7 +354,7 @@ _xmg_warp_generate_conf() {
 [Interface]
 PrivateKey = $privkey
 Address = $addr_v4/32
-DNS = 1.1.1.1, 8.8.8.8
+${dns_entry:+$dns_entry}
 MTU = 1280
 
 [Peer]

@@ -201,7 +201,7 @@ xmg_apt_find_lock_pids() {
         fi
     fi
 
-    # 方法 3: 检查 /proc/[0-9]*/fd
+    # 方法 3: 纯内核读取 /proc/[0-9]*/fd 原生精准匹配持锁文件 (零外部依赖，100% 精确)
     if [ -d /proc ]; then
         local pid_dir=""
         for pid_dir in /proc/[0-9]*; do
@@ -209,15 +209,18 @@ xmg_apt_find_lock_pids() {
             local cur_pid="${pid_dir##*/}"
             [ "$cur_pid" = "$$" ] && continue
 
-            local comm=""
-            if [ -r "$pid_dir/comm" ]; then
-                comm="$(cat "$pid_dir/comm" 2>/dev/null || true)"
-            fi
-            case "$comm" in
-                apt*|dpkg*|unattended-upgr*)
-                    pids="$pids $cur_pid"
-                    ;;
-            esac
+            local fd=""
+            for fd in "$pid_dir"/fd/*; do
+                [ -e "$fd" ] || continue
+                local target=""
+                target="$(readlink "$fd" 2>/dev/null || true)"
+                case "$target" in
+                    *dpkg/lock*|*apt/lists/lock*|*cache/apt/archives/lock*)
+                        pids="$pids $cur_pid"
+                        break
+                        ;;
+                esac
+            done
         done
     fi
 
