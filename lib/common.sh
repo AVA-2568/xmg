@@ -268,6 +268,23 @@ xmg_apt_unlock_and_repair() {
     # 清理孤儿锁文件
     rm -f /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null || true
 
+    # 防御云 VPS 镜像常见的 grub-pc 未指定安装设备导致的配置死锁
+    if command -v debconf-set-selections >/dev/null 2>&1; then
+        local root_dev="" root_disk=""
+        root_dev="$(df / 2>/dev/null | awk 'NR==2 {print $1}')"
+        if [ -n "$root_dev" ]; then
+            case "$root_dev" in
+                /dev/nvme*|/dev/mmcblk*) root_disk="${root_dev%p[0-9]*}" ;;
+                /dev/*)                 root_disk="${root_dev%[0-9]*}" ;;
+            esac
+        fi
+        if [ -n "$root_disk" ] && [ -b "$root_disk" ]; then
+            echo "grub-pc grub-pc/install_devices multiselect $root_disk" | debconf-set-selections 2>/dev/null || true
+        fi
+        echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections 2>/dev/null || true
+        echo "grub-pc grub-pc/mixed_legacy_and_grub2 boolean true" | debconf-set-selections 2>/dev/null || true
+    fi
+
     # 关键自愈：修复被中断的 dpkg 数据库状态与依赖
     xmg_info "正在修复 dpkg 数据库状态 (dpkg --configure -a)..."
     export DEBIAN_FRONTEND=noninteractive

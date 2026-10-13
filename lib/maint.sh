@@ -92,6 +92,23 @@ xmg_maint_update() {
         xmg_info "apt-get update..."
         apt-get -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
 
+        # 预设 grub debconf，避免云 VPS 镜像无终端下 grub-pc postinst 报错卡死
+        if command -v debconf-set-selections >/dev/null 2>&1; then
+            local root_dev="" root_disk=""
+            root_dev="$(df / 2>/dev/null | awk 'NR==2 {print $1}')"
+            if [ -n "$root_dev" ]; then
+                case "$root_dev" in
+                    /dev/nvme*|/dev/mmcblk*) root_disk="${root_dev%p[0-9]*}" ;;
+                    /dev/*)                 root_disk="${root_dev%[0-9]*}" ;;
+                esac
+            fi
+            if [ -n "$root_disk" ] && [ -b "$root_disk" ]; then
+                echo "grub-pc grub-pc/install_devices multiselect $root_disk" | debconf-set-selections 2>/dev/null || true
+            fi
+            echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections 2>/dev/null || true
+            echo "grub-pc grub-pc/mixed_legacy_and_grub2 boolean true" | debconf-set-selections 2>/dev/null || true
+        fi
+
         if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
             xmg_apt_wait_lock 15 || true
         fi
