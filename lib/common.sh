@@ -288,6 +288,8 @@ xmg_apt_unlock_and_repair() {
     # 关键自愈：修复被中断的 dpkg 数据库状态与依赖
     xmg_info "正在修复 dpkg 数据库状态 (dpkg --configure -a)..."
     export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export UCF_FORCE_CONFFOLD=1
     dpkg --configure -a >/dev/null 2>&1 || true
 
     xmg_info "正在修复可能损坏的包依赖 (apt-get install -f)..."

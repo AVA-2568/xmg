@@ -334,15 +334,46 @@ xmg_core_install_official() {
         xmg_info "使用物理临时目录解压以防 tmpfs OOM: $run_tmpdir"
     fi
 
+    local script_tmp=""
+    script_tmp="$(mktemp 2>/dev/null || echo "/tmp/xray-install.$.sh")"
+
+    local install_urls=(
+        "$XMG_XRAY_INSTALL_URL"
+        "https://ghfast.top/$XMG_XRAY_INSTALL_URL"
+        "https://mirror.ghproxy.com/$XMG_XRAY_INSTALL_URL"
+    )
+
+    local dl_ok=0
+    for u in "${install_urls[@]}"; do
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsSL --connect-timeout 8 --max-time 25 "$u" -o "$script_tmp" 2>/dev/null && [ -s "$script_tmp" ]; then
+                dl_ok=1
+                break
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -q -T 8 -O "$script_tmp" "$u" 2>/dev/null && [ -s "$script_tmp" ]; then
+                dl_ok=1
+                break
+            fi
+        fi
+    done
+
+    if [ "$dl_ok" -ne 1 ]; then
+        rm -f "$script_tmp" 2>/dev/null || true
+        xmg_error "下载 Xray 官方安装脚本失败 (纯 IPv6 主机直连 GitHub 受限，请检查 DNS64 或开启 WARP IPv4 出口)"
+        return 4
+    fi
+
     local ret=0
     # args 故意不加引号：需要按空格拆成多个参数交给官方脚本
     # shellcheck disable=SC2086
     if [ "$custom_tmp_created" -eq 1 ] && [ -d "$run_tmpdir" ]; then
-        TMPDIR="$run_tmpdir" bash <($downloader "$XMG_XRAY_INSTALL_URL") install $args "${extra[@]}" || ret=$?
+        TMPDIR="$run_tmpdir" bash "$script_tmp" install $args "${extra[@]}" || ret=$?
         rm -rf "$run_tmpdir" 2>/dev/null || true
     else
-        bash <($downloader "$XMG_XRAY_INSTALL_URL") install $args "${extra[@]}" || ret=$?
+        bash "$script_tmp" install $args "${extra[@]}" || ret=$?
     fi
+    rm -f "$script_tmp" 2>/dev/null || true
 
     return "$ret"
 }

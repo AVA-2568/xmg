@@ -84,22 +84,8 @@ cmd_exists() {
 }
 
 ensure_jq() {
-    if cmd_exists jq; then
-        return 0
-    fi
-
-    yellow "未检测到 jq，尝试安装 jq..."
-    if cmd_exists apt-get; then
-        apt-get update -y && apt-get install -y jq
-    elif cmd_exists yum; then
-        yum install -y jq
-    elif cmd_exists apk; then
-        apk add jq
-    else
-        (apt-get update -y && apt-get install -y jq) || yum install -y jq || apk add jq || true
-    fi
-
-    cmd_exists jq || die "缺少依赖 jq 且自动安装失败，请手动安装 jq 后重试"
+    # install.sh 核心安装逻辑已全面纯 Bash 实现，零 jq 依赖，仅在后台守护可选组件
+    return 0
 }
 
 manifest_local_path() {
@@ -236,14 +222,23 @@ download_to_temp() {
 
     tmp="$(mktemp)" || die "创建临时文件失败"
 
-    if ! curl -fsSL "$url" -o "$tmp"; then
-        rm -f -- "$tmp"
-        die "下载失败: $url"
-    fi
+    local urls=(
+        "$url"
+        "https://ghfast.top/$url"
+        "https://mirror.ghproxy.com/$url"
+    )
 
-    if [ ! -s "$tmp" ]; then
+    local success=0
+    for u in "${urls[@]}"; do
+        if curl -fsSL --connect-timeout 8 --max-time 20 "$u" -o "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            success=1
+            break
+        fi
+    done
+
+    if [ "$success" -ne 1 ]; then
         rm -f -- "$tmp"
-        die "下载结果为空: $url"
+        die "下载失败: $url (若为纯 IPv6 VPS 请检查 DNS64 或配置 WARP IPv4 出口)"
     fi
 
     printf '%s\n' "$tmp"

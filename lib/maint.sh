@@ -85,6 +85,8 @@ xmg_maint_update() {
 
     if xmg_cmd_exists apt-get; then
         export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=a
+        export UCF_FORCE_CONFFOLD=1
 
         if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
             xmg_apt_wait_lock 15 || true
