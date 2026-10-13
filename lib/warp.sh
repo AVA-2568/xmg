@@ -279,17 +279,29 @@ _xmg_warp_register() {
     local dev_id token addr_v4 addr_v6 peer_pub peer_ep_v6 peer_ep_v4
     dev_id="$(_xmg_warp_json_val "$resp" ".id")"
     token="$(_xmg_warp_json_val "$resp" ".token")"
-    addr_v4="$(_xmg_warp_json_val "$resp" ".config.interface.addresses.v4")"
-    addr_v6="$(_xmg_warp_json_val "$resp" ".config.interface.addresses.v6")"
-    peer_pub="$(_xmg_warp_json_val "$resp" ".config.peers[0].public_key")"
 
-    peer_ep_v6="$(echo "$resp" | grep -o '"v6":"\[[^\]]*\]:[0-9]*"' | head -1 | cut -d'"' -f4)"
-    peer_ep_v4="$(echo "$resp" | grep -o '"v4":"[0-9.]*:[0-9]*"' | head -1 | cut -d'"' -f4)"
+    # 精准从 interface.addresses 提取客户端内网分配 IP，严禁误取 peers.endpoint
+    addr_v4="$(echo "$resp" | grep -A 5 '"addresses"' | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    addr_v6="$(echo "$resp" | grep -A 5 '"addresses"' | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    peer_pub="$(echo "$resp" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
 
-    [ -n "$addr_v4" ] || addr_v4="172.16.0.2"
+    peer_ep_v6="$(echo "$resp" | grep -o '"v6"[[:space:]]*:[[:space:]]*"\[[^\]]*\]:[0-9]*"' | head -1 | cut -d'"' -f4)"
+    peer_ep_v4="$(echo "$resp" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[0-9.]*:[0-9]*"' | head -1 | cut -d'"' -f4)"
+
+    # 防御性清洗: addr_v4 必须为合法 IPv4 地址，若带冒号或为空强制为标准 172.16.0.2
+    case "$addr_v4" in
+        *:*|"") addr_v4="172.16.0.2" ;;
+    esac
     [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
     [ -n "$peer_ep_v6" ] || peer_ep_v6="$XMG_WARP_ENDPOINT_V6"
     [ -n "$peer_ep_v4" ] || peer_ep_v4="$XMG_WARP_ENDPOINT_V4"
+
+    if [[ "$peer_ep_v6" =~ :0$ ]]; then
+        peer_ep_v6="${peer_ep_v6%:0}:2408"
+    fi
+    if [[ "$peer_ep_v4" =~ :0$ ]]; then
+        peer_ep_v4="${peer_ep_v4%:0}:2408"
+    fi
 
     cat > "$XMG_WARP_ACCOUNT_FILE" <<EOF
 {
@@ -329,6 +341,10 @@ _xmg_warp_generate_conf() {
     local privkey addr_v4 addr_v6 peer_pub ep_v6 ep_v4
     privkey="$(grep -o '"private_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
     addr_v4="$(grep -o '"address_v4": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
+    # 纠正可能残留的历史错误格式 (如 162.159.192.4:0)
+    case "$addr_v4" in
+        *:*|"") addr_v4="172.16.0.2" ;;
+    esac
     addr_v6="$(grep -o '"address_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
     peer_pub="$(grep -o '"peer_public_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
     ep_v6="$(grep -o '"endpoint_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"

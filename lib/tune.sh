@@ -846,6 +846,8 @@ xmg_tune_resolved_unit_exists() {
 # resolved 未运行时的启用迁移（带回退）：
 # 备份 resolv.conf -> 启用 resolved -> 切 stub 软链 -> 验证解析，失败整体回滚
 xmg_tune_dns_enable_resolved() {
+    local dns1="${1:-}"
+    local dns2="${2:-}"
     local resolv_backup="/tmp/xmg-resolv-backup.$(xmg_timestamp)"
 
     xmg_warn "systemd-resolved 未运行，将启用它并接管 /etc/resolv.conf"
@@ -881,6 +883,24 @@ xmg_tune_dns_enable_resolved() {
     fi
 
     cp -a /etc/resolv.conf "$resolv_backup" 2>/dev/null || true
+
+    # 关键防空载: 启动 systemd-resolved 之前预置目标 DNS 上游，避免空载误判回滚
+    if [ -n "$dns1" ]; then
+        mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
+        local fallback=""
+        if xmg_tune_is_ipv6_only; then
+            fallback="2606:4700:4700::1111 2001:4860:4860::8888"
+        else
+            fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+        fi
+        cat > "$XMG_TUNE_RESOLVED_CONF" <<EOF
+# XMG: DNS 预载配置（由 xmg tune 生成）
+[Resolve]
+DNS=$dns1 ${dns2:-}
+FallbackDNS=$fallback
+DNSOverTLS=opportunistic
+EOF
+    fi
 
     if ! systemctl enable systemd-resolved >/dev/null 2>&1; then
         xmg_error "systemd-resolved enable 失败"
@@ -1037,7 +1057,7 @@ xmg_tune_dns_dot() {
 
     # resolved 未运行时先迁移启用（内置回滚）
     if ! systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        if ! xmg_tune_dns_enable_resolved; then
+        if ! xmg_tune_dns_enable_resolved "$dns1" "$dns2"; then
             return 1
         fi
     fi
