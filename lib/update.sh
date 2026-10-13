@@ -146,18 +146,38 @@ xmg_update_pull_impl() {
 
         # 克隆仓库
         if ! git clone --depth 1 -b "$branch" "$repo_url" "$tmp_dir" 2>/dev/null; then
-            xmg_warn "git clone 失败，尝试使用 curl 下载压缩包"
+            xmg_warn "git clone 失败 (纯 IPv6 主机直连 GitHub 常见)，尝试使用 curl 下载压缩包"
             archive_url="https://github.com/$XMG_UPDATE_REPO/archive/refs/heads/$branch.tar.gz"
 
             rm -rf "$tmp_dir"
             tmp_dir="$(mktemp -d)" || xmg_die "创建临时目录失败"
 
-            if command -v curl &>/dev/null; then
-                curl -fsSL "$archive_url" -o "$tmp_dir/repo.tar.gz" || xmg_die "下载失败"
-            elif command -v wget &>/dev/null; then
-                wget -qO "$tmp_dir/repo.tar.gz" "$archive_url" || xmg_die "下载失败"
-            else
-                xmg_die "没有可用的下载工具 (curl/wget)"
+            local download_ok=0
+            local urls=(
+                "$archive_url"
+                "https://ghfast.top/$archive_url"
+                "https://mirror.ghproxy.com/$archive_url"
+            )
+
+            for u in "${urls[@]}"; do
+                xmg_info "尝试下载源: $u"
+                if command -v curl &>/dev/null; then
+                    if curl -fsSL --connect-timeout 8 "$u" -o "$tmp_dir/repo.tar.gz" 2>/dev/null; then
+                        download_ok=1
+                        break
+                    fi
+                elif command -v wget &>/dev/null; then
+                    if wget -q -T 8 -O "$tmp_dir/repo.tar.gz" "$u" 2>/dev/null; then
+                        download_ok=1
+                        break
+                    fi
+                fi
+            done
+
+            if [ "$download_ok" -eq 0 ]; then
+                xmg_error "下载失败: 无法连接 GitHub (纯 IPv6 主机请在 /etc/resolv.conf 临时配置 DNS64，或配置 WARP IPv4 出口)"
+                xmg_info "临时恢复命令: echo -e \"nameserver 2a01:4f8:c2c:123f::1\\nnameserver 2a00:1098:2b::1\" > /etc/resolv.conf"
+                return 1
             fi
 
             tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir" || xmg_die "解压失败"

@@ -527,9 +527,10 @@ xmg_tune_dns_pick() {
         echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐·海外服务器延迟较高]"
         echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机·推荐]"
         echo "  6. Google IPv6  (2001:4860:4860::8888 / ::8844)     [纯 IPv6 机]"
-        echo "  7. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
+        echo "  7. 公共 DNS64   (2a01:4f8:c2c:123f::1 / 2a00:1098:2b::1) [纯 IPv6 无 WARP 推荐·支持解析 GitHub 等纯 v4 站]"
+        echo "  8. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
         if [ "$is_v6_only" -eq 1 ]; then
-            echo "  [提示: 检测到当前主机为纯 IPv6 环境，默认/推荐选择 5 / 6]"
+            echo "  [提示: 纯 IPv6 VPS 访问 GitHub 等无 IPv6 网站，未开启 WARP 时建议选择 7 (DNS64)；开启 WARP 后可任选 5/6]"
         fi
         printf "请选择 [1]: "
     } >&2
@@ -550,7 +551,8 @@ xmg_tune_dns_pick() {
         4) printf '223.5.5.5 223.6.6.6\n' ;;
         5) printf '2606:4700:4700::1111 2606:4700:4700::1001\n' ;;
         6) printf '2001:4860:4860::8888 2001:4860:4860::8844\n' ;;
-        7)
+        7) printf '2a01:4f8:c2c:123f::1 2a00:1098:2b::1\n' ;;
+        8)
             printf "主 DNS: " >&2
             read -r p1 || return 1
             printf "备 DNS: " >&2
@@ -1045,6 +1047,22 @@ xmg_tune_dns_dot() {
 
 # ===== 时间同步 =====
 
+# 自动探测 VPS 当前出口 IP 的当地自然时区
+xmg_tune_detect_ip_timezone() {
+    local tz=""
+    tz="$(curl -sSL --connect-timeout 3 --max-time 5 "http://ip-api.com/line?fields=timezone" 2>/dev/null | tr -d '\r\n' || true)"
+    if [ -n "$tz" ] && [[ "$tz" =~ ^[A-Za-z_]+/[A-Za-z_]+ ]]; then
+        echo "$tz"
+        return 0
+    fi
+    tz="$(curl -sSL --connect-timeout 3 --max-time 5 "https://ipapi.co/timezone" 2>/dev/null | tr -d '\r\n' || true)"
+    if [ -n "$tz" ] && [[ "$tz" =~ ^[A-Za-z_]+/[A-Za-z_]+ ]]; then
+        echo "$tz"
+        return 0
+    fi
+    echo ""
+}
+
 xmg_tune_time_sync() {
     xmg_require_root
 
@@ -1052,10 +1070,69 @@ xmg_tune_time_sync() {
         xmg_die "未检测到 timedatectl，需要 systemd 环境"
     fi
 
-    # 时区
-    echo "当前时区: $(timedatectl show -p Timezone --value 2>/dev/null || echo unknown)"
-    if xmg_confirm "是否将时区设置为 Asia/Shanghai?"; then
-        timedatectl set-timezone Asia/Shanghai && xmg_info "时区已设置为 Asia/Shanghai"
+    local current_tz=""
+    current_tz="$(timedatectl show -p Timezone --value 2>/dev/null || echo unknown)"
+    echo "当前系统时区: $current_tz"
+
+    xmg_info "正在探测 VPS 所在公网 IP 的地理时区..."
+    local detected_tz=""
+    detected_tz="$(xmg_tune_detect_ip_timezone)"
+
+    if [ -n "$detected_tz" ]; then
+        xmg_info "探测到 VPS 出口 IP 所在地时区: $detected_tz"
+    fi
+
+    echo
+    echo "请选择时区配置方式:"
+    if [ -n "$detected_tz" ]; then
+        echo "  1. 设置为 VPS 所在地时区 ($detected_tz) [推荐]"
+    else
+        echo "  1. 设置为 UTC 协调世界时 (国际标准)"
+    fi
+    echo "  2. 设置为 UTC 协调世界时 (国际标准)"
+    echo "  3. 设置为北京时间 (Asia/Shanghai, UTC+8)"
+    echo "  4. 自定义时区 (如 America/New_York, Asia/Tokyo 等)"
+    echo "  0. 保持当前时区不变"
+    printf "请选择 [1]: "
+
+    local choice=""
+    read -r choice || return 0
+    [ -z "$choice" ] && choice="1"
+
+    local new_tz=""
+    case "$choice" in
+        1)
+            if [ -n "$detected_tz" ]; then
+                new_tz="$detected_tz"
+            else
+                new_tz="UTC"
+            fi
+            ;;
+        2)
+            new_tz="UTC"
+            ;;
+        3)
+            new_tz="Asia/Shanghai"
+            ;;
+        4)
+            printf "请输入目标时区名称: "
+            read -r new_tz || return 0
+            ;;
+        0)
+            xmg_info "保持时区不变"
+            ;;
+        *)
+            xmg_warn "无效选择"
+            return 1
+            ;;
+    esac
+
+    if [ -n "$new_tz" ]; then
+        if timedatectl set-timezone "$new_tz" 2>/dev/null; then
+            xmg_info "VPS 时区已成功更新为: $new_tz"
+        else
+            xmg_error "设置时区失败: $new_tz"
+        fi
     fi
 
     # 同步服务：chrony 优先，其次 systemd-timesyncd
