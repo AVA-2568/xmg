@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-1.7.1}"
+XMG_VERSION="${XMG_VERSION:-1.8.0}"
 
 # ============================================================
 # XMG 统一目录配置
@@ -89,6 +89,7 @@ XMG $XMG_VERSION
   xmg core version         查看内核版本
   xmg core status          查看内核状态
   xmg core menu            内核管理菜单
+  xmg warp [apply|status|test|export|start|stop|restart|uninstall|menu] WARP 网络配置
   xmg version         显示版本
   xmg help            显示帮助
 
@@ -157,6 +158,23 @@ xmg_main() {
                 status)  shift; xmg_core_status "$@" ;;
                 menu)    set +e; xmg_core_menu ;;
                 *)       xmg_error "未知的 core 子命令: $1"; return 2 ;;
+            esac
+            ;;
+        warp)
+            xmg_require_core_file warp.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/warp.sh"
+            case "${1:-menu}" in
+                apply|auto) shift; xmg_warp_auto_apply "$@" ;;
+                status)     shift; xmg_warp_status "$@" ;;
+                test)       shift; xmg_warp_test_unlock "$@" ;;
+                export)     shift; xmg_warp_export_xray_outbound "$@" ;;
+                start)      shift; xmg_warp_start "$@" ;;
+                stop)       shift; xmg_warp_stop "$@" ;;
+                restart)    shift; xmg_warp_restart "$@" ;;
+                uninstall)  shift; xmg_warp_uninstall "$@" ;;
+                menu)       set +e; xmg_warp_menu ;;
+                *)          xmg_error "未知的 warp 子命令: $1"; return 2 ;;
             esac
             ;;
         doctor)

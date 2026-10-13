@@ -38,4 +38,24 @@ t_equals "显式选择 4 仍为阿里(境内)" "$_out" "223.5.5.5 223.6.6.6"
 _out="$(printf '\n' | xmg_tune_dot_pick 2>/dev/null)"
 t_equals "DoT 空输入默认 Cloudflare(境外)" "$_out" "1.1.1.1 1.0.0.1"
 
+
+# --- 纯 IPv6 环境智能自适应测试 ---
+export MOCK_NET_IPV4=0
+export MOCK_NET_IPV6=1
+export MOCK_NET_NAT64=0
+
+_out_v6="$(printf "
+" | xmg_tune_dns_pick 2>/dev/null)"
+t_equals "纯 IPv6 环境空输入默认 Cloudflare IPv6" "$_out_v6" "2606:4700:4700::1111 2606:4700:4700::1001"
+
+_out_v6_dot="$(printf "
+" | xmg_tune_dot_pick 2>/dev/null)"
+t_equals "纯 IPv6 环境 DoT 空输入默认 Cloudflare IPv6" "$_out_v6_dot" "2606:4700:4700::1111 2606:4700:4700::1001"
+
+unset MOCK_NET_IPV4 MOCK_NET_IPV6 MOCK_NET_NAT64 _out_v6 _out_v6_dot
+
+# --- 安全与防断网策略断言 ---
+t_not_contains "resolved 配置不含强制根域强占 Domains=~." "$TUNE" "Domains=~."
+t_not_contains "resolv.conf 不含高风险 rotate" "$TUNE" "options timeout:2 attempts:2 rotate"
+
 unset _out TUNE TUNE_FILE

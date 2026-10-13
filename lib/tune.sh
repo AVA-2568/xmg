@@ -394,6 +394,12 @@ xmg_tune_net_optimize() {
             echo "net.netfilter.nf_conntrack_tcp_timeout_established = 7200"
             echo
         fi
+        if [ -d /proc/sys/net/ipv6 ]; then
+            echo "# --- IPv6 路由与网络栈保护 ---"
+            echo "net.ipv6.conf.all.accept_ra = 2"
+            echo "net.ipv6.conf.default.accept_ra = 2"
+            echo
+        fi
         echo "# --- 虚拟内存 ---"
         echo "vm.swappiness = 10"
     } > "$XMG_TUNE_SYSCTL_NET_CONF"
@@ -411,6 +417,51 @@ xmg_tune_net_optimize() {
 }
 
 # ===== DNS 优化 =====
+
+# 单双栈拓扑感知
+xmg_tune_is_ipv6_only() {
+    if declare -F xmg_detect_network >/dev/null 2>&1; then
+        xmg_detect_network
+        if [ "${XMG_NET_IPV4:-0}" -eq 0 ] && [ "${XMG_NET_IPV6:-0}" -eq 1 ] && [ "${XMG_NET_NAT64:-0}" -eq 0 ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+xmg_tune_is_ipv4_only() {
+    if declare -F xmg_detect_network >/dev/null 2>&1; then
+        xmg_detect_network
+        if [ "${XMG_NET_IPV4:-0}" -eq 1 ] && [ "${XMG_NET_IPV6:-0}" -eq 0 ]; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+xmg_tune_is_ipv6_addr() {
+    case "$1" in
+        *:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 探测目标 IP 的特定 TCP 端口连通性（如 DoT 853）
+xmg_tune_check_tcp_port() {
+    local host="$1"
+    local port="${2:-853}"
+    local timeout_sec="${3:-2}"
+
+    if command -v timeout >/dev/null 2>&1 && [ -n "${BASH_VERSION:-}" ]; then
+        if timeout "$timeout_sec" bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if command -v nc >/dev/null 2>&1; then
+        nc -z -w "$timeout_sec" "$host" "$port" 2>/dev/null && return 0
+    fi
+    return 1
+}
 
 # 校验 IP：IPv4 严格（点分四段 0-255），IPv6 宽松（hex/冒号/点，含 v4 映射尾段）
 # 注意：IPv6 分支必须在前——v4 映射地址（::ffff:1.2.3.4）同时含点与冒号
@@ -461,6 +512,11 @@ xmg_tune_dns_pick() {
     local choice=""
     local p1=""
     local p2=""
+    local is_v6_only=0
+
+    if xmg_tune_is_ipv6_only; then
+        is_v6_only=1
+    fi
 
     {
         echo
@@ -469,14 +525,23 @@ xmg_tune_dns_pick() {
         echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
         echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
         echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐·海外服务器延迟较高]"
-        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
+        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机·推荐]"
         echo "  6. Google IPv6  (2001:4860:4860::8888 / ::8844)     [纯 IPv6 机]"
         echo "  7. 自定义 (支持 IPv4 / IPv6 / 混合双栈)"
+        if [ "$is_v6_only" -eq 1 ]; then
+            echo "  [提示: 检测到当前主机为纯 IPv6 环境，默认/推荐选择 5 / 6]"
+        fi
         printf "请选择 [1]: "
     } >&2
     read -r choice || return 1
-    # 空输入归一为默认（Cloudflare，境外）
-    [ -z "$choice" ] && choice="1"
+    # 空输入归一为默认
+    if [ -z "$choice" ]; then
+        if [ "$is_v6_only" -eq 1 ]; then
+            printf '2606:4700:4700::1111 2606:4700:4700::1001\n'
+            return 0
+        fi
+        choice="1"
+    fi
 
     case "$choice" in
         1) printf '%s\n' "$XMG_TUNE_DNS_DEFAULT" ;;
@@ -526,6 +591,13 @@ xmg_tune_is_resolved_managed() {
 xmg_tune_dns_apply_resolved() {
     local dns1="$1"
     local dns2="$2"
+    local fallback=""
+
+    if xmg_tune_is_ipv6_only; then
+        fallback="2606:4700:4700::1111 2001:4860:4860::8888"
+    else
+        fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+    fi
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
     xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF" || true
@@ -534,8 +606,7 @@ xmg_tune_dns_apply_resolved() {
 # XMG: DNS 优化（由 xmg tune 生成）
 [Resolve]
 DNS=$dns1 $dns2
-FallbackDNS=9.9.9.9 149.112.112.112
-Domains=~.
+FallbackDNS=$fallback
 EOF
 
     systemctl restart systemd-resolved 2>/dev/null || xmg_warn "systemd-resolved 重启失败"
@@ -563,20 +634,11 @@ xmg_tune_dns_apply_resolvconf() {
 # XMG: DNS 优化（由 xmg tune 生成）
 nameserver $dns1
 nameserver $dns2
-options timeout:2 attempts:2 rotate
+options timeout:2 attempts:2
 EOF
     chmod 644 /etc/resolv.conf
 
     xmg_info "DNS 已写入 /etc/resolv.conf"
-
-    # 防止 DHCP / cloud-init 覆盖
-    if xmg_confirm "是否锁定 /etc/resolv.conf 防止被覆盖? (chattr +i)"; then
-        if chattr +i /etc/resolv.conf 2>/dev/null; then
-            xmg_info "已锁定。解锁命令: chattr -i /etc/resolv.conf"
-        else
-            xmg_warn "chattr +i 失败（文件系统可能不支持）"
-        fi
-    fi
 }
 
 xmg_tune_dns_optimize() {
@@ -601,6 +663,22 @@ xmg_tune_dns_optimize() {
         return 0
     fi
 
+    # 关键防呆拦截：纯单栈环境下防止配置反向单栈 DNS 导致断网
+    if xmg_tune_is_ipv6_only; then
+        if ! xmg_tune_is_ipv6_addr "$dns1" && ! xmg_tune_is_ipv6_addr "$dns2"; then
+            xmg_error "安全拦截: 检测到当前主机为纯 IPv6 环境（无 IPv4 路由且不支持 NAT64）"
+            xmg_warn "所选 DNS ($dns1 / $dns2) 均为 IPv4 地址，写入后将导致系统立即失去所有域名解析能力而断网！"
+            xmg_info "请选择 IPv6 DNS (如 2606:4700:4700::1111) 或通过 xmg warp 开启 WARP IPv4 出口"
+            return 1
+        fi
+    elif xmg_tune_is_ipv4_only; then
+        if xmg_tune_is_ipv6_addr "$dns1" && xmg_tune_is_ipv6_addr "$dns2"; then
+            xmg_error "安全拦截: 检测到当前主机为纯 IPv4 环境（无 IPv6 路由）"
+            xmg_warn "所选 DNS 均为 IPv6 地址，无法通信！"
+            return 1
+        fi
+    fi
+
     echo
     echo "将使用 DNS: $dns1 / $dns2"
 
@@ -609,11 +687,48 @@ xmg_tune_dns_optimize() {
         return 0
     fi
 
+    # 保存安全回滚快照
+    local snapshot_resolv="/tmp/xmg-resolv-snap.$.bak"
+    local snapshot_resolved="/tmp/xmg-resolved-snap.$.bak"
+    local had_resolved_conf=0
+    [ -e /etc/resolv.conf ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null || true
+    if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
+        cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_resolved" 2>/dev/null || true
+        had_resolved_conf=1
+    fi
+
+    local is_resolved=0
     if xmg_tune_is_resolved_managed; then
+        is_resolved=1
         xmg_tune_dns_apply_resolved "$dns1" "$dns2"
     else
         xmg_tune_dns_apply_resolvconf "$dns1" "$dns2"
     fi
+
+    # 连通性验证与自动回滚
+    xmg_info "正在验证 DNS 解析连通性..."
+    if ! xmg_tune_dns_verify; then
+        xmg_error "DNS 解析验证失败！新配置在此网络环境下不可达"
+        xmg_warn "正在自动执行安全回滚以恢复原有配置，防止断网..."
+        if [ "$is_resolved" -eq 1 ]; then
+            if [ "$had_resolved_conf" -eq 1 ]; then
+                cp -a "$snapshot_resolved" "$XMG_TUNE_RESOLVED_CONF" 2>/dev/null || true
+            else
+                rm -f "$XMG_TUNE_RESOLVED_CONF"
+            fi
+            systemctl restart systemd-resolved 2>/dev/null || true
+        fi
+        if [ -e "$snapshot_resolv" ]; then
+            rm -f /etc/resolv.conf
+            cp -a "$snapshot_resolv" /etc/resolv.conf 2>/dev/null || true
+        fi
+        rm -f "$snapshot_resolv" "$snapshot_resolved"
+        xmg_info "已完成安全回滚，已恢复原网络配置"
+        return 1
+    fi
+
+    rm -f "$snapshot_resolv" "$snapshot_resolved"
+    xmg_info "DNS 优化应用成功，解析验证通过"
 }
 
 # ===== 加密 DNS (DoT) =====
@@ -639,6 +754,11 @@ xmg_tune_dot_pick() {
     local choice=""
     local p1=""
     local p2=""
+    local is_v6_only=0
+
+    if xmg_tune_is_ipv6_only; then
+        is_v6_only=1
+    fi
 
     {
         echo
@@ -647,13 +767,22 @@ xmg_tune_dot_pick() {
         echo "  2. Google       (8.8.8.8 / 8.8.4.4)"
         echo "  3. Quad9        (9.9.9.9 / 149.112.112.112)"
         echo "  4. 阿里 DNS     (223.5.5.5 / 223.6.6.6)        [境内推荐·海外服务器延迟较高]"
-        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机]"
+        echo "  5. Cloudflare IPv6 (2606:4700:4700::1111 / ::1001)  [纯 IPv6 机·推荐]"
         echo "  6. 自定义 (支持 IPv4 / IPv6)"
+        if [ "$is_v6_only" -eq 1 ]; then
+            echo "  [提示: 检测到当前主机为纯 IPv6 环境，默认/推荐选择 5]"
+        fi
         printf "请选择 [1]: "
     } >&2
     read -r choice || return 1
-    # 空输入归一为默认（Cloudflare，境外）
-    [ -z "$choice" ] && choice="1"
+    # 空输入归一为默认
+    if [ -z "$choice" ]; then
+        if [ "$is_v6_only" -eq 1 ]; then
+            printf '2606:4700:4700::1111 2606:4700:4700::1001\n'
+            return 0
+        fi
+        choice="1"
+    fi
 
     case "$choice" in
         1) printf '%s\n' "$XMG_TUNE_DOT_DEFAULT" ;;
@@ -687,7 +816,23 @@ xmg_tune_dot_pick() {
 
 # 解析链路验证：失败返回非零
 xmg_tune_dns_verify() {
-    getent hosts deb.debian.org >/dev/null 2>&1
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 3 getent hosts deb.debian.org >/dev/null 2>&1; then
+            return 0
+        fi
+        if timeout 3 getent hosts cloudflare.com >/dev/null 2>&1; then
+            return 0
+        fi
+        return 1
+    fi
+
+    if getent hosts deb.debian.org >/dev/null 2>&1; then
+        return 0
+    fi
+    if getent hosts cloudflare.com >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
 }
 
 # systemd-resolved 服务单元是否存在（Debian 12 精简模板常缺此包）
@@ -770,6 +915,20 @@ xmg_tune_dns_enable_resolved() {
 xmg_tune_dns_dot_apply() {
     local dns1="$1"
     local dns2="$2"
+    local fallback=""
+
+    if xmg_tune_is_ipv6_only; then
+        fallback="2606:4700:4700::1111 2001:4860:4860::8888"
+    else
+        fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+    fi
+
+    local snapshot_dropin="/tmp/xmg-dot-dropin.$.bak"
+    local had_prior=0
+    if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
+        cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_dropin" 2>/dev/null || true
+        had_prior=1
+    fi
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
     xmg_tune_backup_file "$XMG_TUNE_RESOLVED_CONF" || true
@@ -778,8 +937,7 @@ xmg_tune_dns_dot_apply() {
 # XMG: 加密 DNS DoT（由 xmg tune 生成）
 [Resolve]
 DNS=$dns1 $dns2
-FallbackDNS=9.9.9.9 149.112.112.112
-Domains=~.
+FallbackDNS=$fallback
 # opportunistic: DoT(853) 不通时自动回退明文 53，不会断网
 DNSOverTLS=opportunistic
 EOF
@@ -790,11 +948,20 @@ EOF
     }
 
     if ! xmg_tune_dns_verify; then
-        xmg_error "DoT 配置后解析失败，请检查上游 853 端口连通性"
-        xmg_warn "可重新执行「一键 DNS 优化」切回普通 UDP 模式"
+        xmg_error "DoT 配置后解析验证失败（853 端口受阻或解析无响应）！"
+        xmg_warn "正在自动回滚 DoT 配置以恢复网络..."
+        if [ "$had_prior" -eq 1 ]; then
+            cp -a "$snapshot_dropin" "$XMG_TUNE_RESOLVED_CONF" 2>/dev/null || true
+        else
+            rm -f "$XMG_TUNE_RESOLVED_CONF"
+        fi
+        systemctl restart systemd-resolved 2>/dev/null || true
+        rm -f "$snapshot_dropin"
+        xmg_info "已自动撤销 DoT 配置，网络已恢复"
         return 1
     fi
 
+    rm -f "$snapshot_dropin"
     xmg_info "DoT 已启用: DNSOverTLS=opportunistic（带回退）"
     xmg_info "配置文件: $XMG_TUNE_RESOLVED_CONF"
     resolvectl status 2>/dev/null | sed -n '1,12p' || true
@@ -829,6 +996,33 @@ xmg_tune_dns_dot() {
     if ! xmg_tune_valid_ip "$dns1" || ! xmg_tune_valid_ip "$dns2"; then
         xmg_error "DoT 上游无效: '$dns1' / '$dns2'，未做任何变更"
         return 0
+    fi
+
+    # 关键防呆拦截：纯单栈环境防止配置反向单栈 DoT
+    if xmg_tune_is_ipv6_only; then
+        if ! xmg_tune_is_ipv6_addr "$dns1" && ! xmg_tune_is_ipv6_addr "$dns2"; then
+            xmg_error "安全拦截: 检测到当前主机为纯 IPv6 环境（无 IPv4 路由且不支持 NAT64）"
+            xmg_warn "所选 DoT 上游 ($dns1 / $dns2) 均为 IPv4 地址，无法建立 TLS 握手！"
+            xmg_info "建议选择 IPv6 节点 (如 2606:4700:4700::1111)"
+            return 1
+        fi
+    elif xmg_tune_is_ipv4_only; then
+        if xmg_tune_is_ipv6_addr "$dns1" && xmg_tune_is_ipv6_addr "$dns2"; then
+            xmg_error "安全拦截: 检测到当前主机为纯 IPv4 环境（无 IPv6 路由）"
+            xmg_warn "所选 DoT 上游均为 IPv6 地址，无法建立连接！"
+            return 1
+        fi
+    fi
+
+    # 853 端口握手连通性预检
+    if ! xmg_tune_check_tcp_port "$dns1" 853 2; then
+        xmg_warn "预检提示: 目标 DoT 上游 ($dns1) 端口 853 无法连通"
+        xmg_warn "可能原因: VPS 所在云厂商安全组或运营商阻断了 TCP 853 端口"
+        xmg_warn "若强制开启，DNSOverTLS 可能会经历握手超时，导致网络查询卡顿"
+        if ! xmg_confirm "是否仍要继续尝试开启 DoT? (建议改用普通 UDP 模式)"; then
+            xmg_info "已取消。可使用「一键 DNS 优化 (UDP)」模式"
+            return 0
+        fi
     fi
 
     echo
