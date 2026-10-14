@@ -335,7 +335,7 @@ xmg_core_install_official() {
     fi
 
     local script_tmp=""
-    script_tmp="$(mktemp 2>/dev/null || echo "/tmp/xray-install.$.sh")"
+    script_tmp="$(mktemp 2>/dev/null || echo "/tmp/xray-install.$$.sh")"
 
     local install_urls=(
         "$XMG_XRAY_INSTALL_URL"

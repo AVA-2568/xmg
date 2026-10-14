@@ -684,7 +684,7 @@ _xmg_warp_backup_config() {
         bak_dir="$(dirname "$cfg")/backup"
     fi
     mkdir -p "$bak_dir" 2>/dev/null || bak_dir="$(dirname "$cfg")"
-    local bak="$bak_dir/config.json.warp.bak.$(date +%Y%m%d%H%M%S 2>/dev/null || date +%s).$"
+    local bak="$bak_dir/config.json.warp.bak.$(date +%Y%m%d%H%M%S 2>/dev/null || date +%s).$$"
     cp -f "$cfg" "$bak" 2>/dev/null || true
     echo "$bak"
 }
@@ -703,14 +703,7 @@ xmg_warp_enable() {
     # 2. 导出出站片段
     xmg_warp_export_xray_outbound "$XMG_WARP_XRAY_OUTBOUND" || return 1
 
-    # 3. 记录启用状态至 env
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
-
-    # 4. 智能定位并增量补强当前系统生效的 Xray 主配置 (100% 保留原有 inbounds/证书/出站/policy)
+    # 3. 智能定位并增量补强当前系统生效的 Xray 主配置 (100% 保留原有 inbounds/证书/出站/policy)
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
@@ -723,8 +716,8 @@ xmg_warp_enable() {
             bak="$(_xmg_warp_backup_config "$xray_cfg")"
             [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
 
-            local tmp_cfg="${xray_cfg}.tmp.$"
-            local jq_file="${tmp_cfg}.jq"
+            local tmp_cfg="${xray_cfg}.tmp.$$.json"
+            local jq_file="${xray_cfg}.tmp.$$.jq"
             local v6_fallback_rule=""
             if xmg_warp_is_ipv6_only; then
                 # 纯 IPv6 VPS 终极容灾: 若目标网站无法通过 IPv6 访问 (无 AAAA 或 IPv6 阻断)，由 WARP IPv4 节点出口全自动兜底！
@@ -845,7 +838,7 @@ EOF_ENABLE_JQ
 
                     if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
                         local test_out=""
-                        if ! test_out="$("$xray_bin" run -test -c "$tmp_cfg" 2>&1)"; then
+                        if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
                             xmg_error "Xray 内核校验新配置失败，详细错误信息如下:"
                             printf '%s\n' "$test_out" >&2
                             rm -f "$tmp_cfg" 2>/dev/null || true
@@ -872,6 +865,13 @@ EOF_ENABLE_JQ
             fi
         fi
     fi
+
+    # 4. 配置校验并落盘成功，记录启用状态至 env
+    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+    fi
+    echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
 
     # 5. 若 Xray 运行中，重载/重启服务
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
@@ -926,8 +926,8 @@ xmg_warp_disable() {
         bak="$(_xmg_warp_backup_config "$xray_cfg")"
         [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
 
-        local tmp_cfg="${xray_cfg}.tmp.$"
-        local jq_file="${tmp_cfg}.jq"
+        local tmp_cfg="${xray_cfg}.tmp.$$.json"
+        local jq_file="${xray_cfg}.tmp.$$.jq"
         cat > "$jq_file" << 'EOF_DISABLE_JQ'
 (.outbounds = [ (.outbounds // [])[] | select(.tag != "warp-out") ]) |
 (if (.routing and .routing.rules) then
@@ -938,6 +938,24 @@ EOF_DISABLE_JQ
         if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
             rm -f "$jq_file" 2>/dev/null || true
             if jq . < "$tmp_cfg" >/dev/null 2>&1; then
+                # 若内核二进制存在，预校验内核解析
+                local xray_bin=""
+                if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+                    xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+                elif command -v xray >/dev/null 2>&1; then
+                    xray_bin="$(command -v xray)"
+                fi
+
+                if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+                    local test_out=""
+                    if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
+                        xmg_error "Xray 内核校验新配置失败，取消停用 WARP:"
+                        printf '%s\n' "$test_out" >&2
+                        rm -f "$tmp_cfg" 2>/dev/null || true
+                        return 1
+                    fi
+                fi
+
                 mv -f "$tmp_cfg" "$xray_cfg"
                 xmg_info "已从 Xray 配置中无损移除 warp-out 出站与相关分流规则 (原有其余配置毫发无损)"
             else

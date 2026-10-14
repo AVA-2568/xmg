@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-1.8.0}"
+XMG_VERSION="${XMG_VERSION:-1.8.1}"
 
 # ============================================================
 # XMG 统一目录配置

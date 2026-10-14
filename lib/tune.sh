@@ -690,8 +690,8 @@ xmg_tune_dns_optimize() {
     fi
 
     # 保存安全回滚快照
-    local snapshot_resolv="/tmp/xmg-resolv-snap.$.bak"
-    local snapshot_resolved="/tmp/xmg-resolved-snap.$.bak"
+    local snapshot_resolv="/tmp/xmg-resolv-snap.$$.bak"
+    local snapshot_resolved="/tmp/xmg-resolved-snap.$$.bak"
     local had_resolved_conf=0
     [ -e /etc/resolv.conf ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null || true
     if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
@@ -945,7 +945,7 @@ xmg_tune_dns_dot_apply() {
         fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
     fi
 
-    local snapshot_dropin="/tmp/xmg-dot-dropin.$.bak"
+    local snapshot_dropin="/tmp/xmg-dot-dropin.$$.bak"
     local had_prior=0
     if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
         cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_dropin" 2>/dev/null || true
