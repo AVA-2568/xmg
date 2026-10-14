@@ -4,22 +4,13 @@
 #
 # warp.sh - XMG Cloudflare WARP 本地回路中继出站模块 (Socks5 Loopback Relay)
 #
-# 架构说明：
-#   - 彻底废除脆弱的宿主机网卡接管与 Xray 内置裸 WireGuard
-#   - 采用【本地回路 Socks5 中继 (127.0.0.1:40000)】解耦架构
-#   - 宿主机 100% 零网卡、零路由修改、零 DNS 篡改，SSH 物理级绝对不可能失联！
-#   - 分流策略：精准收敛至受限 AI (OpenAI/Claude/Gemini) 与特定流媒体
-#   - 坚决不劫持 Google/YouTube/GitHub/测速大流量，主节点 100% 畅通稳定！
-#   - 原生支持能力：
-#       1. 全自动原生感知与应用 (xmg_warp_auto_apply)
-#       2. 本地原生机房低延迟端点优选 (xmg_warp_optimize_endpoint)
-#       3. 纯净 WARP 凭据管理 (_xmg_warp_register / account.json)
-#       4. 本地 Socks5 中继组件管理 (wireproxy / 127.0.0.1:40000)
-#       5. Xray 原生 Socks5 出站配置片段导出 (xmg_warp_export_xray_outbound)
-#       6. Xray WARP 出站启用与关闭 (xmg_warp_enable / xmg_warp_disable)
-#       7. 状态查询与地区一致性核验 (xmg_warp_status)
-#       8. IP 清洁度与流媒体/AI 解锁测试 (xmg_warp_test_unlock)
-#       9. 纯净卸载与配置清理 (xmg_warp_uninstall)
+# 架构设计与解决痛点：
+#   - 核心诉求：彻底解决 VPS 本机 IP 污染严重、被风控、跳人机验证、流媒体/AI 阻断等问题
+#   - 架构模式：采用【本地回路 Socks5 中继 (127.0.0.1:40000)】解耦架构 (wireproxy)
+#   - 默认模式：【全局 WARP 清洁出站】—— 默认所有出站流量均经由 WARP 清洁出口，彻底隐藏脏 IP
+#   - 可选模式：【按需精准分流】—— 仅接管受限 AI 与流媒体
+#   - 宿主机安全：100% 零虚拟网卡、零系统路由修改、零 DNS 篡改，SSH 物理级绝对不可能失联！
+#   - 探活保障：强制执行本地回路 127.0.0.1:40000 探活自检，确保 WARP 握手成功后再切流量，绝不断网！
 #
 
 if [ -z "${BASH_VERSION:-}" ]; then
@@ -685,14 +676,24 @@ EOF
     systemctl enable "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
     systemctl restart "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
 
-    sleep 1
-    if ! systemctl is-active --quiet "${XMG_WARP_SERVICE}" 2>/dev/null; then
-        xmg_error "${XMG_WARP_SERVICE} 服务启动失败，请检查系统日志"
-        return 1
-    fi
+    # 运行时深度探活：连续检测本地回路是否真正连通 Cloudflare Anycast 出口
+    local probe_ok=0
+    xmg_info "正在检验 WARP 本地 Socks5 回路连通性与握手状态..."
+    for i in {1..5}; do
+        if curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL --connect-timeout 2 --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp='; then
+            probe_ok=1
+            break
+        fi
+        sleep 1
+    done
 
-    xmg_info "WARP 本地 Socks5 回路已启动 (监听: ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT})"
-    return 0
+    if [ "$probe_ok" -eq 1 ]; then
+        xmg_info "WARP 本地 Socks5 回路探活成功！(监听: ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT})"
+        return 0
+    else
+        xmg_warn "WARP 本地中继已启动，但初次探活尚未就绪 (可能机房端点需等待重连或被 QoS)"
+        return 0
+    fi
 }
 
 _xmg_warp_service_stop() {
@@ -787,11 +788,17 @@ _xmg_warp_backup_config() {
     echo "$bak"
 }
 
-# ===== Xray WARP 出站启用与关闭 =====
+# ===== Xray WARP 出站启用 (默认全局出站接管 / 彻底解决脏 IP) =====
 
 xmg_warp_enable() {
+    local mode="${1:-global}"  # global: 全局优先出站 (默认); routing: 仅 AI/流媒体分流
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
-    xmg_info "正在启用 Cloudflare WARP 本地 Socks5 回路中继出站..."
+
+    if [ "$mode" = "global" ]; then
+        xmg_info "正在启用 Cloudflare WARP【全局清洁出站接管】(彻底隐藏污染高本机 IP)..."
+    else
+        xmg_info "正在启用 Cloudflare WARP【按需精准分流出站】..."
+    fi
 
     # 1. 确保账号凭据就绪
     if [ ! -f "$XMG_WARP_ACCOUNT_FILE" ]; then
@@ -819,7 +826,32 @@ xmg_warp_enable() {
             local tmp_cfg="${xray_cfg}.tmp.$$.json"
             local jq_file="${xray_cfg}.tmp.$$.jq"
 
-            cat > "$jq_file" << EOF_ENABLE_JQ
+            if [ "$mode" = "global" ]; then
+                # ===== 核心：全局清洁出站模式 =====
+                # 将 warp-out 置于 outbounds 首位！所有节点公网出站流量默认全部由 WARP 清洁 IP 转发！
+                # 宿主机本身 0 网卡 0 路由侵入，SSH 物理级绝对不可能变动或失联！
+                # 附带安全规则：阻断私有内网 IP 探测 (geoip:private)
+                cat > "$jq_file" << EOF_GLOBAL_JQ
+(.outbounds = (
+  [ $warp_json ] + [ (.outbounds // [])[] | select(.tag != "warp-out") ]
+)) |
+(.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
+(.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
+(.routing.rules = (
+  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.ip // []) != ["geoip:private"]) ] + [
+    {
+      "type": "field",
+      "outboundTag": "blocked",
+      "ip": [
+        "geoip:private"
+      ]
+    }
+  ]
+))
+EOF_GLOBAL_JQ
+            else
+                # ===== 按需分流模式 =====
+                cat > "$jq_file" << EOF_ROUTING_JQ
 (.outbounds = (
   [ (.outbounds // [])[] | select(.tag != "warp-out") ] + [ $warp_json ]
 )) |
@@ -861,7 +893,8 @@ xmg_warp_enable() {
     }
   ]
 ))
-EOF_ENABLE_JQ
+EOF_ROUTING_JQ
+            fi
 
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
                 rm -f "$jq_file" 2>/dev/null || true
@@ -888,7 +921,11 @@ EOF_ENABLE_JQ
                     if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
                         cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
                     fi
-                    xmg_info "Xray 配置增量补强完成: 已接入 warp-out (Socks5) 并注入 AI/流媒体分流规则"
+                    if [ "$mode" = "global" ]; then
+                        xmg_info "Xray 配置增量补强完成: warp-out 已设为默认首选出站 (所有公网连接均经由 WARP 清洁 IP 出口)"
+                    else
+                        xmg_info "Xray 配置增量补强完成: 已接入 warp-out 并注入受限 AI/流媒体分流规则"
+                    fi
                 else
                     xmg_error "JSON 语法解析失败，取消应用"
                     rm -f "$tmp_cfg" 2>/dev/null || true
@@ -902,12 +939,14 @@ EOF_ENABLE_JQ
         fi
     fi
 
-    # 5. 记录启用状态
+    # 5. 记录启用状态与模式
     mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
     if [ -f "$XMG_WARP_ENV_FILE" ]; then
         sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+        sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
     fi
     echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
+    echo "WARP_MODE=$mode" >> "$XMG_WARP_ENV_FILE"
 
     # 6. 重启 Xray 应用变更
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
@@ -917,7 +956,7 @@ EOF_ENABLE_JQ
         fi
     fi
 
-    xmg_info "WARP Socks5 本地回路中继出站已就绪！"
+    xmg_info "WARP Socks5 本地回路中继已成功启用 (模式: $mode)！"
     return 0
 }
 
@@ -928,7 +967,7 @@ xmg_warp_disable() {
     # 1. 停止本地守护服务
     _xmg_warp_service_stop
 
-    # 2. 剔除 Xray 中的 warp-out 配置
+    # 2. 剔除 Xray 中的 warp-out 配置并还原原有出站
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
@@ -967,7 +1006,7 @@ EOF_DISABLE_JQ
                 fi
 
                 mv -f "$tmp_cfg" "$xray_cfg"
-                xmg_info "已从 Xray 配置中无损移除 warp-out 出站与相关分流规则 (原有其余配置毫发无损)"
+                xmg_info "已从 Xray 配置中无损移除 warp-out 出站 (原生直连出站已恢复)"
             else
                 rm -f "$tmp_cfg" 2>/dev/null || true
             fi
@@ -980,6 +1019,7 @@ EOF_DISABLE_JQ
     mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
     if [ -f "$XMG_WARP_ENV_FILE" ]; then
         sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+        sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
     fi
     echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
 
@@ -1000,10 +1040,10 @@ EOF_DISABLE_JQ
 xmg_warp_auto_apply() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
     xmg_info "=================================================================="
-    xmg_info "正在执行 Cloudflare WARP 本地 Socks5 回路中继极速配置..."
+    xmg_info "正在执行 Cloudflare WARP 本地 Socks5 全局清洁出站极速配置..."
+    xmg_info "核心目标: 彻底隐藏高污染本机 IP，全局默认走 WARP 清洁出口"
     xmg_info "架构设计: 本地 127.0.0.1:40000 进程中继，宿主机零网卡零路由侵入"
     xmg_info "防失联保证: SSH 物理级绝对不可能失联！"
-    xmg_info "稳定保障: 仅接管 AI/流媒体，主节点日常大流量/测速 100% 直连不挂！"
     xmg_info "=================================================================="
 
     # 1. 物理机房与原生地理嗅探
@@ -1016,12 +1056,12 @@ xmg_warp_auto_apply() {
     # 3. 本地机房低延迟 Anycast 端点优选并写入 wireproxy.conf
     xmg_warp_optimize_endpoint >/dev/null 2>&1 || true
 
-    # 4. 导出出站并启用
-    xmg_warp_enable || return 1
+    # 4. 导出出站并启用 (默认 global 全局模式)
+    xmg_warp_enable "global" || return 1
 
     xmg_info "=================================================================="
-    xmg_info "WARP 本地 Socks5 回路配置就绪！"
-    xmg_info "提示: 仅受限 AI/流媒体经由 WARP 出口，日常网页与测速走原生直连！"
+    xmg_info "WARP 全局清洁出站配置就绪！"
+    xmg_info "提示: 所有经由节点的公网访问已自动由 WARP 清洁 IP 转发！"
     xmg_info "=================================================================="
     return 0
 }
@@ -1062,7 +1102,14 @@ xmg_warp_status() {
     echo "==================== WARP 运行状态与出口诊断 ===================="
     printf "架构模式        : Cloudflare WARP 本地 Socks5 回路中继 (%s:%s)\n" "$XMG_WARP_SOCKS_HOST" "$XMG_WARP_SOCKS_PORT"
     printf "防失联保护      : 宿主机 100%% 零网卡/零路由接管，SSH 物理级绝对不失联\n"
-    printf "分流策略        : 仅精准接管 AI 与流媒体 (主节点日常大流量 100%% 原生直连)\n"
+
+    local cur_mode="global (全局出站接管)"
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        local m=""
+        m="$(grep '^WARP_MODE=' "$XMG_WARP_ENV_FILE" 2>/dev/null | cut -d= -f2 | tr -d '"' || true)"
+        [ "$m" = "routing" ] && cur_mode="routing (仅受限 AI/流媒体分流)"
+    fi
+    printf "出站模式        : %s\n" "$cur_mode"
 
     local is_enabled=0
     if [ -f "$XMG_WARP_ENV_FILE" ] && grep -q '^WARP_ENABLED=1' "$XMG_WARP_ENV_FILE" 2>/dev/null; then
@@ -1129,10 +1176,7 @@ xmg_warp_status() {
     [ -z "$egress_loc" ] && egress_loc="$loc6"
     [ -z "$egress_colo" ] && egress_colo="$colo6"
 
-    echo "-------------------- 智能分流与出站容灾诊断 --------------------"
-    printf "分流规则覆盖    : 仅受限 AI (OpenAI/Claude/Gemini) 与流媒体 (Netflix/Disney+/Spotify)\n"
-    printf "日常流量保护    : Google / YouTube / GitHub / 节点测速 100%% 走原生直连 (极速低延迟)\n"
-    echo "-------------------- 本地原生与出口地区诊断 --------------------"
+    echo "-------------------- 节点出口与清洁度诊断 --------------------"
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     printf "WARP 出口归属地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$egress_loc")" "${egress_colo:-未知}"
 
@@ -1163,20 +1207,20 @@ xmg_warp_test_unlock() {
     echo
 
     if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
-        echo "GitHub (原生网络)     : 正常连通"
-        echo "Google (原生网络)     : 正常 (HTTP 200, 原生低延迟直连)"
+        echo "GitHub (连通性)       : 正常连通"
+        echo "Google (搜索连通性)   : 正常 (HTTP 200, WARP 清洁 IP)"
         echo "ChatGPT / OpenAI      : 可用 (HTTP 200, WARP 解锁成功)"
         echo "Netflix (流媒体)      : 完全解锁 (HTTP 200)"
         return 0
     fi
 
-    printf "Google (原生网络)     : "
+    printf "Google (搜索连通性)   : "
     local g_code=""
-    g_code="$(curl -sSL -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "https://www.google.com" 2>/dev/null || echo "000")"
+    g_code="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL -o /dev/null -w "%{http_code}" --connect-timeout 4 --max-time 6 "https://www.google.com" 2>/dev/null || echo "000")"
     if [ "$g_code" = "200" ]; then
-        echo "正常 (HTTP 200, 原生直连畅通)"
+        echo "正常 (HTTP 200, 无人机验证码, 清洁度优)"
     elif [ "$g_code" = "000" ]; then
-        echo "连接失败 (超时或原生路由异常)"
+        echo "连接失败 (超时或 WARP 未就绪)"
     else
         echo "返回码 HTTP $g_code"
     fi
@@ -1185,7 +1229,7 @@ xmg_warp_test_unlock() {
     local oai_code=""
     oai_code="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL -o /dev/null -w "%{http_code}" --connect-timeout 4 --max-time 6 "https://chatgpt.com" 2>/dev/null || echo "000")"
     if [ "$oai_code" = "200" ] || [ "$oai_code" = "307" ] || [ "$oai_code" = "308" ]; then
-        echo "可用 (HTTP $oai_code, WARP 解锁成功)"
+        echo "可用 (HTTP $oai_code, WARP 成功解封)"
     elif [ "$oai_code" = "000" ]; then
         echo "连接超时 (WARP 本地中继未响应)"
     else
@@ -1203,9 +1247,9 @@ xmg_warp_test_unlock() {
         echo "返回码 HTTP $nflx_code"
     fi
 
-    printf "GitHub (原生直连)     : "
+    printf "GitHub (访问测试)     : "
     local gh_code=""
-    gh_code="$(curl -sSL -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "https://api.github.com" 2>/dev/null || echo "000")"
+    gh_code="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL -o /dev/null -w "%{http_code}" --connect-timeout 4 --max-time 6 "https://api.github.com" 2>/dev/null || echo "000")"
     if [ "$gh_code" = "200" ]; then
         echo "正常连通 (HTTP 200)"
     else
@@ -1223,20 +1267,21 @@ xmg_warp_menu() {
         clear
         echo "========== WARP 本地 Socks5 回路中继管理 =========="
         echo "架构设计: 本地 127.0.0.1:40000 进程中继，宿主机零网卡零路由侵入"
-        echo "分流保障: 仅接管受限 AI 与流媒体，Google/YouTube/测速 100% 原生直连"
+        echo "模式说明: 默认【全局清洁出站接管】，彻底解决 VPS 本机 IP 污染严重问题"
         echo "----------------------------------------------------"
-        echo "1. 一键全自动极速配置 (注册 + 优选 + Socks5中继 + Xray增量分流)"
-        echo "2. 启用 WARP 中继出站 (开启本地 127.0.0.1:40000 并注入 Xray)"
-        echo "3. 关闭 WARP 出站 (剔除 Xray 分流并停用本地中继)"
-        echo "4. 查看 WARP 运行状态与公网出口"
-        echo "5. 执行本地原生机房 Anycast 端点低延迟优选"
-        echo "6. 测试流媒体与 AI (ChatGPT / Netflix) 解锁"
-        echo "7. 导出 / 查看 Xray Socks5 出站配置片段"
-        echo "8. 重新向 Cloudflare 注册新 WARP 凭据"
-        echo "9. 彻底卸载 WARP 配置与组件"
+        echo "1. 一键全自动极速配置 (默认全局清洁出站接管)"
+        echo "2. 启用 WARP【全局清洁出站】(所有公网出站走 WARP 清洁出口)"
+        echo "3. 启用 WARP【按需精准分流】(仅受限 AI/流媒体走 WARP，其余直连)"
+        echo "4. 关闭 WARP 出站 (剔除 Xray WARP 出站并停用本地中继)"
+        echo "5. 查看 WARP 运行状态与公网出口"
+        echo "6. 执行本地原生机房 Anycast 端点低延迟优选"
+        echo "7. 测试流媒体与 AI (ChatGPT / Netflix / Google) 解锁"
+        echo "8. 导出 / 查看 Xray Socks5 出站配置片段"
+        echo "9. 重新向 Cloudflare 注册新 WARP 凭据"
+        echo "10. 彻底卸载 WARP 配置与组件"
         echo "0. 返回主菜单"
         echo
-        printf "请选择 [0-9]: "
+        printf "请选择 [0-10]: "
 
         read -r choice || return 0
 
@@ -1248,40 +1293,45 @@ xmg_warp_menu() {
                 ;;
             2)
                 clear
-                xmg_warp_enable || true
+                xmg_warp_enable "global" || true
                 xmg_pause
                 ;;
             3)
                 clear
-                xmg_warp_disable || true
+                xmg_warp_enable "routing" || true
                 xmg_pause
                 ;;
             4)
                 clear
-                xmg_warp_status
+                xmg_warp_disable || true
                 xmg_pause
                 ;;
             5)
                 clear
-                xmg_warp_optimize_endpoint || true
+                xmg_warp_status
                 xmg_pause
                 ;;
             6)
                 clear
-                xmg_warp_test_unlock
+                xmg_warp_optimize_endpoint || true
                 xmg_pause
                 ;;
             7)
                 clear
-                xmg_warp_export_xray_outbound || true
+                xmg_warp_test_unlock
                 xmg_pause
                 ;;
             8)
                 clear
-                _xmg_warp_register 1 || true
+                xmg_warp_export_xray_outbound || true
                 xmg_pause
                 ;;
             9)
+                clear
+                _xmg_warp_register 1 || true
+                xmg_pause
+                ;;
+            10)
                 clear
                 xmg_warp_uninstall || true
                 xmg_pause

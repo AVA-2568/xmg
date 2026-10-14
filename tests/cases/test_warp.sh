@@ -373,8 +373,8 @@ export XMG_XRAY_CONFIG="$EXIST_CFG"
 export XMG_BACKUP_DIR="$XMG_TMP/xray_bak"
 mkdir -p "$XMG_BACKUP_DIR"
 
-# 启用 WARP，对原有配置进行增量补强
-t_assert "增量启用 WARP 执行成功" xmg_warp_enable
+# 启用 WARP，对原有配置进行增量补强 (先测试 routing 分流模式)
+t_assert "增量启用 WARP 分流模式执行成功" xmg_warp_enable "routing"
 
 ENHANCED_CFG="$(cat "$EXIST_CFG")"
 # 1. 验证原有 inbounds 100% 完整保留
@@ -402,7 +402,7 @@ BAK_COUNT="$(ls -1 "$XMG_BACKUP_DIR"/*.bak.* 2>/dev/null | wc -l)"
 t_assert "修改前成功生成了 Xray 备份文件" test "$BAK_COUNT" -gt 0
 
 # 5. 幂等性验证: 再次执行 enable 不会产生重复出站或重复规则
-xmg_warp_enable
+xmg_warp_enable "routing"
 IDEMPOTENT_CFG="$(cat "$EXIST_CFG")"
 WARP_OUT_COUNT="$(echo "$IDEMPOTENT_CFG" | grep -o '"tag": "warp-out"' | wc -l)"
 t_equals "幂等性: warp-out 出站唯一存在" "$WARP_OUT_COUNT" "1"
@@ -432,3 +432,13 @@ t_not_contains "日常 Google 搜索绝不被劫持进 WARP" "$ENHANCED_CFG" '"d
 t_not_contains "日常 YouTube 流量绝不被劫持进 WARP" "$ENHANCED_CFG" '"domain:youtube.com"'
 t_not_contains "日常 GitHub 流量绝不被劫持进 WARP" "$ENHANCED_CFG" '"domain:github.com"'
 t_not_contains "绝不劫持全局 0.0.0.0/0 防止整机断网" "$ENHANCED_CFG" '"0.0.0.0/0"'
+
+# 18. 全局清洁出站模式 (global) 专项测试 (默认满足彻底解决脏 IP 诉求)
+t_assert "启用 WARP 全局出站模式成功" xmg_warp_enable "global"
+GLOBAL_CFG="$(cat "$EXIST_CFG")"
+t_contains "全局模式下包含 warp-out 出站" "$GLOBAL_CFG" '"tag": "warp-out"'
+t_contains "全局模式下 warp-out 协议为 socks" "$GLOBAL_CFG" '"protocol": "socks"'
+# 验证 warp-out 是否处于 outbounds 首位 (默认公网出站)
+FIRST_OUTBOUND_TAG="$(echo "$GLOBAL_CFG" | grep -A 2 '"outbounds":' | grep '"tag"' | head -1 | cut -d'"' -f4)"
+t_equals "全局模式下 warp-out 为首位出站 (默认出站)" "$FIRST_OUTBOUND_TAG" "warp-out"
+t_assert "全局模式优雅停用成功" xmg_warp_disable
