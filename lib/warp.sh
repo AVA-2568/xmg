@@ -678,7 +678,7 @@ EOF
     systemctl restart "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
 
     # 运行时深度探活：连续检测本地回路是否真正连通 Cloudflare Anycast 出口
-    local probe_ok=0
+    local probe_ok=0 i=0
     xmg_info "正在检验 WARP 本地 Socks5 回路连通性与握手状态..."
     for i in 1 2 3 4 5 6; do
         if curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp='; then
@@ -694,7 +694,9 @@ EOF
     fi
 
     # 初次端点不通，尝试切换为官方备选端点重试
-    xmg_warn "端点 $endpoint 探活超时，正在尝试备用端点 engage.cloudflareclient.com:2408..."
+    local cur_ep=""
+    cur_ep="$(grep -E '^Endpoint[[:space:]]*=' "$XMG_WARP_WIREPROXY_CONF" 2>/dev/null | cut -d= -f2- | tr -d ' ' || true)"
+    xmg_warn "端点 ${cur_ep:-默认端点} 探活超时，正在尝试备用端点 engage.cloudflareclient.com:2408..."
     sed -i -E 's/Endpoint[[:space:]]*=[[:space:]]*.*/Endpoint = engage.cloudflareclient.com:2408/' "$XMG_WARP_WIREPROXY_CONF" 2>/dev/null || true
     systemctl restart "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
 
