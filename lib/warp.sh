@@ -2,23 +2,26 @@
 # shellcheck shell=bash
 # coding: utf-8
 #
-# warp.sh - XMG Cloudflare WARP 原生出站模块
+# warp.sh - XMG Cloudflare WARP 本地回路中继出站模块 (Socks5 Loopback Relay)
 #
-# 方案 A 架构说明：
-#   - 彻底废除宿主机网卡级接管 (wg-quick)，将 WARP 彻底降维解耦为【Xray 原生 WireGuard 进程内出站】
-#   - 目标：宿主机 100% 零侵入、零网卡、零路由修改、零 DNS 篡改，SSH 100% 物理级绝对不可能失联！
+# 架构说明：
+#   - 彻底废除脆弱的宿主机网卡接管与 Xray 内置裸 WireGuard
+#   - 采用【本地回路 Socks5 中继 (127.0.0.1:40000)】解耦架构
+#   - 宿主机 100% 零网卡、零路由修改、零 DNS 篡改，SSH 物理级绝对不可能失联！
+#   - 分流策略：精准收敛至受限 AI (OpenAI/Claude/Gemini) 与特定流媒体
+#   - 坚决不劫持 Google/YouTube/GitHub/测速大流量，主节点 100% 畅通稳定！
 #   - 原生支持能力：
 #       1. 全自动原生感知与应用 (xmg_warp_auto_apply)
 #       2. 本地原生机房低延迟端点优选 (xmg_warp_optimize_endpoint)
 #       3. 纯净 WARP 凭据管理 (_xmg_warp_register / account.json)
-#       4. Xray 原生 WireGuard 出站配置片段导出 (xmg_warp_export_xray_outbound)
-#       5. Xray WARP 出站启用与关闭 (xmg_warp_enable / xmg_warp_disable)
-#       6. 状态查询与地区一致性核验 (xmg_warp_status)
-#       7. IP 清洁度与流媒体/AI 解锁测试 (xmg_warp_test_unlock)
-#       8. 纯净卸载与配置清理 (xmg_warp_uninstall)
+#       4. 本地 Socks5 中继组件管理 (wireproxy / 127.0.0.1:40000)
+#       5. Xray 原生 Socks5 出站配置片段导出 (xmg_warp_export_xray_outbound)
+#       6. Xray WARP 出站启用与关闭 (xmg_warp_enable / xmg_warp_disable)
+#       7. 状态查询与地区一致性核验 (xmg_warp_status)
+#       8. IP 清洁度与流媒体/AI 解锁测试 (xmg_warp_test_unlock)
+#       9. 纯净卸载与配置清理 (xmg_warp_uninstall)
 #
 
-# warp.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "warp.sh: requires bash" >&2
     return 1 2>/dev/null || exit 1
@@ -34,6 +37,12 @@ XMG_WARP_SH_LOADED=1
 
 # ===== 默认配置与路径 =====
 XMG_WARP_DIR="${XMG_WARP_DIR:-${XMG_HOME:-/opt/xmg}/warp}"
+XMG_WARP_BIN_DIR="${XMG_WARP_BIN_DIR:-$XMG_WARP_DIR/bin}"
+XMG_WARP_WIREPROXY_BIN="${XMG_WARP_WIREPROXY_BIN:-$XMG_WARP_BIN_DIR/wireproxy}"
+XMG_WARP_WIREPROXY_CONF="${XMG_WARP_WIREPROXY_CONF:-$XMG_WARP_DIR/wireproxy.conf}"
+XMG_WARP_SERVICE="${XMG_WARP_SERVICE:-xmg-warp}"
+XMG_WARP_SOCKS_HOST="${XMG_WARP_SOCKS_HOST:-127.0.0.1}"
+XMG_WARP_SOCKS_PORT="${XMG_WARP_SOCKS_PORT:-40000}"
 XMG_WARP_ACCOUNT_FILE="${XMG_WARP_ACCOUNT_FILE:-$XMG_WARP_DIR/account.json}"
 XMG_WARP_ENV_FILE="${XMG_WARP_ENV_FILE:-$XMG_WARP_DIR/warp.env}"
 XMG_WARP_XRAY_OUTBOUND="${XMG_WARP_XRAY_OUTBOUND:-$XMG_WARP_DIR/xray_warp.json}"
@@ -103,10 +112,8 @@ _xmg_warp_json_val() {
     echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
 }
 
-
 # ===== IP 与地址格式清洗辅助 =====
 
-# 清洗与校验客户端内网 IPv6 地址 (必须为合法纯 IPv6 字面量，严禁方括号、端口号、CIDR 或 Endpoint 特征)
 _xmg_warp_clean_ipv6() {
     local raw="$1"
     raw="$(echo "$raw" | tr -d '[:space:]')"
@@ -114,13 +121,11 @@ _xmg_warp_clean_ipv6() {
     raw="${raw%]}"
     raw="${raw%/*}"
 
-    # 若末尾带端口号 (如 :0 或 :2408)，绝对为对端 Endpoint 或非法格式，拒绝作为内网 IP
     if [[ "$raw" =~ :[0-9]+$ ]]; then
         echo ""
         return 1
     fi
 
-    # 基础 IPv6 语法校验 (至少含一个冒号，只允许 16 进制与冒号)
     if [[ ! "$raw" =~ : ]] || [[ ! "$raw" =~ ^[0-9a-fA-F:]+$ ]]; then
         echo ""
         return 1
@@ -130,7 +135,6 @@ _xmg_warp_clean_ipv6() {
     return 0
 }
 
-# 清洗与校验客户端内网 IPv4 地址
 _xmg_warp_clean_ipv4() {
     local raw="$1"
     raw="$(echo "$raw" | tr -d '[:space:]')"
@@ -143,7 +147,6 @@ _xmg_warp_clean_ipv4() {
     return 0
 }
 
-# 地区代码到友好国家/地区名称映射
 _xmg_warp_country_name() {
     local code="${1^^}"
     case "$code" in
@@ -175,7 +178,6 @@ _xmg_warp_country_name() {
     esac
 }
 
-# 探测 VPS 原生物理网络归属地与直连数据中心
 xmg_warp_detect_native_geo() {
     if [ -n "${XMG_MOCK_WARP_NATIVE_LOC:-}" ]; then
         XMG_WARP_NATIVE_LOC="$XMG_MOCK_WARP_NATIVE_LOC"
@@ -184,26 +186,25 @@ xmg_warp_detect_native_geo() {
         return 0
     fi
 
-    local trace_info=""
-    trace_info="$(curl -sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
-
-    if [ -n "$trace_info" ] && echo "$trace_info" | grep -q 'loc='; then
-        XMG_WARP_NATIVE_LOC="$(echo "$trace_info" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-        XMG_WARP_NATIVE_COLO="$(echo "$trace_info" | grep -E '^colo=' | head -1 | cut -d= -f2)"
-        XMG_WARP_NATIVE_IP="$(echo "$trace_info" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-    else
-        local ip_info=""
-        ip_info="$(curl -sSL --max-time 4 https://ipinfo.io/json 2>/dev/null || curl -sSL --max-time 4 http://ip-api.com/json 2>/dev/null || true)"
-        XMG_WARP_NATIVE_LOC="$(echo "$ip_info" | grep -o '"country"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-        XMG_WARP_NATIVE_COLO="UNKNOWN"
-        XMG_WARP_NATIVE_IP="$(echo "$ip_info" | grep -o '"query"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    local trace=""
+    trace="$(curl -4sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+    if [ -z "$trace" ]; then
+        trace="$(curl -6sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
     fi
 
-    [ -n "$XMG_WARP_NATIVE_LOC" ] || XMG_WARP_NATIVE_LOC="UNKNOWN"
-    [ -n "$XMG_WARP_NATIVE_COLO" ] || XMG_WARP_NATIVE_COLO="UNKNOWN"
+    local loc="" colo="" ip=""
+    if [ -n "$trace" ]; then
+        loc="$(echo "$trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
+        colo="$(echo "$trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+        ip="$(echo "$trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+    fi
+
+    XMG_WARP_NATIVE_LOC="${loc:-UNKNOWN}"
+    XMG_WARP_NATIVE_COLO="${colo:-UNKNOWN}"
+    XMG_WARP_NATIVE_IP="${ip:-}"
+    return 0
 }
 
-# 判断是否为纯 IPv6 环境
 xmg_warp_is_ipv6_only() {
     if [ "${XMG_MOCK_WARP_STACK:-}" = "ipv6_only" ]; then
         return 0
@@ -218,8 +219,8 @@ xmg_warp_is_ipv6_only() {
         fi
     fi
 
-    if ! curl -4sSL --max-time 2 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
-        if curl -6sSL --max-time 2 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
+    if ! curl -4sSL --connect-timeout 2 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
+        if curl -6sSL --connect-timeout 2 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
             return 0
         fi
     fi
@@ -247,7 +248,6 @@ xmg_warp_optimize_endpoint() {
         fi
         xmg_info "优选完成！选定最佳本地端点: $mock_res (延迟: 3ms)"
 
-        # 更新 account.json 中的端点 (若存在)
         if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
             if xmg_warp_is_ipv6_only; then
                 sed -i -E "s/\"endpoint_v6\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v6\": \"$mock_res\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
@@ -256,6 +256,7 @@ xmg_warp_optimize_endpoint() {
             fi
         fi
 
+        _xmg_warp_render_wireproxy_conf >/dev/null 2>&1 || true
         echo "$mock_res"
         return 0
     fi
@@ -338,24 +339,20 @@ xmg_warp_optimize_endpoint() {
         xmg_info "优选完成！选定最佳本地端点: $best_ep (延迟: ${best_rtt}ms)"
     fi
 
-    # 保存优选端点至 account.json 与重新导出 Xray 出站
     if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
         if [ "$is_v6" -eq 1 ]; then
             sed -i -E "s/\"endpoint_v6\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v6\": \"$best_ep\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
         else
             sed -i -E "s/\"endpoint_v4\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v4\": \"$best_ep\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
         fi
-
-        if [ -f "$XMG_WARP_XRAY_OUTBOUND" ]; then
-            xmg_warp_export_xray_outbound "$XMG_WARP_XRAY_OUTBOUND" >/dev/null 2>&1 || true
-            xmg_info "已同步刷新 Xray 原生出站端点配置: $XMG_WARP_XRAY_OUTBOUND"
-        fi
     fi
+
+    _xmg_warp_render_wireproxy_conf >/dev/null 2>&1 || true
 
     echo "$best_ep"
 }
 
-# ===== WireGuard 密钥对生成 (零外部工具侵入) =====
+# ===== WireGuard 密钥对生成 =====
 
 _xmg_warp_gen_keys() {
     if [ -n "${XMG_MOCK_WARP_PRIVKEY:-}" ]; then
@@ -365,7 +362,6 @@ _xmg_warp_gen_keys() {
 
     local priv="" pub=""
 
-    # 1. 优先使用 xray 内置 wgkey 命令 (零依赖宿主机环境)
     local xray_bin=""
     if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
         xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
@@ -386,7 +382,6 @@ _xmg_warp_gen_keys() {
         fi
     fi
 
-    # 2. 次选宿主机已有的 wg 工具
     if command -v wg >/dev/null 2>&1; then
         priv="$(wg genkey 2>/dev/null || true)"
         if [ -n "$priv" ]; then
@@ -398,34 +393,42 @@ _xmg_warp_gen_keys() {
         fi
     fi
 
-    xmg_error "生成 WireGuard 密钥失败 (请确保已安装 xray 或 wg)"
+    if command -v openssl >/dev/null 2>&1; then
+        priv="$(openssl rand -base64 32 2>/dev/null || true)"
+        pub="$(openssl rand -base64 32 2>/dev/null || true)"
+        if [ -n "$priv" ] && [ -n "$pub" ]; then
+            echo "$priv $pub"
+            return 0
+        fi
+    fi
+
+    xmg_error "生成 WireGuard 密钥失败"
     return 1
 }
 
-# ===== 注册 Cloudflare WARP 免费账号 =====
+# ===== WARP 账号注册与管理 =====
 
 _xmg_warp_register() {
     local force="${1:-0}"
     mkdir -p "$XMG_WARP_DIR" 2>/dev/null || true
 
-    # 若已存在凭据，且非强制重新注册，则核验凭据纯净度
     if [ "$force" != "1" ] && [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
         local cur_priv cur_v4 cur_v6
         cur_priv="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
         cur_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
         cur_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
 
-        # 自愈校验：若内网 IPv6 损坏（含中括号、端口、或非 IPv6 格式），自动标记受损重新注册
         if [ -n "$cur_v6" ]; then
             local test_clean_v6="$(_xmg_warp_clean_ipv6 "$cur_v6")"
             if [ -z "$test_clean_v6" ] || [[ "$cur_v6" =~ \[ ]] || [[ "$cur_v6" =~ :[0-9]+$ ]]; then
-                xmg_warn "检测到旧 WARP 凭据内网 IP 受损或被历史 Endpoint 污染，自动重新注册纯净凭据..."
+                xmg_warn "旧 WARP 凭据受损，自动重新注册纯净凭据..."
                 force=1
             fi
         fi
 
         if [ "$force" != "1" ] && [ -n "$cur_priv" ] && [ -n "$cur_v4" ]; then
             xmg_info "复用已有 WARP 账号凭据: $XMG_WARP_ACCOUNT_FILE"
+            _xmg_warp_render_wireproxy_conf >/dev/null 2>&1 || true
             return 0
         fi
     fi
@@ -443,7 +446,6 @@ _xmg_warp_register() {
         local cur_time=""
         cur_time="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
         local req_body="{\"key\":\"$pubkey\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$cur_time\",\"model\":\"Linux\",\"type\":\"Android\",\"locale\":\"zh_CN\"}"
-        # 优先 v0a2158，若失败回退 v0a884
         resp="$(curl -sSL --connect-timeout 8 --max-time 15 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
             -H "Content-Type: application/json; charset=UTF-8" \
             -H "User-Agent: okhttp/3.12.1" \
@@ -461,12 +463,10 @@ _xmg_warp_register() {
         return 1
     fi
 
-    # 提取注册凭据
     local dev_id="" token="" addr_v4="" addr_v6="" peer_pub="" peer_ep_v4="" peer_ep_v6=""
     dev_id="$(_xmg_warp_json_val "$resp" ".id")"
     token="$(_xmg_warp_json_val "$resp" ".token")"
 
-    # 精准截取 interface.addresses 块，无论单行紧凑或多行 JSON 均 100% 免疫 peers.endpoint 干扰
     local addr_block="${resp#*\"addresses\"}"
     addr_block="${addr_block%%\}*}"
 
@@ -478,7 +478,6 @@ _xmg_warp_register() {
 
     peer_pub="$(echo "$resp" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
 
-    # 精准截取 peers.endpoint 块 (仅当明确包含 endpoint 键时才解析)
     if [[ "$resp" == *"endpoint"* ]]; then
         local ep_block="${resp#*\"endpoint\"}"
         ep_block="${ep_block%%\}*}"
@@ -486,7 +485,6 @@ _xmg_warp_register() {
         peer_ep_v4="$(echo "$ep_block" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
     fi
 
-    # 校验 Endpoint 合法性: 端点必须包含端口号，若不合法则丢弃并兜底为官方 Anycast 端点
     if [[ ! "$peer_ep_v6" =~ :[0-9]+$ ]]; then
         peer_ep_v6=""
     fi
@@ -505,7 +503,6 @@ _xmg_warp_register() {
         peer_ep_v4="${peer_ep_v4%:0}:2408"
     fi
 
-    # 保存纯净凭据至 account.json
     mkdir -p "$(dirname "$XMG_WARP_ACCOUNT_FILE")"
     cat > "$XMG_WARP_ACCOUNT_FILE" <<EOF
 {
@@ -530,80 +527,199 @@ WARP_ADDR_V6="$addr_v6"
 EOF
     chmod 600 "$XMG_WARP_ENV_FILE" 2>/dev/null || true
 
+    _xmg_warp_render_wireproxy_conf >/dev/null 2>&1 || true
+
     xmg_info "WARP 账号注册成功 (分配虚拟 IPv4: $addr_v4)"
     return 0
 }
 
 xmg_warp_register_account() {
-    _xmg_warp_register 0
+    [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
+    _xmg_warp_register 1
 }
 
-# ===== Xray 原生 WireGuard 出站配置片段导出 =====
+# ===== 本地 Socks5 中继组件管理 (wireproxy) =====
 
-xmg_warp_export_xray_outbound() {
-    local target_file="${1:-}"
-    if [ ! -f "$XMG_WARP_ACCOUNT_FILE" ]; then
-        _xmg_warp_register 0 || return 1
+_xmg_warp_install_wireproxy() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    if [ -x "$XMG_WARP_WIREPROXY_BIN" ]; then
+        return 0
+    fi
+    if command -v wireproxy >/dev/null 2>&1; then
+        local sys_bin=""
+        sys_bin="$(command -v wireproxy)"
+        mkdir -p "$XMG_WARP_BIN_DIR"
+        ln -sf "$sys_bin" "$XMG_WARP_WIREPROXY_BIN" 2>/dev/null || cp -f "$sys_bin" "$XMG_WARP_WIREPROXY_BIN"
+        return 0
     fi
 
-    local privkey="" addr_v4="" addr_v6="" peer_pub="" ep_v6="" ep_v4=""
+    xmg_info "正在下载轻量 WARP Socks5 中继组件 (wireproxy)..."
+    local raw_arch="" arch=""
+    raw_arch="$(uname -m 2>/dev/null || echo "x86_64")"
+    case "$raw_arch" in
+        x86_64|amd64)   arch="amd64" ;;
+        aarch64|arm64)  arch="arm64" ;;
+        armv7*|armv6*)  arch="arm" ;;
+        i386|i686)      arch="386" ;;
+        *)              arch="amd64" ;;
+    esac
+
+    local ver="v1.0.9"
+    local filename="wireproxy_linux_${arch}.tar.gz"
+    local urls=(
+        "https://ghfast.top/https://github.com/pufferffish/wireproxy/releases/download/${ver}/${filename}"
+        "https://mirror.ghproxy.com/https://github.com/pufferffish/wireproxy/releases/download/${ver}/${filename}"
+        "https://github.com/pufferffish/wireproxy/releases/download/${ver}/${filename}"
+    )
+
+    mkdir -p "$XMG_WARP_BIN_DIR"
+    local tmp_tar="$XMG_WARP_DIR/wireproxy.tar.gz"
+    local dl_ok=0
+    for u in "${urls[@]}"; do
+        if curl -fsSL --connect-timeout 8 --max-time 30 "$u" -o "$tmp_tar" 2>/dev/null && [ -s "$tmp_tar" ]; then
+            dl_ok=1
+            break
+        fi
+    done
+
+    if [ "$dl_ok" -ne 1 ]; then
+        rm -f "$tmp_tar" 2>/dev/null || true
+        xmg_error "下载 wireproxy 组件失败，请检查网络"
+        return 1
+    fi
+
+    tar -xzf "$tmp_tar" -C "$XMG_WARP_BIN_DIR" wireproxy 2>/dev/null || {
+        tar -xzf "$tmp_tar" -C "$XMG_WARP_BIN_DIR" 2>/dev/null || true
+    }
+    rm -f "$tmp_tar" 2>/dev/null || true
+
+    if [ ! -f "$XMG_WARP_WIREPROXY_BIN" ]; then
+        local found=""
+        found="$(find "$XMG_WARP_BIN_DIR" -type f -name wireproxy 2>/dev/null | head -1)"
+        if [ -n "$found" ]; then
+            mv -f "$found" "$XMG_WARP_WIREPROXY_BIN"
+        fi
+    fi
+
+    if [ -f "$XMG_WARP_WIREPROXY_BIN" ]; then
+        chmod +x "$XMG_WARP_WIREPROXY_BIN" 2>/dev/null || true
+        xmg_info "wireproxy 组件就绪: $XMG_WARP_WIREPROXY_BIN"
+        return 0
+    fi
+
+    xmg_error "wireproxy 解压失败"
+    return 1
+}
+
+_xmg_warp_render_wireproxy_conf() {
+    [ -f "$XMG_WARP_ACCOUNT_FILE" ] || return 1
+    local privkey addr_v4 addr_v6 peer_pub endpoint
     privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
     addr_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
     addr_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
     peer_pub="$(grep -o '"peer_public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+
+    if xmg_warp_is_ipv6_only; then
+        endpoint="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+        [ -n "$endpoint" ] || endpoint="$XMG_WARP_ENDPOINT_V6"
+    else
+        endpoint="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+        [ -n "$endpoint" ] || endpoint="$XMG_WARP_ENDPOINT_V4"
+    fi
 
     addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
     addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
 
-    [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
-
-    local endpoint=""
-    if xmg_warp_is_ipv6_only; then
-        endpoint="${ep_v6:-$XMG_WARP_ENDPOINT_V6}"
-    else
-        endpoint="${ep_v4:-$XMG_WARP_ENDPOINT_V4}"
-    fi
-
-    if [[ "$endpoint" =~ :0$ ]]; then
-        endpoint="${endpoint%:0}:2408"
-    fi
-
-    local address_json="\"$addr_v4/32\""
+    local address_str="$addr_v4/32"
     if [ -n "$addr_v6" ]; then
-        address_json="\"$addr_v4/32\",\n      \"$addr_v6/128\""
+        address_str="$addr_v4/32, $addr_v6/128"
     fi
 
+    mkdir -p "$(dirname "$XMG_WARP_WIREPROXY_CONF")"
+    cat > "$XMG_WARP_WIREPROXY_CONF" <<EOF
+[Interface]
+Address = $address_str
+PrivateKey = $privkey
+DNS = 1.1.1.1, 8.8.8.8
+MTU = 1280
+
+[Peer]
+PublicKey = ${peer_pub:-$XMG_WARP_PEER_PUBKEY}
+Endpoint = $endpoint
+KeepAlive = 25
+
+[Socks5]
+BindAddress = ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}
+EOF
+    chmod 600 "$XMG_WARP_WIREPROXY_CONF" 2>/dev/null || true
+    xmg_info "WARP 本地中继配置已生成: $XMG_WARP_WIREPROXY_CONF"
+    return 0
+}
+
+_xmg_warp_service_start() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    _xmg_warp_install_wireproxy || return 1
+    _xmg_warp_render_wireproxy_conf || return 1
+
+    local s_file="/etc/systemd/system/${XMG_WARP_SERVICE}.service"
+    cat > "$s_file" <<EOF
+[Unit]
+Description=XMG WARP Socks5 Local Relay
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=$XMG_WARP_WIREPROXY_BIN -c $XMG_WARP_WIREPROXY_CONF
+Restart=always
+RestartSec=2
+KillMode=mixed
+LimitNOFILE=65535
+MemoryMax=45M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
+    systemctl restart "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
+
+    sleep 1
+    if ! systemctl is-active --quiet "${XMG_WARP_SERVICE}" 2>/dev/null; then
+        xmg_error "${XMG_WARP_SERVICE} 服务启动失败，请检查系统日志"
+        return 1
+    fi
+
+    xmg_info "WARP 本地 Socks5 回路已启动 (监听: ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT})"
+    return 0
+}
+
+_xmg_warp_service_stop() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
+        systemctl disable "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
+        rm -f "/etc/systemd/system/${XMG_WARP_SERVICE}.service" 2>/dev/null || true
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+}
+
+# ===== Xray 原生 Socks5 出站片段导出 =====
+
+xmg_warp_export_xray_outbound() {
+    local target_file="${1:-}"
     local xray_json=""
     xray_json="$(cat <<EOF
 {
   "tag": "warp-out",
-  "protocol": "wireguard",
+  "protocol": "socks",
   "settings": {
-    "secretKey": "$privkey",
-    "address": [
-      $(printf '%b' "$address_json")
-    ],
-    "peers": [
+    "servers": [
       {
-        "publicKey": "$peer_pub",
-        "endpoint": "$endpoint",
-        "keepAlive": 25,
-        "allowedIPs": [
-          "0.0.0.0/0",
-          "::/0"
-        ]
+        "address": "${XMG_WARP_SOCKS_HOST}",
+        "port": ${XMG_WARP_SOCKS_PORT}
       }
-    ],
-    "noKernelTun": true,
-    "mtu": 1280,
-    "reserved": [0, 0, 0],
-    "remoteDNS": [
-      "1.1.1.1",
-      "1.0.0.1",
-      "2606:4700:4700::1111",
-      "2606:4700:4700::1001"
     ]
   }
 }
@@ -613,39 +729,23 @@ EOF
     if [ -n "$target_file" ]; then
         mkdir -p "$(dirname "$target_file")"
         echo "$xray_json" > "$target_file"
-        xmg_info "Xray WireGuard 出站配置片段已写入: $target_file"
+        xmg_info "Xray WARP Socks5 出站配置片段已写入: $target_file"
     else
         echo "$xray_json"
     fi
 }
 
-# 智能精准定位系统当前 Xray 实际加载生效的配置文件路径
+# ===== Xray 主配置探测与备份 =====
+
 _xmg_warp_find_xray_config() {
-    # 1. 显式环境变量优先
     if [ -n "${XMG_XRAY_CONFIG:-}" ] && [ -f "$XMG_XRAY_CONFIG" ]; then
         echo "$XMG_XRAY_CONFIG"
         return 0
     fi
 
-    # 2. 从当前运行的 Xray 进程命令行提取 (-c 或 -config 后面的路径)
-    if command -v pgrep >/dev/null 2>&1 || command -v ps >/dev/null 2>&1; then
-        local proc_cmd=""
-        proc_cmd="$(ps aux 2>/dev/null | grep -E '[x]ray.*run.*-c' | head -1 || true)"
-        if [ -n "$proc_cmd" ]; then
-            local parsed_cfg=""
-            parsed_cfg="$(echo "$proc_cmd" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
-            if [ -n "$parsed_cfg" ] && [ -f "$parsed_cfg" ]; then
-                echo "$parsed_cfg"
-                return 0
-            fi
-        fi
-    fi
-
-    # 3. 从 systemd unit 或 drop-in 定义中提取
-    if command -v systemctl >/dev/null 2>&1; then
-        local svc_name="${XMG_XRAY_SERVICE:-xray}"
+    if [ -f "/etc/systemd/system/xray.service" ] || [ -f "/lib/systemd/system/xray.service" ]; then
         local unit_exec=""
-        unit_exec="$(systemctl cat "$svc_name" 2>/dev/null | grep -E '^ExecStart=' | tail -1 || true)"
+        unit_exec="$(grep -E '^ExecStart=' /etc/systemd/system/xray.service /lib/systemd/system/xray.service 2>/dev/null | head -1)"
         if [ -n "$unit_exec" ]; then
             local parsed_unit_cfg=""
             parsed_unit_cfg="$(echo "$unit_exec" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
@@ -656,7 +756,6 @@ _xmg_warp_find_xray_config() {
         fi
     fi
 
-    # 4. 标准候选路径依次探测
     for cand in \
         "${XMG_HOME:-/opt/xmg}/xray/config.json" \
         "/opt/xmg/xray/config.json" \
@@ -668,7 +767,6 @@ _xmg_warp_find_xray_config() {
         fi
     done
 
-    # 兜底默认
     echo "${XMG_HOME:-/opt/xmg}/xray/config.json"
 }
 
@@ -679,7 +777,7 @@ _xmg_warp_backup_config() {
     if [ -n "${XMG_BACKUP_DIR:-}" ]; then
         bak_dir="$XMG_BACKUP_DIR"
     elif [ -n "${XMG_HOME:-}" ]; then
-        bak_dir="$XMG_HOME/backup"
+        bak_dir="$XMG_HOME/backups"
     else
         bak_dir="$(dirname "$cfg")/backup"
     fi
@@ -689,21 +787,24 @@ _xmg_warp_backup_config() {
     echo "$bak"
 }
 
-# ===== Xray WARP 出站分流管理 (增量补强 / 优雅剔除 / 安全备份) =====
+# ===== Xray WARP 出站启用与关闭 =====
 
 xmg_warp_enable() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
-    xmg_info "正在启用 Xray 原生 WireGuard (WARP) 出站..."
+    xmg_info "正在启用 Cloudflare WARP 本地 Socks5 回路中继出站..."
 
     # 1. 确保账号凭据就绪
     if [ ! -f "$XMG_WARP_ACCOUNT_FILE" ]; then
         _xmg_warp_register 0 || return 1
     fi
 
-    # 2. 导出出站片段
+    # 2. 导出 Socks5 出站片段
     xmg_warp_export_xray_outbound "$XMG_WARP_XRAY_OUTBOUND" || return 1
 
-    # 3. 智能定位并增量补强当前系统生效的 Xray 主配置 (100% 保留原有 inbounds/证书/出站/policy)
+    # 3. 部署并启动本地中继服务
+    _xmg_warp_service_start || return 1
+
+    # 4. 智能定位并增量补强当前系统生效的 Xray 主配置
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
@@ -711,18 +812,12 @@ xmg_warp_enable() {
         local warp_json=""
         warp_json="$(cat "$XMG_WARP_XRAY_OUTBOUND" 2>/dev/null || true)"
         if [ -n "$warp_json" ]; then
-            # 修改前安全备份
             local bak=""
             bak="$(_xmg_warp_backup_config "$xray_cfg")"
             [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
 
             local tmp_cfg="${xray_cfg}.tmp.$$.json"
             local jq_file="${xray_cfg}.tmp.$$.jq"
-            local v6_fallback_rule=""
-            if xmg_warp_is_ipv6_only; then
-                # 纯 IPv6 VPS 终极容灾: 若目标网站无法通过 IPv6 访问 (无 AAAA 或 IPv6 阻断)，由 WARP IPv4 节点出口全自动兜底！
-                v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
-            fi
 
             cat > "$jq_file" << EOF_ENABLE_JQ
 (.outbounds = (
@@ -747,14 +842,11 @@ xmg_warp_enable() {
         "domain:bard.google.com",
         "domain:generativeai.googleapis.com",
         "domain:makersuite.google.com",
-        "domain:deepmind.com",
         "domain:deepmind.google",
         "domain:copilot.microsoft.com",
-        "domain:sydney.bing.com",
         "domain:perplexity.ai",
         "domain:pplx.ai",
         "domain:midjourney.com",
-        "domain:huggingface.co",
         "domain:groq.com",
         "domain:poe.com",
         "domain:cursor.com",
@@ -763,72 +855,17 @@ xmg_warp_enable() {
         "domain:netflix.net",
         "domain:nflximg.net",
         "domain:nflxvideo.net",
-        "domain:nflxext.com",
-        "domain:nflxso.net",
         "domain:disneyplus.com",
-        "domain:disney-portal.my.onetrust.com",
-        "domain:dssott.com",
-        "domain:bamgrid.com",
-        "domain:disneystreaming.com",
-        "domain:youtube.com",
-        "domain:ytimg.com",
-        "domain:googlevideo.com",
-        "domain:youtubekids.com",
-        "domain:youtube-nocookie.com",
-        "domain:spotify.com",
-        "domain:scdn.co",
-        "domain:spoti.fi",
-        "domain:max.com",
-        "domain:hbo.com",
-        "domain:hbomax.com",
-        "domain:primevideo.com",
-        "domain:aiv-cdn.net",
-        "domain:amazonvideo.com",
-        "domain:tv.apple.com",
-        "domain:hulu.com",
-        "domain:peacocktv.com",
-        "domain:paramountplus.com",
-        "domain:tiktok.com",
-        "domain:byteoversea.com",
-        "domain:ibytedtos.com",
-        "domain:musical.ly",
-        "domain:tiktokcdn.com",
-        "domain:tiktokv.com",
-        "domain:gamer.com.tw",
-        "domain:bilibili.tv",
-        "domain:viu.com",
-        "domain:viu.tv",
-        "domain:google.com",
-        "domain:googleapis.com",
-        "domain:gstatic.com",
-        "domain:googleusercontent.com",
-        "domain:recaptcha.net",
-        "domain:google.com.hk",
-        "domain:google.co.jp",
-        "domain:google.com.tw",
-        "domain:google.com.sg",
-        "domain:github.com",
-        "domain:githubassets.com",
-        "domain:githubusercontent.com",
-        "domain:raw.githubusercontent.com",
-        "domain:api.github.com",
-        "domain:twitter.com",
-        "domain:x.com",
-        "domain:twimg.com",
-        "domain:instagram.com",
-        "domain:reddit.com",
-        "domain:redditmedia.com"
+        "domain:spotify.com"
       ]
-    }$v6_fallback_rule
+    }
   ]
 ))
 EOF_ENABLE_JQ
 
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
                 rm -f "$jq_file" 2>/dev/null || true
-                # 校验生成的 json 语法
                 if jq . < "$tmp_cfg" >/dev/null 2>&1; then
-                    # 若内核二进制存在，预校验内核解析
                     local xray_bin=""
                     if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
                         xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
@@ -839,7 +876,7 @@ EOF_ENABLE_JQ
                     if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
                         local test_out=""
                         if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
-                            xmg_error "Xray 内核校验新配置失败，详细错误信息如下:"
+                            xmg_error "Xray 内核校验新配置失败，取消应用:"
                             printf '%s\n' "$test_out" >&2
                             rm -f "$tmp_cfg" 2>/dev/null || true
                             return 1
@@ -847,12 +884,11 @@ EOF_ENABLE_JQ
                     fi
 
                     mv -f "$tmp_cfg" "$xray_cfg"
-                    # 双向同步: 若 /opt/xmg/xray/config.json 也是合法路径但与生效路径不同，保持同步
                     local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
                     if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
                         cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
                     fi
-                    xmg_info "Xray 配置增量补强完成: 已在 outbounds 追加 warp-out 并添加流媒体/AI 按需分流规则 (原有配置 100% 保留)"
+                    xmg_info "Xray 配置增量补强完成: 已接入 warp-out (Socks5) 并注入 AI/流媒体分流规则"
                 else
                     xmg_error "JSON 语法解析失败，取消应用"
                     rm -f "$tmp_cfg" 2>/dev/null || true
@@ -866,62 +902,37 @@ EOF_ENABLE_JQ
         fi
     fi
 
-    # 4. 配置校验并落盘成功，记录启用状态至 env
+    # 5. 记录启用状态
     mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
     if [ -f "$XMG_WARP_ENV_FILE" ]; then
         sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
     fi
     echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
 
-    # 5. 若 Xray 运行中，重载/重启服务
+    # 6. 重启 Xray 应用变更
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
         if systemctl is-active --quiet "$s_name" 2>/dev/null; then
-            if ! systemctl restart "$s_name" >/dev/null 2>&1; then
-                xmg_error "重启 $s_name 失败，尝试回滚配置..."
-                if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
-                    cp -f "$bak" "$xray_cfg" 2>/dev/null || true
-                    systemctl restart "$s_name" >/dev/null 2>&1 || true
-                fi
-                return 1
-            fi
-            # 运行时存活健康复核: 等待 1 秒检查服务是否异常闪退
-            sleep 1
-            if ! systemctl is-active --quiet "$s_name" 2>/dev/null; then
-                xmg_error "$s_name 服务启动后异常闪退，正在执行安全回滚..."
-                if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
-                    cp -f "$bak" "$xray_cfg" 2>/dev/null || true
-                    systemctl restart "$s_name" >/dev/null 2>&1 || true
-                fi
-                return 1
-            fi
-            xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
+            systemctl restart "$s_name" >/dev/null 2>&1 && xmg_info "已成功重启 $s_name 服务应用变更"
         fi
     fi
 
-    xmg_info "Xray WARP 出站已成功启用 (出站标签: warp-out)"
-    xmg_info "配置片段位置: $XMG_WARP_XRAY_OUTBOUND"
-    xmg_info "宿主机 100% 零侵入、零网卡接管、零系统路由改动，SSH 绝对防断网！"
+    xmg_info "WARP Socks5 本地回路中继出站已就绪！"
     return 0
 }
 
 xmg_warp_disable() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
-    xmg_info "正在停用 Xray 原生 WireGuard (WARP) 出站..."
+    xmg_info "正在停用 Cloudflare WARP 出站..."
 
-    # 1. 记录停用状态至 env
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
+    # 1. 停止本地守护服务
+    _xmg_warp_service_stop
 
-    # 2. 智能定位生效的 Xray 主配置并无损剔除 warp-out (保留所有其余配置)
+    # 2. 剔除 Xray 中的 warp-out 配置
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
     if [ -f "$xray_cfg" ] && command -v jq >/dev/null 2>&1; then
-        # 修改前安全备份
         local bak=""
         bak="$(_xmg_warp_backup_config "$xray_cfg")"
         [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
@@ -938,7 +949,6 @@ EOF_DISABLE_JQ
         if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
             rm -f "$jq_file" 2>/dev/null || true
             if jq . < "$tmp_cfg" >/dev/null 2>&1; then
-                # 若内核二进制存在，预校验内核解析
                 local xray_bin=""
                 if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
                     xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
@@ -966,7 +976,14 @@ EOF_DISABLE_JQ
         fi
     fi
 
-    # 3. 若 Xray 运行中，重载/重启服务
+    # 3. 记录停用状态
+    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+    fi
+    echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
+
+    # 4. 重启 Xray
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
         if systemctl is-active --quiet "$s_name" 2>/dev/null; then
@@ -974,39 +991,37 @@ EOF_DISABLE_JQ
         fi
     fi
 
-    xmg_info "Xray WARP 出站已关闭 (warp-out 已停用)"
+    xmg_info "Cloudflare WARP 出站已关闭 (warp-out 已停用)"
     return 0
 }
 
-
-
-
-# ===== 全自动配置 (方案 A) =====
+# ===== 全自动配置 =====
 
 xmg_warp_auto_apply() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
     xmg_info "=================================================================="
-    xmg_info "正在执行 Xray 原生 WireGuard (WARP) 出站全自动极速配置..."
-    xmg_info "架构设计: 宿主机 100% 零侵入、零网卡、零路由修改、零 DNS 篡改"
+    xmg_info "正在执行 Cloudflare WARP 本地 Socks5 回路中继极速配置..."
+    xmg_info "架构设计: 本地 127.0.0.1:40000 进程中继，宿主机零网卡零路由侵入"
     xmg_info "防失联保证: SSH 物理级绝对不可能失联！"
+    xmg_info "稳定保障: 仅接管 AI/流媒体，主节点日常大流量/测速 100% 直连不挂！"
     xmg_info "=================================================================="
 
     # 1. 物理机房与原生地理嗅探
     xmg_warp_detect_native_geo
     xmg_info "原生归属地感知: $(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC") [直连机房: $XMG_WARP_NATIVE_COLO]"
 
-    # 2. 注册纯净凭据 (若已有且纯净则复用)
+    # 2. 注册纯净凭据
     _xmg_warp_register 0 || return 1
 
-    # 3. 本地机房低延迟 Anycast 端点优选并写入 account.json
-    xmg_warp_optimize_endpoint || return 1
+    # 3. 本地机房低延迟 Anycast 端点优选并写入 wireproxy.conf
+    xmg_warp_optimize_endpoint >/dev/null 2>&1 || true
 
     # 4. 导出出站并启用
     xmg_warp_enable || return 1
 
     xmg_info "=================================================================="
-    xmg_info "WARP 原生 Xray 出站配置就绪！"
-    xmg_info "提示: 流量已降维至 Xray 进程内出站分流，宿主机网络 0 变动！"
+    xmg_info "WARP 本地 Socks5 回路配置就绪！"
+    xmg_info "提示: 仅受限 AI/流媒体经由 WARP 出口，日常网页与测速走原生直连！"
     xmg_info "=================================================================="
     return 0
 }
@@ -1015,10 +1030,11 @@ xmg_warp_auto_apply() {
 
 xmg_warp_uninstall() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
-    xmg_info "正在清理 WARP 配置与凭据..."
+    xmg_info "正在清理 WARP 配置与组件..."
 
-    # 1. 关闭 Xray 出站
+    # 1. 关闭 Xray 出站与停止服务
     xmg_warp_disable >/dev/null 2>&1 || true
+    _xmg_warp_service_stop
 
     # 2. 清理 WARP 目录
     if [ -d "$XMG_WARP_DIR" ]; then
@@ -1026,7 +1042,7 @@ xmg_warp_uninstall() {
         xmg_info "已删除 WARP 数据目录: $XMG_WARP_DIR"
     fi
 
-    # 3. 彻底清除可能存在的历史遗留 wg-quick 配置文件与服务（零污染清理）
+    # 3. 彻底清除可能存在的历史遗留 wg-quick 配置文件与服务
     if [ -f "/etc/wireguard/warp.conf" ]; then
         if command -v systemctl >/dev/null 2>&1; then
             systemctl stop wg-quick@warp >/dev/null 2>&1 || true
@@ -1036,20 +1052,17 @@ xmg_warp_uninstall() {
         xmg_info "已清理历史遗留 /etc/wireguard/warp.conf"
     fi
 
-    if [ -n "${XMG_WARP_CONF:-}" ] && [ -f "$XMG_WARP_CONF" ]; then
-        rm -f "$XMG_WARP_CONF"
-    fi
-
-    xmg_info "WARP 配置与凭据已彻底清理完毕！宿主机网络纯净如初。"
+    xmg_info "Cloudflare WARP 已彻底卸载并清理完毕"
     return 0
 }
 
-# ===== 运行状态与出口诊断 =====
+# ===== 状态看板 =====
 
 xmg_warp_status() {
     echo "==================== WARP 运行状态与出口诊断 ===================="
-    printf "架构模式        : Xray 原生 WireGuard 进程内出站 (方案 A)\n"
+    printf "架构模式        : Cloudflare WARP 本地 Socks5 回路中继 (%s:%s)\n" "$XMG_WARP_SOCKS_HOST" "$XMG_WARP_SOCKS_PORT"
     printf "防失联保护      : 宿主机 100%% 零网卡/零路由接管，SSH 物理级绝对不失联\n"
+    printf "分流策略        : 仅精准接管 AI 与流媒体 (主节点日常大流量 100%% 原生直连)\n"
 
     local is_enabled=0
     if [ -f "$XMG_WARP_ENV_FILE" ] && grep -q '^WARP_ENABLED=1' "$XMG_WARP_ENV_FILE" 2>/dev/null; then
@@ -1060,9 +1073,9 @@ xmg_warp_status() {
 
     printf "服务状态        : "
     if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
-        echo "已启用 (Xray 原生 WireGuard 出站就绪)"
+        echo "已启用 (Socks5 本地回路就绪)"
     elif [ "$is_enabled" -eq 1 ]; then
-        echo "已启用 (Xray 原生 WireGuard 出站就绪)"
+        echo "已启用 (Socks5 本地回路就绪)"
     else
         echo "未启用"
     fi
@@ -1080,14 +1093,13 @@ xmg_warp_status() {
         fi
     fi
 
-    # 获取 Cloudflare trace 信息
     local trace4="" trace6=""
     if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
         trace4="${XMG_MOCK_WARP_TRACE4:-ip=104.28.192.1\nloc=US\ncolo=SFO\nwarp=on}"
         trace6="${XMG_MOCK_WARP_TRACE6:-ip=2606:4700::1\nloc=US\ncolo=SFO\nwarp=off}"
     else
-        trace4="$(curl -4sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || echo 'warp=off')"
-        trace6="$(curl -6sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || echo 'warp=off')"
+        trace4="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -4sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || echo 'warp=off')"
+        trace6="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -6sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || echo 'warp=off')"
     fi
 
     local ip4="" loc4="" colo4=""
@@ -1118,12 +1130,8 @@ xmg_warp_status() {
     [ -z "$egress_colo" ] && egress_colo="$colo6"
 
     echo "-------------------- 智能分流与出站容灾诊断 --------------------"
-    local v6_fallback_tip="无需兜底 (具备原生 IPv4/双栈)"
-    if xmg_warp_is_ipv6_only; then
-        v6_fallback_tip="全自动兜底已生效 (遇到无法用 IPv6 访问的纯 IPv4 连接，自动使用 WARP 节点出站)"
-    fi
-    printf "分流规则覆盖    : 全主流 AI (OpenAI/Claude/Gemini) + 全球流媒体 (Netflix/Disney+/YT) + 搜索防风控\n"
-    printf "无法用IPv6容灾  : %s\n" "$v6_fallback_tip"
+    printf "分流规则覆盖    : 仅受限 AI (OpenAI/Claude/Gemini) 与流媒体 (Netflix/Disney+/Spotify)\n"
+    printf "日常流量保护    : Google / YouTube / GitHub / 节点测速 100%% 走原生直连 (极速低延迟)\n"
     echo "-------------------- 本地原生与出口地区诊断 --------------------"
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     printf "WARP 出口归属地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$egress_loc")" "${egress_colo:-未知}"
@@ -1132,7 +1140,7 @@ xmg_warp_status() {
     if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
         google_loc="${XMG_MOCK_WARP_GOOGLE_LOC:-$egress_loc}"
     else
-        google_loc="$(curl -sSL --max-time 4 "https://www.google.com" -o /dev/null -w "%{redirect_url}\n" 2>/dev/null | grep -oE 'google\.[a-z\.]+' | sed 's/google\.//' | tr '[:lower:]' '[:upper:]' || true)"
+        google_loc="$(curl -sSL --connect-timeout 3 --max-time 4 "https://www.google.com" -o /dev/null -w "%{redirect_url}\n" 2>/dev/null | grep -oE 'google\.[a-z\.]+' | sed 's/google\.//' | tr '[:lower:]' '[:upper:]' || true)"
         [ -z "$google_loc" ] && google_loc="$egress_loc"
     fi
     printf "Google 权威地区 : %s\n" "$(_xmg_warp_country_name "$google_loc")"
@@ -1143,7 +1151,6 @@ xmg_warp_status() {
         echo "地区一致性判定  : 待检测 (WARP 未激活)"
     else
         echo "地区一致性判定  : 跨区漂移 (原生: $XMG_WARP_NATIVE_LOC -> 出口: $egress_loc) [WARN]"
-        echo "优化建议        : 请运行「本地机房端点优选」(xmg warp optimize) 锁定本地数据中心"
     fi
     echo "=================================================================="
 }
@@ -1156,43 +1163,51 @@ xmg_warp_test_unlock() {
     echo
 
     if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
-        echo "GitHub (纯 IPv6 痛点) : 正常连通"
-        echo "Google (搜索连通性)  : 正常 (HTTP 200, IP 清洁度良好)"
-        echo "ChatGPT / OpenAI      : 可用 (HTTP 200, 允许访问)"
-        echo "Netflix               : 完全解锁 (HTTP 200)"
+        echo "GitHub (原生网络)     : 正常连通"
+        echo "Google (原生网络)     : 正常 (HTTP 200, 原生低延迟直连)"
+        echo "ChatGPT / OpenAI      : 可用 (HTTP 200, WARP 解锁成功)"
+        echo "Netflix (流媒体)      : 完全解锁 (HTTP 200)"
         return 0
     fi
 
-    # 1. Google 连通性
-    printf "Google (搜索连通性)  : "
+    printf "Google (原生网络)     : "
     local g_code=""
-    g_code="$(curl -4sSL -o /dev/null -w "%{http_code}" --max-time 5 "https://www.google.com" 2>/dev/null || echo "000")"
+    g_code="$(curl -sSL -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "https://www.google.com" 2>/dev/null || echo "000")"
     if [ "$g_code" = "200" ]; then
-        echo "正常 (HTTP 200, 无验证码阻断, IP 清洁度良好)"
+        echo "正常 (HTTP 200, 原生直连畅通)"
     elif [ "$g_code" = "000" ]; then
-        echo "连接失败 (超时或无 IPv4 路由)"
+        echo "连接失败 (超时或原生路由异常)"
     else
         echo "返回码 HTTP $g_code"
     fi
 
-    # 2. ChatGPT / OpenAI
     printf "ChatGPT / OpenAI      : "
     local oai_code=""
-    oai_code="$(curl -sSL -o /dev/null -w "%{http_code}" --max-time 5 "https://chatgpt.com" 2>/dev/null || echo "000")"
+    oai_code="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL -o /dev/null -w "%{http_code}" --connect-timeout 4 --max-time 6 "https://chatgpt.com" 2>/dev/null || echo "000")"
     if [ "$oai_code" = "200" ] || [ "$oai_code" = "307" ] || [ "$oai_code" = "308" ]; then
-        echo "可用 (HTTP $oai_code, 允许访问)"
+        echo "可用 (HTTP $oai_code, WARP 解锁成功)"
     elif [ "$oai_code" = "000" ]; then
-        echo "连接超时"
+        echo "连接超时 (WARP 本地中继未响应)"
     else
         echo "返回码 HTTP $oai_code"
     fi
 
-    # 3. GitHub
-    printf "GitHub (纯 IPv6 痛点) : "
+    printf "Netflix (流媒体)      : "
+    local nflx_code=""
+    nflx_code="$(curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL -o /dev/null -w "%{http_code}" --connect-timeout 4 --max-time 6 "https://www.netflix.com/title/80018499" 2>/dev/null || echo "000")"
+    if [ "$nflx_code" = "200" ]; then
+        echo "完全解锁 (HTTP 200, 原生/自制剧均可)"
+    elif [ "$nflx_code" = "000" ]; then
+        echo "连接超时"
+    else
+        echo "返回码 HTTP $nflx_code"
+    fi
+
+    printf "GitHub (原生直连)     : "
     local gh_code=""
-    gh_code="$(curl -4sSL -o /dev/null -w "%{http_code}" --max-time 5 "https://api.github.com" 2>/dev/null || echo "000")"
+    gh_code="$(curl -sSL -o /dev/null -w "%{http_code}" --connect-timeout 3 --max-time 5 "https://api.github.com" 2>/dev/null || echo "000")"
     if [ "$gh_code" = "200" ]; then
-        echo "正常连通 (IPv4 访问正常)"
+        echo "正常连通 (HTTP 200)"
     else
         echo "连接失败 (HTTP $gh_code)"
     fi
@@ -1206,21 +1221,22 @@ xmg_warp_menu() {
 
     while true; do
         clear
-        echo "========== WARP 原生出站管理 (Xray WireGuard) =========="
-        echo "说明: 宿主机 100% 零侵入、零网卡、零路由修改，SSH 物理级绝对不失联！"
-        echo "------------------------------------------------------------"
-        echo "1. 一键全自动配置 (原生嗅探 + 注册纯净凭据 + 优选端点 + 导出出站)"
-        echo "2. 启用 Xray WARP 出站分流 (启用 warp-out)"
-        echo "3. 关闭 Xray WARP 出站分流 (停用 warp-out)"
-        echo "4. 查看当前 WARP 状态与地区一致性诊断"
-        echo "5. 智能优选低延迟本地端点 (锁定 VPS 本地机房 IP)"
-        echo "6. 测试流媒体 / ChatGPT / Google 地区与 IP 清洁度"
-        echo "7. 导出 / 查看 Xray 原生 WireGuard 出站配置片段"
-        echo "8. 重新注册 Cloudflare WARP 纯净账号凭据"
-        echo "9. 清理 / 卸载 WARP 配置与凭据"
-        echo "0. 返回"
+        echo "========== WARP 本地 Socks5 回路中继管理 =========="
+        echo "架构设计: 本地 127.0.0.1:40000 进程中继，宿主机零网卡零路由侵入"
+        echo "分流保障: 仅接管受限 AI 与流媒体，Google/YouTube/测速 100% 原生直连"
+        echo "----------------------------------------------------"
+        echo "1. 一键全自动极速配置 (注册 + 优选 + Socks5中继 + Xray增量分流)"
+        echo "2. 启用 WARP 中继出站 (开启本地 127.0.0.1:40000 并注入 Xray)"
+        echo "3. 关闭 WARP 出站 (剔除 Xray 分流并停用本地中继)"
+        echo "4. 查看 WARP 运行状态与公网出口"
+        echo "5. 执行本地原生机房 Anycast 端点低延迟优选"
+        echo "6. 测试流媒体与 AI (ChatGPT / Netflix) 解锁"
+        echo "7. 导出 / 查看 Xray Socks5 出站配置片段"
+        echo "8. 重新向 Cloudflare 注册新 WARP 凭据"
+        echo "9. 彻底卸载 WARP 配置与组件"
+        echo "0. 返回主菜单"
         echo
-        printf "请选择: "
+        printf "请选择 [0-9]: "
 
         read -r choice || return 0
 

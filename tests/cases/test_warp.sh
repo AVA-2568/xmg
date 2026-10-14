@@ -99,18 +99,15 @@ xmg_warp_export_xray_outbound "$EXPORT_FILE"
 t_assert "Xray 出站导出文件已创建" test -f "$EXPORT_FILE"
 
 XRAY_JSON="$(cat "$EXPORT_FILE")"
-t_contains "Xray 导出包含 protocol wireguard" "$XRAY_JSON" '"protocol": "wireguard"'
+t_contains "Xray 导出包含 protocol socks" "$XRAY_JSON" '"protocol": "socks"'
 t_contains "Xray 导出包含 tag warp-out" "$XRAY_JSON" '"tag": "warp-out"'
-t_contains "Xray 导出包含 secretKey" "$XRAY_JSON" '"secretKey": "yAn0MockPrivateKeyBase64ForTestOnly12345678="'
-t_contains "Xray 导出包含 peer publicKey" "$XRAY_JSON" '"publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="'
-t_contains "Xray 导出包含 keepAlive" "$XRAY_JSON" '"keepAlive": 25'
-t_contains "Xray 导出包含 mtu 1280" "$XRAY_JSON" '"mtu": 1280'
-t_contains "Xray 导出包含 noKernelTun true (保障 LXC 容器无崩溃运行)" "$XRAY_JSON" '"noKernelTun": true'
-t_contains "Xray 导出包含 remoteDNS" "$XRAY_JSON" '"remoteDNS"'
-t_contains "Xray 导出包含 reserved" "$XRAY_JSON" '"reserved": [0, 0, 0]'
-t_contains "Xray 导出包含 allowedIPs" "$XRAY_JSON" '"allowedIPs"'
-t_contains "纯 IPv6 下 Endpoint 使用 IPv6 端点" "$XRAY_JSON" '"endpoint": "[2606:4700:d0::a29f:c001]:2408"'
-t_contains "纯 IPv6 下包含虚拟 IPv4 地址" "$XRAY_JSON" '"172.16.0.2/32"'
+t_contains "Xray 导出包含 address 127.0.0.1" "$XRAY_JSON" '"address": "127.0.0.1"'
+t_contains "Xray 导出包含端口 40000" "$XRAY_JSON" '"port": 40000'
+t_assert "wireproxy.conf 配置已生成" test -f "$XMG_WARP_WIREPROXY_CONF"
+WP_CONF="$(cat "$XMG_WARP_WIREPROXY_CONF")"
+t_contains "wireproxy.conf 包含 PrivateKey" "$WP_CONF" "yAn0MockPrivateKeyBase64ForTestOnly12345678="
+t_contains "wireproxy.conf 包含 Endpoint" "$WP_CONF" "[2606:4700:d0::a29f:c001]:2408"
+t_contains "wireproxy.conf 包含 Socks5 绑定" "$WP_CONF" "127.0.0.1:40000"
 
 # 方案 A 严格不变量: 宿主机 100% 零侵入，绝不产生 /etc/wireguard/warp.conf
 t_assert "方案 A: 绝不生成宿主机 warp.conf" test ! -f "$XMG_WARP_CONF"
@@ -122,14 +119,15 @@ _xmg_warp_register 1
 EXPORT_DUAL="$XMG_TMP/xray_dual.json"
 xmg_warp_export_xray_outbound "$EXPORT_DUAL"
 XRAY_DUAL_JSON="$(cat "$EXPORT_DUAL")"
-t_contains "双栈下 Endpoint 使用 IPv4 端点" "$XRAY_DUAL_JSON" '"endpoint": "162.159.192.1:2408"'
-t_contains "双栈下包含虚拟 IPv4 地址" "$XRAY_DUAL_JSON" '"172.16.0.2/32"'
-t_assert "方案 A: 双栈下亦绝不生成宿主机 warp.conf" test ! -f "$XMG_WARP_CONF"
+t_contains "双栈下导出 protocol socks" "$XRAY_DUAL_JSON" '"protocol": "socks"'
+WP_DUAL_CONF="$(cat "$XMG_WARP_WIREPROXY_CONF")"
+t_contains "双栈下 wireproxy Endpoint 使用 IPv4 端点" "$WP_DUAL_CONF" "162.159.192.1:2408"
+t_assert "双栈下亦绝不生成宿主机 warp.conf" test ! -f "$XMG_WARP_CONF"
 
 # 5. 控制台输出导出测试（不带文件名参数）
 STDOUT_EXPORT="$(xmg_warp_export_xray_outbound)"
 t_contains "控制台输出包含 tag" "$STDOUT_EXPORT" '"tag": "warp-out"'
-t_contains "控制台输出包含 protocol wireguard" "$STDOUT_EXPORT" '"protocol": "wireguard"'
+t_contains "控制台输出包含 protocol socks" "$STDOUT_EXPORT" '"protocol": "socks"'
 
 # 6. 全自动 auto_apply 与 status
 export XMG_MOCK_WARP_STACK="ipv6_only"
@@ -390,14 +388,14 @@ t_contains "原有 SOCKS 用户密码保留" "$ENHANCED_CFG" "secret123"
 t_contains "原有 direct 出站完整保留" "$ENHANCED_CFG" '"tag": "direct"'
 t_contains "原有 blackhole blocked 出站完整保留" "$ENHANCED_CFG" '"tag": "blocked"'
 t_contains "增量注入 warp-out 出站" "$ENHANCED_CFG" '"tag": "warp-out"'
-t_contains "warp-out 协议为 wireguard" "$ENHANCED_CFG" '"protocol": "wireguard"'
+t_contains "warp-out 协议为 socks" "$ENHANCED_CFG" '"protocol": "socks"'
+t_contains "warp-out 端口为 40000" "$ENHANCED_CFG" '40000'
 
 # 3. 验证 routing rules 增量分流与原有规则保留
 t_contains "原有广告拦截路由规则完整保留" "$ENHANCED_CFG" "geosite:category-ads-all"
 t_contains "增量添加流媒体 OpenAI 分流" "$ENHANCED_CFG" "domain:openai.com"
 t_contains "增量添加流媒体 ChatGPT 分流" "$ENHANCED_CFG" "domain:chatgpt.com"
 t_contains "增量添加流媒体 Netflix 分流" "$ENHANCED_CFG" "domain:netflix.com"
-t_contains "增量添加 Google 分流" "$ENHANCED_CFG" "domain:google.com"
 
 # 4. 验证备份机制: 修改前生成了备份
 BAK_COUNT="$(ls -1 "$XMG_BACKUP_DIR"/*.bak.* 2>/dev/null | wc -l)"
@@ -427,13 +425,10 @@ t_contains "停用后原有广告拦截规则依然完好" "$REVERTED_CFG" "geos
 t_contains "Xray 配置注入包含 Claude" "$ENHANCED_CFG" "claude.ai"
 t_contains "Xray 配置注入包含 Gemini" "$ENHANCED_CFG" "gemini.google.com"
 t_contains "Xray 配置注入包含 Disney+" "$ENHANCED_CFG" "disneyplus.com"
-t_contains "Xray 配置注入包含 YouTube" "$ENHANCED_CFG" "youtube.com"
 t_contains "Xray 配置注入包含 Spotify" "$ENHANCED_CFG" "spotify.com"
-t_contains "Xray 配置注入包含 TikTok" "$ENHANCED_CFG" "tiktok.com"
-t_contains "Xray 配置注入包含 GitHub" "$ENHANCED_CFG" "github.com"
 
-# 17. 纯 IPv6 独占环境下自动追加 0.0.0.0/0 无法用 IPv6 容灾规则验证
-export XMG_MOCK_WARP_STACK="ipv6_only"
-xmg_warp_enable
-CONFIG_V6_FALLBACK="$(cat "$EXIST_CFG")"
-t_contains "纯 IPv6 环境下自动注入 0.0.0.0/0 WARP 出口容灾规则" "$CONFIG_V6_FALLBACK" '"0.0.0.0/0"'
+# 17. 验证日常/测速流量绝不被劫持进 WARP 出口
+t_not_contains "日常 Google 搜索绝不被劫持进 WARP" "$ENHANCED_CFG" '"domain:google.com"'
+t_not_contains "日常 YouTube 流量绝不被劫持进 WARP" "$ENHANCED_CFG" '"domain:youtube.com"'
+t_not_contains "日常 GitHub 流量绝不被劫持进 WARP" "$ENHANCED_CFG" '"domain:github.com"'
+t_not_contains "绝不劫持全局 0.0.0.0/0 防止整机断网" "$ENHANCED_CFG" '"0.0.0.0/0"'
