@@ -418,3 +418,18 @@ t_contains "停用后原有 VLESS 依然完好" "$REVERTED_CFG" '"tag": "inbound
 t_contains "停用后原有 SOCKS 依然完好" "$REVERTED_CFG" '"tag": "inbound-socks"'
 t_contains "停用后原有 direct 出站依然完好" "$REVERTED_CFG" '"tag": "direct"'
 t_contains "停用后原有广告拦截规则依然完好" "$REVERTED_CFG" "geosite:category-ads-all"
+
+# 16. 全主流分流矩阵覆盖验证 (AI 全矩阵 + 主流流媒体 + 搜索防风控)
+t_contains "Xray 配置注入包含 Claude" "$ENHANCED_CFG" "claude.ai"
+t_contains "Xray 配置注入包含 Gemini" "$ENHANCED_CFG" "gemini.google.com"
+t_contains "Xray 配置注入包含 Disney+" "$ENHANCED_CFG" "disneyplus.com"
+t_contains "Xray 配置注入包含 YouTube" "$ENHANCED_CFG" "youtube.com"
+t_contains "Xray 配置注入包含 Spotify" "$ENHANCED_CFG" "spotify.com"
+t_contains "Xray 配置注入包含 TikTok" "$ENHANCED_CFG" "tiktok.com"
+t_contains "Xray 配置注入包含 GitHub" "$ENHANCED_CFG" "github.com"
+
+# 17. 纯 IPv6 独占环境下自动追加 0.0.0.0/0 无法用 IPv6 容灾规则验证
+export XMG_MOCK_WARP_STACK="ipv6_only"
+xmg_warp_enable
+CONFIG_V6_FALLBACK="$(cat "$EXIST_CFG")"
+t_contains "纯 IPv6 环境下自动注入 0.0.0.0/0 WARP 出口容灾规则" "$CONFIG_V6_FALLBACK" '"0.0.0.0/0"'

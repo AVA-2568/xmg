@@ -659,6 +659,12 @@ xmg_warp_enable() {
 
             local tmp_cfg="${xray_cfg}.tmp.$"
             local jq_file="${tmp_cfg}.jq"
+            local v6_fallback_rule=""
+            if xmg_warp_is_ipv6_only; then
+                # 纯 IPv6 VPS 终极容灾: 若目标网站无法通过 IPv6 访问 (无 AAAA 或 IPv6 阻断)，由 WARP IPv4 节点出口全自动兜底！
+                v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
+            fi
+
             cat > "$jq_file" << EOF_ENABLE_JQ
 (.outbounds = (
   [ (.outbounds // [])[] | select(.tag != "warp-out") ] + [ $warp_json ]
@@ -675,15 +681,86 @@ xmg_warp_enable() {
         "domain:chatgpt.com",
         "domain:oaistatic.com",
         "domain:oaiusercontent.com",
+        "domain:sora.com",
+        "domain:anthropic.com",
+        "domain:claude.ai",
+        "domain:gemini.google.com",
+        "domain:bard.google.com",
+        "domain:generativeai.googleapis.com",
+        "domain:makersuite.google.com",
+        "domain:deepmind.com",
+        "domain:deepmind.google",
+        "domain:copilot.microsoft.com",
+        "domain:sydney.bing.com",
+        "domain:perplexity.ai",
+        "domain:pplx.ai",
+        "domain:midjourney.com",
+        "domain:huggingface.co",
+        "domain:groq.com",
+        "domain:poe.com",
+        "domain:cursor.com",
+        "domain:cursor.sh",
         "domain:netflix.com",
         "domain:netflix.net",
         "domain:nflximg.net",
         "domain:nflxvideo.net",
+        "domain:nflxext.com",
+        "domain:nflxso.net",
+        "domain:disneyplus.com",
+        "domain:disney-portal.my.onetrust.com",
+        "domain:dssott.com",
+        "domain:bamgrid.com",
+        "domain:disneystreaming.com",
+        "domain:youtube.com",
+        "domain:ytimg.com",
+        "domain:googlevideo.com",
+        "domain:youtubekids.com",
+        "domain:youtube-nocookie.com",
+        "domain:spotify.com",
+        "domain:scdn.co",
+        "domain:spoti.fi",
+        "domain:max.com",
+        "domain:hbo.com",
+        "domain:hbomax.com",
+        "domain:primevideo.com",
+        "domain:aiv-cdn.net",
+        "domain:amazonvideo.com",
+        "domain:tv.apple.com",
+        "domain:hulu.com",
+        "domain:peacocktv.com",
+        "domain:paramountplus.com",
+        "domain:tiktok.com",
+        "domain:byteoversea.com",
+        "domain:ibytedtos.com",
+        "domain:musical.ly",
+        "domain:tiktokcdn.com",
+        "domain:tiktokv.com",
+        "domain:gamer.com.tw",
+        "domain:bilibili.tv",
+        "domain:viu.com",
+        "domain:viu.tv",
         "domain:google.com",
         "domain:googleapis.com",
-        "domain:gstatic.com"
+        "domain:gstatic.com",
+        "domain:googleusercontent.com",
+        "domain:recaptcha.net",
+        "domain:google.com.hk",
+        "domain:google.co.jp",
+        "domain:google.com.tw",
+        "domain:google.com.sg",
+        "domain:github.com",
+        "domain:githubassets.com",
+        "domain:githubusercontent.com",
+        "domain:raw.githubusercontent.com",
+        "domain:api.github.com",
+        "domain:twitter.com",
+        "domain:x.com",
+        "domain:twimg.com",
+        "domain:instagram.com",
+        "domain:reddit.com",
+        "domain:redditmedia.com"
       ]
-    }
+    }$v6_fallback_rule
   ]
 ))
 EOF_ENABLE_JQ
@@ -937,6 +1014,13 @@ xmg_warp_status() {
     [ -z "$egress_loc" ] && egress_loc="$loc6"
     [ -z "$egress_colo" ] && egress_colo="$colo6"
 
+    echo "-------------------- 智能分流与出站容灾诊断 --------------------"
+    local v6_fallback_tip="无需兜底 (具备原生 IPv4/双栈)"
+    if xmg_warp_is_ipv6_only; then
+        v6_fallback_tip="全自动兜底已生效 (遇到无法用 IPv6 访问的纯 IPv4 连接，自动使用 WARP 节点出站)"
+    fi
+    printf "分流规则覆盖    : 全主流 AI (OpenAI/Claude/Gemini) + 全球流媒体 (Netflix/Disney+/YT) + 搜索防风控\n"
+    printf "无法用IPv6容灾  : %s\n" "$v6_fallback_tip"
     echo "-------------------- 本地原生与出口地区诊断 --------------------"
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     printf "WARP 出口归属地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$egress_loc")" "${egress_colo:-未知}"
