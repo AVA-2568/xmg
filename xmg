@@ -89,7 +89,7 @@ XMG $XMG_VERSION
   xmg core version         查看内核版本
   xmg core status          查看内核状态
   xmg core menu            内核管理菜单
-  xmg warp [apply|status|optimize|test|export|start|stop|restart|uninstall|menu] WARP 网络配置
+  xmg warp [apply|auto|enable|disable|status|optimize|test|export|menu] WARP 原生出站管理
   xmg version         显示版本
   xmg help            显示帮助
 
@@ -166,13 +166,12 @@ xmg_main() {
             source "$XMG_LIB_DIR/warp.sh"
             case "${1:-menu}" in
                 apply|auto) shift; xmg_warp_auto_apply "$@" ;;
+                enable)     shift; xmg_warp_enable "$@" ;;
+                disable)    shift; xmg_warp_disable "$@" ;;
                 status)     shift; xmg_warp_status "$@" ;;
                 optimize)   shift; xmg_warp_optimize_endpoint "$@" ;;
                 test)       shift; xmg_warp_test_unlock "$@" ;;
                 export)     shift; xmg_warp_export_xray_outbound "$@" ;;
-                start)      shift; xmg_warp_start "$@" ;;
-                stop)       shift; xmg_warp_stop "$@" ;;
-                restart)    shift; xmg_warp_restart "$@" ;;
                 uninstall)  shift; xmg_warp_uninstall "$@" ;;
                 menu)       set +e; xmg_warp_menu ;;
                 *)          xmg_error "未知的 warp 子命令: $1"; return 2 ;;
