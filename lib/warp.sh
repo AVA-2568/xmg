@@ -266,10 +266,13 @@ xmg_warp_optimize_endpoint() {
         )
     else
         candidates=(
-            "engage.cloudflareclient.com:2408"
             "162.159.192.1:2408"
             "162.159.193.1:2408"
+            "162.159.192.1:500"
+            "162.159.193.1:500"
+            "162.159.192.1:4500"
             "162.159.195.1:2408"
+            "engage.cloudflareclient.com:2408"
             "188.114.96.1:2408"
             "188.114.97.1:2408"
             "188.114.98.1:2408"
@@ -353,6 +356,7 @@ _xmg_warp_gen_keys() {
 
     local priv="" pub=""
 
+    # 1. 优先通过 Xray 内核生成真实配对的 Curve25519 密钥对 (xray x25519 / xray wg)
     local xray_bin=""
     if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
         xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
@@ -364,15 +368,16 @@ _xmg_warp_gen_keys() {
 
     if [ -n "$xray_bin" ] && [ -x "$xray_bin" ]; then
         local k_out=""
-        k_out="$("$xray_bin" wgkey 2>/dev/null || true)"
-        priv="$(echo "$k_out" | grep -i 'Private key' | cut -d: -f2- | tr -d '[:space:]')"
-        pub="$(echo "$k_out" | grep -i 'Public key' | cut -d: -f2- | tr -d '[:space:]')"
+        k_out="$("$xray_bin" x25519 2>/dev/null || "$xray_bin" wg 2>/dev/null || true)"
+        priv="$(echo "$k_out" | grep -iE 'Private[[:space:]]*Key' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
+        pub="$(echo "$k_out" | grep -iE '(Public[[:space:]]*Key|Password)' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
         if [ -n "$priv" ] && [ -n "$pub" ]; then
             echo "$priv $pub"
             return 0
         fi
     fi
 
+    # 2. 次选系统 wg 工具 (wireguard-tools)
     if command -v wg >/dev/null 2>&1; then
         priv="$(wg genkey 2>/dev/null || true)"
         if [ -n "$priv" ]; then
@@ -384,16 +389,25 @@ _xmg_warp_gen_keys() {
         fi
     fi
 
-    if command -v openssl >/dev/null 2>&1; then
-        priv="$(openssl rand -base64 32 2>/dev/null || true)"
-        pub="$(openssl rand -base64 32 2>/dev/null || true)"
-        if [ -n "$priv" ] && [ -n "$pub" ]; then
-            echo "$priv $pub"
+    # 3. 次选 python3 cryptography 生成合法的 X25519 密钥对
+    if command -v python3 >/dev/null 2>&1; then
+        local py_keys=""
+        py_keys="$(python3 -c '
+import base64
+try:
+    from cryptography.hazmat.primitives.asymmetric import x25519
+    k = x25519.X25519PrivateKey.generate()
+    print(base64.b64encode(k.private_bytes_raw()).decode(), base64.b64encode(k.public_key().public_bytes_raw()).decode())
+except Exception:
+    pass
+' 2>/dev/null || true)"
+        if [ -n "$py_keys" ]; then
+            echo "$py_keys"
             return 0
         fi
     fi
 
-    xmg_error "生成 WireGuard 密钥失败"
+    xmg_error "生成合法的 WireGuard Curve25519 密钥对失败 (请确保已安装 xray 或 wg)"
     return 1
 }
 
@@ -404,15 +418,25 @@ _xmg_warp_register() {
     mkdir -p "$XMG_WARP_DIR" 2>/dev/null || true
 
     if [ "$force" != "1" ] && [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
-        local cur_priv cur_v4 cur_v6
+        local cur_priv cur_pub cur_v4 cur_v6
         cur_priv="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+        cur_pub="$(grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
         cur_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
         cur_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
 
-        if [ -n "$cur_v6" ]; then
-            local test_clean_v6="$(_xmg_warp_clean_ipv6 "$cur_v6")"
-            if [ -z "$test_clean_v6" ] || [[ "$cur_v6" =~ \[ ]] || [[ "$cur_v6" =~ :[0-9]+$ ]]; then
-                xmg_warn "旧 WARP 凭据受损，自动重新注册纯净凭据..."
+        # 校验公私钥匹配性：若 Xray 存在，使用 xray x25519 校验公钥是否真正由私钥派生
+        local xray_bin=""
+        if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+            xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+        elif command -v xray >/dev/null 2>&1; then
+            xray_bin="$(command -v xray)"
+        fi
+
+        if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ -n "$cur_priv" ] && [ -n "$cur_pub" ]; then
+            local test_pub=""
+            test_pub="$("$xray_bin" x25519 -i "$cur_priv" 2>/dev/null | grep -iE '(Public[[:space:]]*Key|Password)' | head -1 | cut -d: -f2- | tr -d '[:space:]' || true)"
+            if [ -n "$test_pub" ] && [ "$test_pub" != "$cur_pub" ]; then
+                xmg_warn "检测到旧 WARP 凭据公钥与私钥不匹配 (历史伪公钥)，正在自动重新向 Cloudflare 注册真实有效凭据..."
                 force=1
             fi
         fi
