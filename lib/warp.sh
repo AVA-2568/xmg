@@ -825,7 +825,17 @@ EOF_ENABLE_JQ
                 fi
                 return 1
             fi
-            xmg_info "已重启 $s_name 服务加载 WARP 出站"
+            # 运行时存活健康复核: 等待 1 秒检查服务是否异常闪退
+            sleep 1
+            if ! systemctl is-active --quiet "$s_name" 2>/dev/null; then
+                xmg_error "$s_name 服务启动后异常闪退，正在执行安全回滚..."
+                if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
+                    cp -f "$bak" "$xray_cfg" 2>/dev/null || true
+                    systemctl restart "$s_name" >/dev/null 2>&1 || true
+                fi
+                return 1
+            fi
+            xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
         fi
     fi
 
