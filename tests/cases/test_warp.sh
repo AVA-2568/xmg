@@ -45,6 +45,7 @@ t_contains "warp 导出所有核心接口" "$_RES_LOAD" "LOAD_OK"
 source "$XMG_LIB_DIR/common.sh"
 source "$XMG_LIB_DIR/detect.sh"
 source "$XMG_LIB_DIR/warp.sh"
+xmg_require_root() { return 0; }
 
 SAMPLE_JSON='{
   "id": "e44d5c6b-7a8b-4c0d-9e1f-2a3b4c5d6e7f",
@@ -155,3 +156,113 @@ t_contains "xmg help 输出包含 warp 子命令" "$CLI_HELP" "xmg warp"
 
 CLI_STATUS="$(XMG_TEST_MODE=1 XMG_WARP_DIR="$XMG_TMP/w2" XMG_WARP_CONF="$XMG_TMP/w2.conf" "$TESTS_DIR/../xmg" warp status)"
 t_contains "xmg warp status 分发正常" "$CLI_STATUS" "WARP 运行状态与出口诊断"
+
+# 9. 压缩单行 JSON 真实 API 响应提取测试 (防 endpoint 覆盖 addresses)
+MINIFIED_API_RESP='{"id":"minified-uuid-123","token":"mini-tok-abc","account":{"account_type":"free"},"config":{"peers":[{"public_key":"peerKeyMinified1234567890abcdef=","endpoint":{"v4":"162.159.192.1:2408","v6":"[2606:4700:d0::a29f:c005]:0","host":"engage.cloudflareclient.com:2408"}}],"interface":{"addresses":{"v4":"172.16.0.2","v6":"2606:4700:110:9999:aaaa:bbbb:cccc:dddd"}}}}'
+
+export XMG_MOCK_WARP_API_RESP="$MINIFIED_API_RESP"
+export XMG_MOCK_WARP_PRIVKEY="mockPrivKeyMinified99999999999999="
+export XMG_MOCK_WARP_PUBKEY="mockPubKeyMinified99999999999999="
+export XMG_MOCK_WARP_STACK="dual_stack"
+
+# 强制重新注册，验证提取
+_xmg_warp_register 1
+_xmg_warp_generate_conf
+
+MINI_CONF="$(cat "$XMG_WARP_CONF")"
+t_contains "单行 JSON 下 interface v6 正确提取" "$MINI_CONF" "Address = 172.16.0.2/32, 2606:4700:110:9999:aaaa:bbbb:cccc:dddd/128"
+t_not_contains "单行 JSON 下 Address 严禁包含中括号" "$MINI_CONF" "[2606:"
+t_not_contains "单行 JSON 下 Address 严禁包含端口号" "$MINI_CONF" ":0/128"
+t_contains "单行 JSON 下 Endpoint 自动修正端口为 2408" "$MINI_CONF" "Endpoint = 162.159.192.1:2408"
+
+# 10. 历史损坏凭据 (被误存为 endpoint 格式) 自动自愈测试
+cat > "$XMG_WARP_ACCOUNT_FILE" <<EOF
+{
+  "device_id": "corrupted-device-id",
+  "token": "corrupted-token",
+  "private_key": "corruptedPrivateKeyBase64==",
+  "public_key": "corruptedPublicKeyBase64==",
+  "address_v4": "172.16.0.2",
+  "address_v6": "[2606:4700:d0::a29f:c005]:0",
+  "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "endpoint_v6": "[2606:4700:d0::a29f:c005]:2408",
+  "endpoint_v4": "162.159.192.1:2408"
+}
+EOF
+
+# 触发非强制注册 (force=0)，必须能识别出 corrupted 并重新注册
+_xmg_warp_register 0
+_xmg_warp_generate_conf
+
+HEALED_CONF="$(cat "$XMG_WARP_CONF")"
+t_not_contains "自愈后 Address 绝不含被污染的 [2606" "$HEALED_CONF" "[2606:4700:d0::a29f:c005]"
+t_contains "自愈后重新获取了纯净凭据" "$HEALED_CONF" "2606:4700:110:9999:aaaa:bbbb:cccc:dddd"
+
+# 11. 清洗函数独立健壮性测试
+CLEAN_V6_NORMAL="$(_xmg_warp_clean_ipv6 "2606:4700:110:8586:139e:b183:8c01:77fa")"
+CLEAN_V6_BRACKET="$(_xmg_warp_clean_ipv6 "[2606:4700:110:8586:139e:b183:8c01:77fa]")"
+CLEAN_V6_PORT="$(_xmg_warp_clean_ipv6 "[2606:4700:d0::a29f:c005]:0")"
+CLEAN_V6_PORT2408="$(_xmg_warp_clean_ipv6 "2606:4700:d0::a29f:c005:2408")"
+CLEAN_V6_CIDR="$(_xmg_warp_clean_ipv6 "2606:4700:110:8586:139e:b183:8c01:77fa/128")"
+CLEAN_V6_INVALID="$(_xmg_warp_clean_ipv6 "not-a-valid-ip")"
+
+t_equals "标准 IPv6 清洗保持原样" "$CLEAN_V6_NORMAL" "2606:4700:110:8586:139e:b183:8c01:77fa"
+t_equals "带方括号的 IPv6 自动剥除括号" "$CLEAN_V6_BRACKET" "2606:4700:110:8586:139e:b183:8c01:77fa"
+t_equals "带 :0 端口的 endpoint 格式被安全丢弃" "$CLEAN_V6_PORT" ""
+t_equals "带 /128 掩码的 IPv6 自动剥除掩码" "$CLEAN_V6_CIDR" "2606:4700:110:8586:139e:b183:8c01:77fa"
+t_equals "非法 IPv6 字符串被安全丢弃" "$CLEAN_V6_INVALID" ""
+
+CLEAN_V4_NORMAL="$(_xmg_warp_clean_ipv4 "172.16.0.2")"
+CLEAN_V4_CIDR="$(_xmg_warp_clean_ipv4 "172.16.0.2/32")"
+CLEAN_V4_PORT="$(_xmg_warp_clean_ipv4 "162.159.192.4:0")"
+
+t_equals "标准 IPv4 清洗保持原样" "$CLEAN_V4_NORMAL" "172.16.0.2"
+t_equals "带 CIDR 掩码的 IPv4 自动剥除掩码" "$CLEAN_V4_CIDR" "172.16.0.2"
+t_equals "带端口的历史错误 IPv4 自动纠偏为 172.16.0.2" "$CLEAN_V4_PORT" "172.16.0.2"
+
+# 12. 原生地理位置探测与友好国家名称测试
+export XMG_MOCK_WARP_NATIVE_LOC="HK"
+export XMG_MOCK_WARP_NATIVE_COLO="HKG"
+export XMG_MOCK_WARP_NATIVE_IP="203.0.113.88"
+xmg_warp_detect_native_geo
+
+t_equals "原生地区代码解析正确" "$XMG_WARP_NATIVE_LOC" "HK"
+t_equals "原生机房代码解析正确" "$XMG_WARP_NATIVE_COLO" "HKG"
+t_equals "原生 IP 解析正确" "$XMG_WARP_NATIVE_IP" "203.0.113.88"
+
+NAME_HK="$(_xmg_warp_country_name "HK")"
+NAME_JP="$(_xmg_warp_country_name "JP")"
+NAME_SG="$(_xmg_warp_country_name "SG")"
+NAME_US="$(_xmg_warp_country_name "US")"
+
+t_equals "HK 映射为中国香港" "$NAME_HK" "中国香港 (HK)"
+t_equals "JP 映射为日本" "$NAME_JP" "日本 (JP)"
+t_equals "SG 映射为新加坡" "$NAME_SG" "新加坡 (SG)"
+t_equals "US 映射为美国" "$NAME_US" "美国 (US)"
+
+# 13. 端点优选 (Optimize Endpoint) 测试
+export XMG_MOCK_WARP_OPTIMIZED_EP="162.159.193.1:2408"
+OPT_RES="$(xmg_warp_optimize_endpoint)"
+t_contains "优选端点返回所选最佳 IP" "$OPT_RES" "162.159.193.1:2408"
+
+# 14. 状态看板包含地区一致性核验与 Google 识别
+export XMG_MOCK_WARP_STACK="ipv6_only"
+export XMG_MOCK_WARP_TRACE4="ip=104.28.192.1
+loc=HK
+colo=HKG
+warp=on"
+export XMG_MOCK_WARP_TRACE6="ip=2606:4700::1
+loc=HK
+colo=HKG
+warp=off"
+export XMG_MOCK_WARP_GOOGLE_LOC="HK"
+
+STATUS_GEO="$(xmg_warp_status)"
+t_contains "status 输出包含 VPS 本地原生地区" "$STATUS_GEO" "VPS 本地原生地区"
+t_contains "status 输出包含 WARP 出口归属地区" "$STATUS_GEO" "WARP 出口归属地区"
+t_contains "status 输出包含 Google 权威地区" "$STATUS_GEO" "Google 权威地区"
+t_contains "status 输出包含 100% 保持本地一致" "$STATUS_GEO" "100% 保持本地一致 (PASS)"
+
+# 15. CLI 分发 optimize 子命令测试
+CLI_OPT="$("$TESTS_DIR/../xmg" warp optimize)"
+t_contains "xmg warp optimize 分发正常" "$CLI_OPT" "优选完成"

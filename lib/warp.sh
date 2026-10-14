@@ -120,6 +120,235 @@ _xmg_warp_json_val() {
     echo "$json" | grep -o "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/'
 }
 
+# ===== IP 与地址格式清洗辅助 =====
+
+# 清洗与校验客户端内网 IPv6 地址 (必须为合法纯 IPv6 字面量，严禁方括号、端口号、CIDR 或 Endpoint 特征)
+_xmg_warp_clean_ipv6() {
+    local raw="$1"
+    raw="$(echo "$raw" | tr -d '[:space:]')"
+    raw="${raw#[}"
+    raw="${raw%]}"
+    raw="${raw%/*}"
+
+    # 若末尾带端口号 (如 :0 或 :2408)，绝对为对端 Endpoint 或非法格式，拒绝作为内网 IP
+    if [[ "$raw" =~ :[0-9]+$ ]]; then
+        echo ""
+        return 1
+    fi
+
+    # 基础 IPv6 语法检查: 仅允许 16 进制字符和冒号，且必须含冒号，严禁三连冒号 :::
+    if [[ ! "$raw" =~ ^[0-9a-fA-F:]+$ ]] || [[ ! "$raw" =~ : ]] || [[ "$raw" =~ ::: ]]; then
+        echo ""
+        return 1
+    fi
+
+    echo "$raw"
+    return 0
+}
+
+# 清洗与校验客户端内网 IPv4 地址 (必须为合法的点分十进制，若异常则安全兜底为 172.16.0.2)
+_xmg_warp_clean_ipv4() {
+    local raw="$1"
+    raw="$(echo "$raw" | tr -d '[:space:]')"
+    raw="${raw%/*}"
+    if [[ ! "$raw" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "172.16.0.2"
+        return 0
+    fi
+    echo "$raw"
+    return 0
+}
+
+# ===== 原生地理位置探测与权威核验辅助 =====
+
+# 国家/地区代码转换为友好展示名
+_xmg_warp_country_name() {
+    local code="${1^^}"
+    case "$code" in
+        HK) echo "中国香港 (HK)" ;;
+        TW) echo "中国台湾 (TW)" ;;
+        JP) echo "日本 (JP)" ;;
+        SG) echo "新加坡 (SG)" ;;
+        US) echo "美国 (US)" ;;
+        KR) echo "韩国 (KR)" ;;
+        GB|UK) echo "英国 (GB)" ;;
+        DE) echo "德国 (DE)" ;;
+        FR) echo "法国 (FR)" ;;
+        NL) echo "荷兰 (NL)" ;;
+        CA) echo "加拿大 (CA)" ;;
+        AU) echo "澳大利亚 (AU)" ;;
+        MY) echo "马来西亚 (MY)" ;;
+        TH) echo "泰国 (TH)" ;;
+        VN) echo "越南 (VN)" ;;
+        IN) echo "印度 (IN)" ;;
+        RU) echo "俄罗斯 (RU)" ;;
+        "") echo "未知地区" ;;
+        *)  echo "$code" ;;
+    esac
+}
+
+# 探测 VPS 原生网络物理归属地与直连 Cloudflare 数据中心 (在接管前或直连探测并固化缓存)
+xmg_warp_detect_native_geo() {
+    local cache_file="$XMG_WARP_DIR/native_geo.env"
+
+    if [ -n "${XMG_MOCK_WARP_NATIVE_LOC:-}" ]; then
+        XMG_WARP_NATIVE_IP="${XMG_MOCK_WARP_NATIVE_IP:-1.2.3.4}"
+        XMG_WARP_NATIVE_LOC="${XMG_MOCK_WARP_NATIVE_LOC:-HK}"
+        XMG_WARP_NATIVE_COLO="${XMG_MOCK_WARP_NATIVE_COLO:-HKG}"
+        return 0
+    fi
+
+    # 若已缓存，直接读取缓存 (防止开启全局 WARP 之后无法读取原生 IP)
+    if [ -f "$cache_file" ]; then
+        # shellcheck disable=SC1090
+        source "$cache_file" 2>/dev/null || true
+        if [ -n "${XMG_WARP_NATIVE_LOC:-}" ] && [ -n "${XMG_WARP_NATIVE_COLO:-}" ]; then
+            return 0
+        fi
+    fi
+
+    local trace=""
+    if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+        trace="$(curl -4sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+        if [ -z "$trace" ] || ! echo "$trace" | grep -q "colo="; then
+            trace="$(curl -6sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+        fi
+    fi
+
+    XMG_WARP_NATIVE_IP="$(echo "$trace" | grep "^ip=" | cut -d= -f2)"
+    XMG_WARP_NATIVE_LOC="$(echo "$trace" | grep "^loc=" | cut -d= -f2)"
+    XMG_WARP_NATIVE_COLO="$(echo "$trace" | grep "^colo=" | cut -d= -f2)"
+
+    [ -n "$XMG_WARP_NATIVE_LOC" ] || XMG_WARP_NATIVE_LOC="UNKNOWN"
+    [ -n "$XMG_WARP_NATIVE_COLO" ] || XMG_WARP_NATIVE_COLO="UNKNOWN"
+
+    mkdir -p "$XMG_WARP_DIR"
+    cat > "$cache_file" <<EOF
+XMG_WARP_NATIVE_IP="$XMG_WARP_NATIVE_IP"
+XMG_WARP_NATIVE_LOC="$XMG_WARP_NATIVE_LOC"
+XMG_WARP_NATIVE_COLO="$XMG_WARP_NATIVE_COLO"
+EOF
+    chmod 600 "$cache_file" 2>/dev/null || true
+}
+
+# 本地机房对端优选: 测试候选官方端点往返延迟，锁定本地数据中心
+xmg_warp_optimize_endpoint() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
+    xmg_info "正在探测当前 VPS 原生网络物理归属地与直连数据中心..."
+    xmg_warp_detect_native_geo
+
+    xmg_info "VPS 本地原生地区: $(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC") | 最佳直连机房: $XMG_WARP_NATIVE_COLO"
+    xmg_info "正在对 Cloudflare 官方 Anycast 端点池进行本地低延迟优选..."
+
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        local mock_res="${XMG_MOCK_WARP_OPTIMIZED_EP:-}"
+        if [ -z "$mock_res" ]; then
+            if xmg_warp_is_ipv6_only; then
+                mock_res="[2606:4700:d0::a29f:c001]:2408"
+            else
+                mock_res="162.159.193.1:2408"
+            fi
+        fi
+        xmg_info "优选完成！选定最佳本地端点: $mock_res (延迟: 3ms)"
+        echo "$mock_res"
+        return 0
+    fi
+
+    local is_v6=0
+    xmg_warp_is_ipv6_only && is_v6=1
+
+    local candidates=()
+    if [ "$is_v6" -eq 1 ]; then
+        candidates=(
+            "[2606:4700:d0::a29f:c001]:2408"
+            "[2606:4700:d0::a29f:c002]:2408"
+            "[2606:4700:d0::a29f:c003]:2408"
+            "[2606:4700:d1::a29f:c001]:2408"
+            "[2606:4700:d1::a29f:c002]:2408"
+        )
+    else
+        candidates=(
+            "engage.cloudflareclient.com:2408"
+            "162.159.192.1:2408"
+            "162.159.193.1:2408"
+            "162.159.195.1:2408"
+            "188.114.96.1:2408"
+            "188.114.97.1:2408"
+            "188.114.98.1:2408"
+            "188.114.99.1:2408"
+        )
+    fi
+
+    local best_ep=""
+    local best_rtt=999999
+
+    for ep in "${candidates[@]}"; do
+        local host="${ep%:*}"
+        host="${host#[}"
+        host="${host%]}"
+        local rtt=""
+
+        if command -v ping >/dev/null 2>&1; then
+            local ping_cmd="ping -c 2 -W 1"
+            [ "$is_v6" -eq 1 ] && ping_cmd="ping -6 -c 2 -W 1"
+            local ping_out=""
+            ping_out="$($ping_cmd "$host" 2>/dev/null || true)"
+            rtt="$(echo "$ping_out" | grep -o 'min/avg/max[^=]*=[^/]*' | cut -d= -f2 | tr -d ' ' || true)"
+            if [ -z "$rtt" ]; then
+                rtt="$(echo "$ping_out" | grep -oE '[0-9]+\.[0-9]+/[0-9]+\.[0-9]+' | cut -d/ -f2 || true)"
+            fi
+        fi
+
+        if [ -z "$rtt" ]; then
+            rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 2 "http://$host:80" 2>/dev/null || true)"
+            if [ -n "$rtt" ] && [ "$rtt" != "0.000" ] && [ "$rtt" != "0.000000" ]; then
+                rtt="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t * 1000 }' 2>/dev/null || echo "999")"
+            else
+                rtt=""
+            fi
+        else
+            rtt="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t }' 2>/dev/null || echo "999")"
+        fi
+
+        if [ -n "$rtt" ] && [ "$rtt" -gt 0 ] && [ "$rtt" -lt "$best_rtt" ]; then
+            best_rtt="$rtt"
+            best_ep="$ep"
+            printf "  - 测试端点 %-36s: 延迟 %4d ms [目前最优]\n" "$ep" "$rtt"
+        elif [ -n "$rtt" ] && [ "$rtt" -gt 0 ]; then
+            printf "  - 测试端点 %-36s: 延迟 %4d ms\n" "$ep" "$rtt"
+        else
+            printf "  - 测试端点 %-36s: 超时 / 不可达\n" "$ep"
+        fi
+    done
+
+    if [ -z "$best_ep" ]; then
+        if [ "$is_v6" -eq 1 ]; then
+            best_ep="$XMG_WARP_ENDPOINT_V6"
+        else
+            best_ep="engage.cloudflareclient.com:2408"
+        fi
+        xmg_warn "端点探测未能获得更低延迟，使用默认端点: $best_ep"
+    else
+        xmg_info "优选完成！选定最佳本地端点: $best_ep (延迟: ${best_rtt}ms)"
+    fi
+
+    # 保存优选端点至 account.json 与 warp.conf
+    if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
+        if [ "$is_v6" -eq 1 ]; then
+            sed -i -E "s/"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"/"endpoint_v6": "$best_ep"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+        else
+            sed -i -E "s/"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"/"endpoint_v4": "$best_ep"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+        fi
+    fi
+
+    if [ -f "$XMG_WARP_CONF" ]; then
+        sed -i -E "s|^Endpoint[[:space:]]*=.*|Endpoint = $best_ep|" "$XMG_WARP_CONF" 2>/dev/null || true
+        systemctl restart wg-quick@warp >/dev/null 2>&1 || true
+    fi
+
+    echo "$best_ep"
+}
+
 # ===== 环境感知辅助 =====
 
 xmg_warp_is_ipv6_only() {
@@ -229,7 +458,26 @@ _xmg_warp_register() {
     mkdir -p "$XMG_WARP_DIR" "$(dirname "$XMG_WARP_CONF")"
 
     if [ "$force" -ne 1 ] && [ -f "$XMG_WARP_ACCOUNT_FILE" ] && [ -s "$XMG_WARP_ACCOUNT_FILE" ]; then
-        if grep -q "private_key" "$XMG_WARP_ACCOUNT_FILE" && grep -q "address_v4" "$XMG_WARP_ACCOUNT_FILE"; then
+        local exist_privkey="" exist_v4="" exist_v6=""
+        exist_privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+        exist_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+        exist_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+
+        local is_corrupted=0
+        if [ -z "$exist_privkey" ] || [ -z "$exist_v4" ]; then
+            is_corrupted=1
+        elif [[ "$exist_v4" =~ : ]]; then
+            is_corrupted=1
+        elif [ -n "$exist_v6" ]; then
+            # 严格防范历史凭据中误存 endpoint 的污染
+            if [[ "$exist_v6" =~ \[ ]] || [[ "$exist_v6" =~ \] ]] || [[ "$exist_v6" =~ :[0-9]+$ ]]; then
+                is_corrupted=1
+            fi
+        fi
+
+        if [ "$is_corrupted" -eq 1 ]; then
+            xmg_warn "检测到旧 WARP 凭据内网 IP 受损或被历史 Endpoint 污染，自动重新注册纯净凭据..."
+        else
             xmg_info "复用已有 WARP 账号凭据: $XMG_WARP_ACCOUNT_FILE"
             return 0
         fi
@@ -276,22 +524,38 @@ _xmg_warp_register() {
         return 1
     fi
 
-    local dev_id token addr_v4 addr_v6 peer_pub peer_ep_v6 peer_ep_v4
+    local dev_id="" token="" addr_v4="" addr_v6="" peer_pub="" peer_ep_v6="" peer_ep_v4=""
     dev_id="$(_xmg_warp_json_val "$resp" ".id")"
     token="$(_xmg_warp_json_val "$resp" ".token")"
 
-    # 精准从 interface.addresses 提取客户端内网分配 IP，严禁误取 peers.endpoint
-    addr_v4="$(echo "$resp" | grep -A 5 '"addresses"' | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-    addr_v6="$(echo "$resp" | grep -A 5 '"addresses"' | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    # 精准截取 interface.addresses 块，无论单行紧凑或多行 JSON 均 100% 免疫 peers.endpoint 干扰
+    local addr_block="${resp#*\"addresses\"}"
+    addr_block="${addr_block%%\}*}"
+
+    addr_v4="$(echo "$addr_block" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    addr_v6="$(echo "$addr_block" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+
+    addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
+    addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
+
     peer_pub="$(echo "$resp" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
 
-    peer_ep_v6="$(echo "$resp" | grep -o '"v6"[[:space:]]*:[[:space:]]*"\[[^\]]*\]:[0-9]*"' | head -1 | cut -d'"' -f4)"
-    peer_ep_v4="$(echo "$resp" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[0-9.]*:[0-9]*"' | head -1 | cut -d'"' -f4)"
+    # 精准截取 peers.endpoint 块 (仅当明确包含 endpoint 键时才解析)
+    if [[ "$resp" == *\"endpoint\"* ]]; then
+        local ep_block="${resp#*\"endpoint\"}"
+        ep_block="${ep_block%%\}*}"
+        peer_ep_v6="$(echo "$ep_block" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+        peer_ep_v4="$(echo "$ep_block" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    fi
 
-    # 防御性清洗: addr_v4 必须为合法 IPv4 地址，若带冒号或为空强制为标准 172.16.0.2
-    case "$addr_v4" in
-        *:*|"") addr_v4="172.16.0.2" ;;
-    esac
+    # 校验 Endpoint 合法性: 端点必须包含端口号，若不合法则丢弃并兜底为官方 Anycast 端点
+    if [[ ! "$peer_ep_v6" =~ :[0-9]+$ ]]; then
+        peer_ep_v6=""
+    fi
+    if [[ ! "$peer_ep_v4" =~ :[0-9]+$ ]]; then
+        peer_ep_v4=""
+    fi
+
     [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
     [ -n "$peer_ep_v6" ] || peer_ep_v6="$XMG_WARP_ENDPOINT_V6"
     [ -n "$peer_ep_v4" ] || peer_ep_v4="$XMG_WARP_ENDPOINT_V4"
@@ -339,18 +603,16 @@ _xmg_warp_generate_conf() {
     [ -f "$XMG_WARP_ACCOUNT_FILE" ] || _xmg_warp_register 0 || return 1
 
     local privkey addr_v4 addr_v6 peer_pub ep_v6 ep_v4
-    privkey="$(grep -o '"private_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    addr_v4="$(grep -o '"address_v4": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    # 纠正可能残留的历史错误格式 (如 162.159.192.4:0)
-    case "$addr_v4" in
-        *:*|"") addr_v4="172.16.0.2" ;;
-    esac
-    addr_v6="$(grep -o '"address_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    peer_pub="$(grep -o '"peer_public_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    ep_v6="$(grep -o '"endpoint_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    ep_v4="$(grep -o '"endpoint_v4": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
+    privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    addr_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    addr_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    peer_pub="$(grep -o '"peer_public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
 
-    [ -n "$addr_v4" ] || addr_v4="172.16.0.2"
+    addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
+    addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
+
     [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
     [ -n "$ep_v6" ] || ep_v6="$XMG_WARP_ENDPOINT_V6"
     [ -n "$ep_v4" ] || ep_v4="$XMG_WARP_ENDPOINT_V4"
@@ -361,6 +623,11 @@ _xmg_warp_generate_conf() {
     # 仅当系统具备 resolvectl 或 resolvconf 时写入 DNS 行，避免 wg-quick 因无 resolvconf 报错崩溃
     if [ "${XMG_TEST_MODE:-0}" = "1" ] || command -v resolvectl >/dev/null 2>&1 || command -v resolvconf >/dev/null 2>&1; then
         dns_entry="DNS = 1.1.1.1, 2606:4700:4700::1111"
+    fi
+
+    local address_line="Address = $addr_v4/32"
+    if [ -n "$addr_v6" ]; then
+        address_line="$address_line, $addr_v6/128"
     fi
 
     if xmg_warp_is_ipv6_only; then
@@ -389,8 +656,8 @@ EOF
         cat > "$XMG_WARP_CONF" <<EOF
 [Interface]
 PrivateKey = $privkey
-Address = $addr_v4/32${addr_v6:+, $addr_v6/128}
-DNS = 1.1.1.1, 2606:4700:4700::1111
+$address_line
+${dns_entry:+$dns_entry}
 MTU = 1280
 
 [Peer]
@@ -419,10 +686,13 @@ xmg_warp_install_v4() {
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable wg-quick@warp >/dev/null 2>&1 || true
-    systemctl restart wg-quick@warp || {
+    if ! systemctl restart wg-quick@warp; then
         xmg_error "wg-quick@warp 启动失败"
+        if command -v journalctl >/dev/null 2>&1; then
+            journalctl -n 12 -u wg-quick@warp --no-pager 2>/dev/null || true
+        fi
         return 1
-    }
+    fi
     xmg_info "WARP 服务启动成功！"
     return 0
 }
@@ -441,10 +711,13 @@ xmg_warp_install_dual() {
 
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl enable wg-quick@warp >/dev/null 2>&1 || true
-    systemctl restart wg-quick@warp || {
+    if ! systemctl restart wg-quick@warp; then
         xmg_error "wg-quick@warp 启动失败"
+        if command -v journalctl >/dev/null 2>&1; then
+            journalctl -n 12 -u wg-quick@warp --no-pager 2>/dev/null || true
+        fi
         return 1
-    }
+    fi
     xmg_info "WARP 双栈接管已启动！"
     return 0
 }
@@ -454,6 +727,10 @@ xmg_warp_install_dual() {
 xmg_warp_auto_apply() {
     xmg_require_root
     xmg_info "正在执行 WARP 智能全自动部署..."
+    # 提前锁定并持久化 VPS 本地原生机房地理特征 (必须在接管路由前执行)
+    xmg_warp_detect_native_geo
+    xmg_info "原生归属地感知: $(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC") [直连机房: $XMG_WARP_NATIVE_COLO]"
+
     if xmg_warp_is_ipv6_only; then
         xmg_info "拓扑感知: 当前为【纯 IPv6 VPS】，自动应用【WARP IPv4 出口接管模式】(原生 IPv6 + CF IPv4)"
         xmg_warp_install_v4
@@ -472,14 +749,16 @@ xmg_warp_export_xray_outbound() {
     fi
 
     local privkey addr_v4 addr_v6 peer_pub ep_v6 ep_v4
-    privkey="$(grep -o '"private_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    addr_v4="$(grep -o '"address_v4": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    addr_v6="$(grep -o '"address_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    peer_pub="$(grep -o '"peer_public_key": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    ep_v6="$(grep -o '"endpoint_v6": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
-    ep_v4="$(grep -o '"endpoint_v4": "[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | cut -d'"' -f4)"
+    privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    addr_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    addr_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    peer_pub="$(grep -o '"peer_public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
 
-    [ -n "$addr_v4" ] || addr_v4="172.16.0.2"
+    addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
+    addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
+
     [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
 
     local endpoint=""
@@ -493,6 +772,11 @@ xmg_warp_export_xray_outbound() {
         endpoint="${endpoint%:0}:2408"
     fi
 
+    local address_json="\"$addr_v4/32\""
+    if [ -n "$addr_v6" ]; then
+        address_json="\"$addr_v4/32\",\n      \"$addr_v6/128\""
+    fi
+
     local xray_json=""
     xray_json="$(cat <<EOF
 {
@@ -501,8 +785,7 @@ xmg_warp_export_xray_outbound() {
   "settings": {
     "secretKey": "$privkey",
     "address": [
-      "$addr_v4/32"${addr_v6:+,
-      "$addr_v6/128"}
+      $(printf '%b' "$address_json")
     ],
     "peers": [
       {
@@ -631,6 +914,43 @@ xmg_warp_status() {
         warp_state="WARP: on"
     fi
     printf "Cloudflare Trace: %s\n" "$warp_state"
+
+    echo
+    echo "== 地理位置与权威机构一致性诊断 =="
+    xmg_warp_detect_native_geo
+
+    local egress_loc="" egress_colo=""
+    egress_loc="$(echo "$trace4" | grep "^loc=" | cut -d= -f2)"
+    egress_colo="$(echo "$trace4" | grep "^colo=" | cut -d= -f2)"
+    [ -n "$egress_loc" ] || egress_loc="$(echo "$trace6" | grep "^loc=" | cut -d= -f2)"
+    [ -n "$egress_colo" ] || egress_colo="$(echo "$trace6" | grep "^colo=" | cut -d= -f2)"
+
+    printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
+    printf "WARP 出口归属地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$egress_loc")" "${egress_colo:-未知}"
+
+    # Google 权威地区识别
+    local google_loc=""
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        google_loc="${XMG_MOCK_WARP_GOOGLE_LOC:-$XMG_WARP_NATIVE_LOC}"
+    else
+        local g_head=""
+        g_head="$(curl -sSL -I -A "Mozilla/5.0" --max-time 4 "https://www.google.com" 2>/dev/null || true)"
+        if echo "$g_head" | grep -iq "Location:.*google\."; then
+            google_loc="$(echo "$g_head" | grep -i "^Location:" | grep -oiE 'google\.[a-z.]{2,6}' | head -1 | sed -E 's/google\.com?\.?//I' | tr '[:lower:]' '[:upper:]')"
+        fi
+        [ -n "$google_loc" ] || google_loc="$egress_loc"
+    fi
+    printf "Google 权威地区 : %s\n" "$(_xmg_warp_country_name "$google_loc")"
+
+    # 一致性综合判定
+    if [ -n "$XMG_WARP_NATIVE_LOC" ] && [ "$XMG_WARP_NATIVE_LOC" != "UNKNOWN" ] && [ -n "$egress_loc" ] && [ "$XMG_WARP_NATIVE_LOC" = "$egress_loc" ]; then
+        echo "地区一致性判定  : 100% 保持本地一致 (PASS)"
+    elif [ -z "$egress_loc" ] || [ "$egress_loc" = "UNKNOWN" ]; then
+        echo "地区一致性判定  : 待检测 (WARP 未激活)"
+    else
+        echo "地区一致性判定  : 跨区漂移 (原生: $XMG_WARP_NATIVE_LOC -> 出口: $egress_loc) [WARN]"
+        echo "优化建议        : 请运行「本地机房端点优选」(xmg warp optimize) 锁定本地数据中心"
+    fi
     echo "=================================================================="
 }
 
@@ -694,12 +1014,13 @@ xmg_warp_menu() {
         echo "1. 一键全自动智能配置 (自动感知单双栈 / 纯 IPv6 自动配 IPv4 出口·免操作)"
         echo "2. 纯 IPv6 专享: WARP IPv4 出口 (原生 IPv6 + CF IPv4, 绝对防断网)"
         echo "3. 双栈全局接管: IPv4 + IPv6 全流量 WARP 出口 (防 IP 污染·带 SSH 保护)"
-        echo "4. 查看当前 WARP 状态与出口 IP"
-        echo "5. 测试流媒体 / ChatGPT / Google IP 清洁度与解锁"
-        echo "6. 导出 Xray 原生 WireGuard 出站配置片段"
-        echo "7. 启动 / 重启 WARP 服务"
-        echo "8. 停止 WARP 服务"
-        echo "9. 卸载 WARP 并清理配置"
+        echo "4. 查看当前 WARP 状态与地区一致性诊断"
+        echo "5. 本地地区保障: 智能优选低延迟本地端点 (锁定 VPS 本地机房 IP)"
+        echo "6. 测试流媒体 / ChatGPT / Google 地区与 IP 清洁度"
+        echo "7. 导出 Xray 原生 WireGuard 出站配置片段"
+        echo "8. 启动 / 重启 WARP 服务"
+        echo "9. 停止 WARP 服务"
+        echo "10. 卸载 WARP 并清理配置"
         echo "0. 返回"
         echo
         printf "请选择: "
@@ -729,25 +1050,30 @@ xmg_warp_menu() {
                 ;;
             5)
                 clear
-                xmg_warp_test_unlock
+                xmg_warp_optimize_endpoint || true
                 xmg_pause
                 ;;
             6)
                 clear
-                xmg_warp_export_xray_outbound || true
+                xmg_warp_test_unlock
                 xmg_pause
                 ;;
             7)
                 clear
-                xmg_warp_restart || true
+                xmg_warp_export_xray_outbound || true
                 xmg_pause
                 ;;
             8)
                 clear
-                xmg_warp_stop || true
+                xmg_warp_restart || true
                 xmg_pause
                 ;;
             9)
+                clear
+                xmg_warp_stop || true
+                xmg_pause
+                ;;
+            10)
                 clear
                 xmg_warp_uninstall || true
                 xmg_pause
