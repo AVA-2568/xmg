@@ -619,6 +619,59 @@ EOF
     fi
 }
 
+# 智能精准定位系统当前 Xray 实际加载生效的配置文件路径
+_xmg_warp_find_xray_config() {
+    # 1. 显式环境变量优先
+    if [ -n "${XMG_XRAY_CONFIG:-}" ] && [ -f "$XMG_XRAY_CONFIG" ]; then
+        echo "$XMG_XRAY_CONFIG"
+        return 0
+    fi
+
+    # 2. 从当前运行的 Xray 进程命令行提取 (-c 或 -config 后面的路径)
+    if command -v pgrep >/dev/null 2>&1 || command -v ps >/dev/null 2>&1; then
+        local proc_cmd=""
+        proc_cmd="$(ps aux 2>/dev/null | grep -E '[x]ray.*run.*-c' | head -1 || true)"
+        if [ -n "$proc_cmd" ]; then
+            local parsed_cfg=""
+            parsed_cfg="$(echo "$proc_cmd" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
+            if [ -n "$parsed_cfg" ] && [ -f "$parsed_cfg" ]; then
+                echo "$parsed_cfg"
+                return 0
+            fi
+        fi
+    fi
+
+    # 3. 从 systemd unit 或 drop-in 定义中提取
+    if command -v systemctl >/dev/null 2>&1; then
+        local svc_name="${XMG_XRAY_SERVICE:-xray}"
+        local unit_exec=""
+        unit_exec="$(systemctl cat "$svc_name" 2>/dev/null | grep -E '^ExecStart=' | tail -1 || true)"
+        if [ -n "$unit_exec" ]; then
+            local parsed_unit_cfg=""
+            parsed_unit_cfg="$(echo "$unit_exec" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
+            if [ -n "$parsed_unit_cfg" ] && [ -f "$parsed_unit_cfg" ]; then
+                echo "$parsed_unit_cfg"
+                return 0
+            fi
+        fi
+    fi
+
+    # 4. 标准候选路径依次探测
+    for cand in \
+        "${XMG_HOME:-/opt/xmg}/xray/config.json" \
+        "/opt/xmg/xray/config.json" \
+        "/usr/local/etc/xray/config.json" \
+        "/etc/xray/config.json"; do
+        if [ -f "$cand" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+
+    # 兜底默认
+    echo "${XMG_HOME:-/opt/xmg}/xray/config.json"
+}
+
 _xmg_warp_backup_config() {
     local cfg="$1"
     [ -f "$cfg" ] || return 0
@@ -657,8 +710,10 @@ xmg_warp_enable() {
     fi
     echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
 
-    # 4. 增量补强 Xray 主配置 (绝不重置覆盖，100% 保留原有 inbounds/证书/出站/policy)
-    local xray_cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    # 4. 智能定位并增量补强当前系统生效的 Xray 主配置 (100% 保留原有 inbounds/证书/出站/policy)
+    local xray_cfg=""
+    xray_cfg="$(_xmg_warp_find_xray_config)"
+    xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
     if [ -f "$xray_cfg" ] && command -v jq >/dev/null 2>&1; then
         local warp_json=""
         warp_json="$(cat "$XMG_WARP_XRAY_OUTBOUND" 2>/dev/null || true)"
@@ -799,6 +854,11 @@ EOF_ENABLE_JQ
                     fi
 
                     mv -f "$tmp_cfg" "$xray_cfg"
+                    # 双向同步: 若 /opt/xmg/xray/config.json 也是合法路径但与生效路径不同，保持同步
+                    local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
+                    if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
+                        cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
+                    fi
                     xmg_info "Xray 配置增量补强完成: 已在 outbounds 追加 warp-out 并添加流媒体/AI 按需分流规则 (原有配置 100% 保留)"
                 else
                     xmg_error "JSON 语法解析失败，取消应用"
@@ -856,8 +916,10 @@ xmg_warp_disable() {
     fi
     echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
 
-    # 2. 从 Xray 主配置中无损剔除 warp-out (保留所有其余配置)
-    local xray_cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    # 2. 智能定位生效的 Xray 主配置并无损剔除 warp-out (保留所有其余配置)
+    local xray_cfg=""
+    xray_cfg="$(_xmg_warp_find_xray_config)"
+    xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
     if [ -f "$xray_cfg" ] && command -v jq >/dev/null 2>&1; then
         # 修改前安全备份
         local bak=""
