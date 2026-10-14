@@ -637,7 +637,8 @@ MTU = 1280
 [Peer]
 PublicKey = ${peer_pub:-$XMG_WARP_PEER_PUBKEY}
 Endpoint = $endpoint
-KeepAlive = 25
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
 
 [Socks5]
 BindAddress = ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}
@@ -690,10 +691,31 @@ EOF
     if [ "$probe_ok" -eq 1 ]; then
         xmg_info "WARP 本地 Socks5 回路探活成功！(监听: ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT})"
         return 0
-    else
-        xmg_warn "WARP 本地中继已启动，但初次探活尚未就绪 (可能机房端点需等待重连或被 QoS)"
+    fi
+
+    # 初次端点不通，尝试切换为官方备选端点重试
+    xmg_warn "端点 $endpoint 探活超时，正在尝试备用端点 engage.cloudflareclient.com:2408..."
+    sed -i -E 's/Endpoint[[:space:]]*=[[:space:]]*.*/Endpoint = engage.cloudflareclient.com:2408/' "$XMG_WARP_WIREPROXY_CONF" 2>/dev/null || true
+    systemctl restart "${XMG_WARP_SERVICE}" >/dev/null 2>&1 || true
+
+    for i in 1 2 3 4; do
+        if curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp='; then
+            probe_ok=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$probe_ok" -eq 1 ]; then
+        xmg_info "备用端点探活成功！(监听: ${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT})"
         return 0
     fi
+
+    xmg_error "WARP 本地 Socks5 回路探活失败：WireGuard 隧道未能成功握手！"
+    xmg_error "为保护你的节点网络畅通，已中止启用 WARP (原有节点直连未做任何修改)"
+    xmg_error "排查建议：请运行 'journalctl -u xmg-warp -n 20' 查看 wireproxy 握手日志"
+    _xmg_warp_service_stop
+    return 1
 }
 
 _xmg_warp_service_stop() {
