@@ -589,11 +589,22 @@ xmg_warp_export_xray_outbound() {
       {
         "publicKey": "$peer_pub",
         "endpoint": "$endpoint",
-        "keepAlive": 25
+        "keepAlive": 25,
+        "allowedIPs": [
+          "0.0.0.0/0",
+          "::/0"
+        ]
       }
     ],
+    "noKernelTun": true,
+    "mtu": 1280,
     "reserved": [0, 0, 0],
-    "mtu": 1280
+    "remoteDNS": [
+      "1.1.1.1",
+      "1.0.0.1",
+      "2606:4700:4700::1111",
+      "2606:4700:4700::1001"
+    ]
   }
 }
 EOF
@@ -778,8 +789,10 @@ EOF_ENABLE_JQ
                     fi
 
                     if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
-                        if ! "$xray_bin" run -test -c "$tmp_cfg" >/dev/null 2>&1; then
-                            xmg_error "Xray 内核校验新配置失败，正在执行安全回滚..."
+                        local test_out=""
+                        if ! test_out="$("$xray_bin" run -test -c "$tmp_cfg" 2>&1)"; then
+                            xmg_error "Xray 内核校验新配置失败，详细错误信息如下:"
+                            printf '%s\n' "$test_out" >&2
                             rm -f "$tmp_cfg" 2>/dev/null || true
                             return 1
                         fi

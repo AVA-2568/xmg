@@ -105,6 +105,10 @@ t_contains "Xray 导出包含 secretKey" "$XRAY_JSON" '"secretKey": "yAn0MockPri
 t_contains "Xray 导出包含 peer publicKey" "$XRAY_JSON" '"publicKey": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="'
 t_contains "Xray 导出包含 keepAlive" "$XRAY_JSON" '"keepAlive": 25'
 t_contains "Xray 导出包含 mtu 1280" "$XRAY_JSON" '"mtu": 1280'
+t_contains "Xray 导出包含 noKernelTun true (保障 LXC 容器无崩溃运行)" "$XRAY_JSON" '"noKernelTun": true'
+t_contains "Xray 导出包含 remoteDNS" "$XRAY_JSON" '"remoteDNS"'
+t_contains "Xray 导出包含 reserved" "$XRAY_JSON" '"reserved": [0, 0, 0]'
+t_contains "Xray 导出包含 allowedIPs" "$XRAY_JSON" '"allowedIPs"'
 t_contains "纯 IPv6 下 Endpoint 使用 IPv6 端点" "$XRAY_JSON" '"endpoint": "[2606:4700:d0::a29f:c001]:2408"'
 t_contains "纯 IPv6 下包含虚拟 IPv4 地址" "$XRAY_JSON" '"172.16.0.2/32"'
 
