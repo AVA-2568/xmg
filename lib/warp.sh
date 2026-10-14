@@ -679,8 +679,8 @@ EOF
     # 运行时深度探活：连续检测本地回路是否真正连通 Cloudflare Anycast 出口
     local probe_ok=0
     xmg_info "正在检验 WARP 本地 Socks5 回路连通性与握手状态..."
-    for i in {1..5}; do
-        if curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL --connect-timeout 2 --max-time 3 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp='; then
+    for i in 1 2 3 4 5 6; do
+        if curl -x "socks5h://${XMG_WARP_SOCKS_HOST}:${XMG_WARP_SOCKS_PORT}" -sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'warp='; then
             probe_ok=1
             break
         fi
@@ -828,25 +828,13 @@ xmg_warp_enable() {
 
             if [ "$mode" = "global" ]; then
                 # ===== 核心：全局清洁出站模式 =====
-                # 将 warp-out 置于 outbounds 首位！所有节点公网出站流量默认全部由 WARP 清洁 IP 转发！
-                # 宿主机本身 0 网卡 0 路由侵入，SSH 物理级绝对不可能变动或失联！
-                # 附带安全规则：阻断私有内网 IP 探测 (geoip:private)
+                # 将 warp-out 置于 outbounds 首位 (outbounds[0])！
+                # Xray 默认所有代理流量无条件由 WARP 清洁 IP 转发，彻底解决 VPS 本机 IP 污染严重问题！
+                # 100% 零依赖 geoip.dat / geosite.dat (规避极端低配 VPS 无地理数据包报错)
+                # 宿主机本身 0 虚拟网卡 0 路由侵入，SSH 登录 IP 物理级绝对不可能变动！
                 cat > "$jq_file" << EOF_GLOBAL_JQ
 (.outbounds = (
   [ $warp_json ] + [ (.outbounds // [])[] | select(.tag != "warp-out") ]
-)) |
-(.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
-(.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
-(.routing.rules = (
-  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.ip // []) != ["geoip:private"]) ] + [
-    {
-      "type": "field",
-      "outboundTag": "blocked",
-      "ip": [
-        "geoip:private"
-      ]
-    }
-  ]
 ))
 EOF_GLOBAL_JQ
             else
