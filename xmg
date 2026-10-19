@@ -20,18 +20,86 @@ set -Eeuo pipefail
 
 XMG_VERSION="${XMG_VERSION:-2.0.2}"
 
+xmg_usage() {
+    cat <<EOF
+XMG $XMG_VERSION
+
+用法:
+  xmg                 启动 XMG Monitor (Real-Time)
+  xmg monitor         启动 XMG Monitor (Real-Time)
+  xmg menu            进入管理菜单
+  xmg doctor [--dry-run] 运行 VPS 一键健康诊断
+  xmg proxy apply [参数]   应用代理方案配置（幂等）
+  xmg proxy status [--json] 查看代理方案状态
+  xmg proxy disable <socks|vless>  停用某方案
+  xmg proxy export         导出当前状态（含明文，勿贴终端）
+  xmg proxy acme <域名>    申请并写入证书
+  xmg proxy link           查看客户端节点分享链接 (VLESS)
+  xmg proxy menu           代理方案交互向导
+  xmg core install         安装/更新内核（按记录的通道）
+  xmg core version         查看内核版本
+  xmg core status          查看内核状态
+  xmg core menu            内核管理菜单
+  xmg warp [apply|auto|enable|disable|status|optimize|test|export|menu] WARP 原生出站管理
+  xmg tune [bbr|net|dns|dot|swap|status|menu] 系统与内核网络调优
+  xmg firewall [status|allow|enable|disable|menu] UFW 防火墙端口管理
+  xmg ssh [status|port|disable-pwd|enable-pwd|fail2ban|menu] SSH 安全与防爆破
+  xmg xray [start|stop|restart|reload|status|validate|menu] Xray 服务生命周期与配置校验
+  xmg detect [virt|mem|net|status] 环境能力与容器自省探测
+  xmg update [check|run|rollback|menu] XMG 系统更新与回滚
+  xmg uninstall [run|menu] [--yes|-y] 卸载 XMG
+  xmg system          查看系统状态概况摘要
+  xmg version         显示版本
+  xmg help            显示帮助
+
+按键:
+  m                   进入管理菜单
+  q                   退出
+
+环境变量:
+  XMG_HOME             XMG 统一根目录，默认 /opt/xmg
+  XMG_LIB_DIR          模块目录，默认 /opt/xmg/lib
+  XMG_CACHE_TTL        基础系统状态缓存秒数，默认 3
+  XMG_SERVICE_TTL      服务状态缓存秒数，默认 5
+  XMG_MONITOR_INTERVAL UI 刷新间隔，默认 3
+  XMG_COLOR            auto/always/never，默认 auto
+  XMG_XRAY_SERVICE     Xray 服务名，默认 xray
+EOF
+}
+
+# 提前检查 version / help，零依赖微秒级直接返回
+case "${1:-}" in
+    version|-v|--version)
+        echo "XMG $XMG_VERSION"
+        exit 0
+        ;;
+    help|-h|--help)
+        xmg_usage
+        exit 0
+        ;;
+esac
+
 # ============================================================
 # XMG 统一目录配置
 # ============================================================
-# XMG_HOME 是 XMG 的统一根目录。
-# 默认所有 XMG 管理的文件集中放在 /opt/xmg。
 XMG_HOME="${XMG_HOME:-/opt/xmg}"
-
-# 主程序目录和模块目录
 XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
-XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
 
-# 导出路径变量，确保被加载的 lib/*.sh 模块使用同一套目录
+# 自动推导 lib 目录：优先指定环境变量，其次 /opt/xmg/lib，再次当前脚本同级 lib
+if [ -z "${XMG_LIB_DIR:-}" ]; then
+    if [ -d "$XMG_HOME/lib" ]; then
+        XMG_LIB_DIR="$XMG_HOME/lib"
+    else
+        _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [ -d "$_SCRIPT_DIR/lib" ]; then
+            XMG_LIB_DIR="$_SCRIPT_DIR/lib"
+        else
+            XMG_LIB_DIR="$XMG_HOME/lib"
+        fi
+        unset _SCRIPT_DIR
+    fi
+fi
+
 export XMG_VERSION
 export XMG_HOME XMG_BIN_DIR XMG_LIB_DIR
 
@@ -69,57 +137,16 @@ source "$XMG_LIB_DIR/menu.sh"
 # shellcheck source=/dev/null
 source "$XMG_LIB_DIR/monitor.sh"
 
-xmg_usage() {
-    cat <<EOF
-XMG $XMG_VERSION
-
-用法:
-  xmg                 启动 XMG Monitor (Real-Time)
-  xmg monitor         启动 XMG Monitor (Real-Time)
-  xmg menu            进入管理菜单
-  xmg doctor [--dry-run] 运行 VPS 一键健康诊断
-  xmg proxy apply [参数]   应用代理方案配置（幂等）
-  xmg proxy status [--json] 查看代理方案状态
-  xmg proxy disable <socks|vless>  停用某方案
-  xmg proxy export         导出当前状态（含明文，勿贴终端）
-  xmg proxy acme <域名>    申请并写入证书
-  xmg proxy link           查看客户端节点分享链接 (VLESS)
-  xmg proxy menu           代理方案交互向导
-  xmg core install         安装/更新内核（按记录的通道）
-  xmg core version         查看内核版本
-  xmg core status          查看内核状态
-  xmg core menu            内核管理菜单
-  xmg warp [apply|auto|enable|disable|status|optimize|test|export|menu] WARP 原生出站管理
-  xmg version         显示版本
-  xmg help            显示帮助
-
-按键:
-  m                   进入管理菜单
-  q                   退出
-
-环境变量:
-  XMG_HOME             XMG 统一根目录，默认 /opt/xmg
-  XMG_LIB_DIR          模块目录，默认 /opt/xmg/lib
-  XMG_CACHE_TTL        基础系统状态缓存秒数，默认 3
-  XMG_SERVICE_TTL      服务状态缓存秒数，默认 5
-  XMG_MONITOR_INTERVAL UI 刷新间隔，默认 3
-  XMG_COLOR            auto/always/never，默认 auto
-  XMG_XRAY_SERVICE     Xray 服务名，默认 xray
-EOF
-}
-
 xmg_main() {
     local sub="${1:-monitor}"
     shift || true
 
     case "$sub" in
         monitor)
-            set +e
-            xmg_monitor_loop
+            ( set +e; xmg_monitor_loop )
             ;;
         menu)
-            set +e
-            xmg_menu_loop
+            ( set +e; xmg_menu_loop )
             ;;
         proxy)
             xmg_require_core_file state.sh
@@ -141,8 +168,8 @@ xmg_main() {
                 export)  shift; xmg_proxy_export "$@" ;;
                 acme)    shift; xmg_proxy_acme_issue "$@" ;;
                 link)    shift; xmg_proxy_vless_link "$@" ;;
-                menu)    set +e; xmg_proxy_menu ;;
-                *)       xmg_error "未知的 proxy 子命令: $1"; return 2 ;;
+                menu)    shift || true; ( set +e; xmg_proxy_menu "$@" ) ;;
+                *)       xmg_error "未知的 proxy 子命令: $1"; exit 2 ;;
             esac
             ;;
         core)
@@ -156,8 +183,8 @@ xmg_main() {
                 install) shift; xmg_core_install "$@" ;;
                 version) shift; xmg_core_version "$@" ;;
                 status)  shift; xmg_core_status "$@" ;;
-                menu)    set +e; xmg_core_menu ;;
-                *)       xmg_error "未知的 core 子命令: $1"; return 2 ;;
+                menu)    shift || true; ( set +e; xmg_core_menu "$@" ) ;;
+                *)       xmg_error "未知的 core 子命令: $1"; exit 2 ;;
             esac
             ;;
         warp)
@@ -173,21 +200,140 @@ xmg_main() {
                 test)       shift; xmg_warp_test_unlock "$@" ;;
                 export)     shift; xmg_warp_export_xray_outbound "$@" ;;
                 uninstall)  shift; xmg_warp_uninstall "$@" ;;
-                menu)       set +e; xmg_warp_menu ;;
-                *)          xmg_error "未知的 warp 子命令: $1"; return 2 ;;
+                menu)       shift || true; ( set +e; xmg_warp_menu "$@" ) ;;
+                *)          xmg_error "未知的 warp 子命令: $1"; exit 2 ;;
             esac
+            ;;
+        tune)
+            xmg_require_core_file tune.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/tune.sh"
+            case "${1:-menu}" in
+                bbr)    shift; xmg_tune_bbr_enable "$@" ;;
+                net)    shift; xmg_tune_net_optimize "$@" ;;
+                dns)    shift; xmg_tune_dns_optimize "$@" ;;
+                dot)    shift; xmg_tune_dns_dot "$@" ;;
+                swap)   shift; xmg_tune_swap_panel "$@" ;;
+                status) shift; xmg_tune_status "$@" ;;
+                menu)   shift || true; ( set +e; xmg_tune_menu "$@" ) ;;
+                *)      xmg_error "未知的 tune 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        firewall)
+            xmg_require_core_file firewall.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/firewall.sh"
+            case "${1:-menu}" in
+                status)  shift; xmg_firewall_status "$@" ;;
+                allow)
+                    shift
+                    if [ $# -gt 0 ] && declare -F xmg_firewall_allow >/dev/null 2>&1; then
+                        xmg_firewall_allow "$@"
+                    elif [ $# -gt 0 ] && declare -F xmg_firewall_allow_custom_port >/dev/null 2>&1; then
+                        xmg_firewall_allow_custom_port "$@"
+                    else
+                        xmg_firewall_allow_basic "$@"
+                    fi
+                    ;;
+                enable)  shift; xmg_firewall_enable "$@" ;;
+                disable) shift; xmg_firewall_disable "$@" ;;
+                menu)    shift || true; ( set +e; xmg_firewall_menu "$@" ) ;;
+                *)       xmg_error "未知的 firewall 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        ssh)
+            xmg_require_core_file ssh.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/ssh.sh"
+            case "${1:-menu}" in
+                status)      shift; xmg_ssh_show "$@" ;;
+                port)        shift; xmg_ssh_change_port "$@" ;;
+                disable-pwd) shift; xmg_ssh_disable_password "$@" ;;
+                enable-pwd)  shift; xmg_ssh_enable_password "$@" ;;
+                fail2ban)    shift; xmg_ssh_fail2ban_install "$@" ;;
+                menu)        shift || true; ( set +e; xmg_ssh_menu "$@" ) ;;
+                *)           xmg_error "未知的 ssh 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        xray)
+            xmg_require_core_file xray.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/xray.sh"
+            case "${1:-menu}" in
+                start)    shift; xmg_xray_start "$@" ;;
+                stop)     shift; xmg_xray_stop "$@" ;;
+                restart)  shift; xmg_xray_restart "$@" ;;
+                reload)   shift; xmg_xray_reload "$@" ;;
+                status)   shift; xmg_xray_status "$@" ;;
+                validate) shift; xmg_xray_validate_config "$@" ;;
+                menu)     shift || true; ( set +e; xmg_xray_menu "$@" ) ;;
+                *)        xmg_error "未知的 xray 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        detect)
+            xmg_require_core_file detect.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/detect.sh"
+            case "${1:-status}" in
+                virt)   shift; xmg_detect_virt "$@" ;;
+                mem)    shift; xmg_detect_mem_profile "$@" ;;
+                net)
+                    shift
+                    xmg_detect_network "$@"
+                    echo "IPv4=$XMG_NET_IPV4 IPv6=$XMG_NET_IPV6 NAT=$XMG_NET_NAT NAT64=$XMG_NET_NAT64"
+                    ;;
+                status)
+                    shift
+                    if declare -F xmg_detect_status >/dev/null 2>&1; then
+                        xmg_detect_status "$@"
+                    else
+                        _v="$(xmg_detect_virt)"
+                        _m="$(xmg_detect_mem_profile)"
+                        _r="normal"
+                        if ! xmg_detect_container_restricted; then
+                            _r="restricted"
+                        fi
+                        xmg_detect_network
+                        echo "虚拟化: $_v"
+                        echo "内存分档: $_m"
+                        echo "容器特权: $_r"
+                        echo "网络拓扑: IPv4=$XMG_NET_IPV4 IPv6=$XMG_NET_IPV6 NAT=$XMG_NET_NAT NAT64=$XMG_NET_NAT64"
+                    fi
+                    ;;
+                *)      xmg_error "未知的 detect 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        update)
+            xmg_require_core_file update.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/update.sh"
+            case "${1:-menu}" in
+                check)    shift; xmg_update_check_updates "$@" ;;
+                run)      shift; xmg_update_run "$@" ;;
+                rollback) shift; xmg_update_rollback "$@" ;;
+                menu)     shift || true; ( set +e; xmg_update_menu "$@" ) ;;
+                *)        xmg_error "未知的 update 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        uninstall)
+            xmg_require_core_file uninstall.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/uninstall.sh"
+            case "${1:-menu}" in
+                run)      shift; xmg_uninstall_run "$@" ;;
+                --yes|-y) xmg_uninstall_run "$@" ;;
+                menu)     shift || true; ( set +e; xmg_uninstall_menu "$@" ) ;;
+                *)        xmg_error "未知的 uninstall 子命令: $1"; exit 2 ;;
+            esac
+            ;;
+        system)
+            xmg_system_refresh_all force && xmg_system_print_summary
             ;;
         doctor)
             xmg_require_core_file doctor.sh
             # shellcheck source=/dev/null
             source "$XMG_LIB_DIR/doctor.sh"
             xmg_doctor_cli "$@"
-            ;;
-        version|-v|--version)
-            echo "XMG $XMG_VERSION"
-            ;;
-        help|-h|--help)
-            xmg_usage
             ;;
         *)
             xmg_error "未知参数: $sub"

@@ -64,7 +64,7 @@ xmg_read_time() {
 xmg_read_hostname() {
     local h=""
 
-    if read -r h < /proc/sys/kernel/hostname 2>/dev/null; then
+    if [ -r /proc/sys/kernel/hostname ] && read -r h < /proc/sys/kernel/hostname 2>/dev/null; then
         printf '%s' "$h"
         return 0
     fi
@@ -125,7 +125,8 @@ xmg_read_uptime() {
 # 一次读取内存信息，返回：
 #   percent|usedMi/totalMi
 #
-# 优先使用 MemAvailable；
+# 优先感知 Cgroup 容器配额（v2 memory.max / v1 memory.limit_in_bytes）；
+# 宿主机或未受限容器优先使用 MemAvailable；
 # 如果系统过旧没有 MemAvailable，则回退到 MemFree + Buffers + Cached。
 xmg_read_mem() {
     local key=""
@@ -141,30 +142,92 @@ xmg_read_mem() {
     local used_kb=0
     local percent=0
 
-    while read -r key value unit; do
-        case "$key" in
-            MemTotal:)
-                total_kb="$value"
-                ;;
-            MemAvailable:)
-                available_kb="$value"
-                ;;
-            MemFree:)
-                memfree_kb="$value"
-                ;;
-            Buffers:)
-                buffers_kb="$value"
-                ;;
-            Cached:)
-                cached_kb="$value"
-                ;;
-        esac
+    local meminfo_path="${XMG_MEMINFO_FILE:-/proc/meminfo}"
+    if [ -r "$meminfo_path" ]; then
+        while read -r key value unit; do
+            case "$key" in
+                MemTotal:)
+                    total_kb="$value"
+                    ;;
+                MemAvailable:)
+                    available_kb="$value"
+                    ;;
+                MemFree:)
+                    memfree_kb="$value"
+                    ;;
+                Buffers:)
+                    buffers_kb="$value"
+                    ;;
+                Cached:)
+                    cached_kb="$value"
+                    ;;
+            esac
 
-        # MemAvailable 已拿到时可以提前结束。
-        if [ "$total_kb" -gt 0 ] && [ "$available_kb" -gt 0 ]; then
-            break
+            # MemAvailable 已拿到时可以提前结束。
+            if [ "$total_kb" -gt 0 ] && [ "$available_kb" -gt 0 ]; then
+                break
+            fi
+        done < "$meminfo_path" 2>/dev/null
+    fi
+
+    # Cgroup 容器内存限额感知（v2 与 v1 适配）
+    local cg_max_file="${XMG_CGROUP_MEMORY_MAX:-/sys/fs/cgroup/memory.max}"
+    local cg_curr_file="${XMG_CGROUP_MEMORY_CURRENT:-/sys/fs/cgroup/memory.current}"
+    local cg_v1_limit="${XMG_CGROUP_MEMORY_LIMIT:-/sys/fs/cgroup/memory/memory.limit_in_bytes}"
+    local cg_v1_usage="${XMG_CGROUP_MEMORY_USAGE:-/sys/fs/cgroup/memory/memory.usage_in_bytes}"
+
+    local cg_limit_bytes=""
+    local cg_used_bytes=""
+    local is_cgroup=0
+
+    # 1. 尝试 Cgroup v2
+    if [ -r "$cg_max_file" ]; then
+        cg_limit_bytes="$(cat "$cg_max_file" 2>/dev/null || true)"
+        if [ -n "$cg_limit_bytes" ] && [ "$cg_limit_bytes" != "max" ] && [[ "$cg_limit_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_limit_bytes}" -le 15 ]; then
+            if [ -r "$cg_curr_file" ]; then
+                cg_used_bytes="$(cat "$cg_curr_file" 2>/dev/null || true)"
+                if [ -n "$cg_used_bytes" ] && [[ "$cg_used_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_used_bytes}" -le 15 ]; then
+                    is_cgroup=1
+                fi
+            fi
         fi
-    done < /proc/meminfo 2>/dev/null
+    fi
+
+    # 2. 尝试 Cgroup v1
+    if [ "$is_cgroup" -eq 0 ] && [ -r "$cg_v1_limit" ]; then
+        cg_limit_bytes="$(cat "$cg_v1_limit" 2>/dev/null || true)"
+        if [ -n "$cg_limit_bytes" ] && [[ "$cg_limit_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_limit_bytes}" -le 15 ]; then
+            if [ -r "$cg_v1_usage" ]; then
+                cg_used_bytes="$(cat "$cg_v1_usage" 2>/dev/null || true)"
+                if [ -n "$cg_used_bytes" ] && [[ "$cg_used_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_used_bytes}" -le 15 ]; then
+                    is_cgroup=1
+                fi
+            fi
+        fi
+    fi
+
+    # 若检测到有效容器配额，优先采用容器限额与使用量
+    if [ "$is_cgroup" -eq 1 ]; then
+        local cg_limit_kb=$((cg_limit_bytes / 1024))
+        local cg_used_kb=$((cg_used_bytes / 1024))
+
+        if [ "$cg_limit_kb" -gt 0 ] && { [ "$total_kb" -le 0 ] || [ "$cg_limit_kb" -le "$total_kb" ]; }; then
+            total_kb="$cg_limit_kb"
+            used_kb="$cg_used_kb"
+            if [ "$used_kb" -gt "$total_kb" ]; then
+                used_kb="$total_kb"
+            fi
+            if [ "$used_kb" -lt 0 ]; then
+                used_kb=0
+            fi
+            percent=$((used_kb * 100 / total_kb))
+            printf '%s|%sMi/%sMi' \
+                "${percent}%" \
+                "$((used_kb / 1024))" \
+                "$((total_kb / 1024))"
+            return 0
+        fi
+    fi
 
     if [ "$total_kb" -le 0 ]; then
         echo "unknown|unknown"
@@ -201,6 +264,7 @@ xmg_read_disk_root() {
     local usep=""
     local mount=""
 
+    # 强制 LC_ALL=C，杜绝国际化语言（如中文、德语等）表头干扰
     # df 本身需要外部命令；这里不用 awk，减少一次 fork。
     while read -r fs size used avail usep mount; do
         [ "$fs" = "Filesystem" ] && continue
@@ -209,7 +273,7 @@ xmg_read_disk_root() {
             printf '%s %s/%s' "$usep" "$used" "$size"
             return 0
         fi
-    done < <(df -hP / 2>/dev/null)
+    done < <(LC_ALL=C df -hP / 2>/dev/null)
 
     echo "unknown"
 }
