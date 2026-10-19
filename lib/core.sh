@@ -163,6 +163,9 @@ xmg_core_install() {
         return 4
     fi
 
+    # 关键收尾：无论官方脚本是新装还是同版本跳过，立即确保 systemd unit 存在并生效
+    xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+
     xmg_info "内核安装完成"
     xmg_core_version
     return 0
@@ -209,8 +212,55 @@ xmg_core_patch_systemd_unit() {
         fi
     done
 
+    # 关键自愈：未找到 unit 时，若系统中存在 xray 二进制，直接自动生成 /etc/systemd/system/xray.service 自包含服务单元
     if [ "$unit_found" -ne 1 ]; then
-        xmg_warn "未找到 Xray systemd unit，跳过自动配置"
+        local xray_bin=""
+        if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+            xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+        elif command -v xray >/dev/null 2>&1; then
+            xray_bin="$(command -v xray)"
+        elif [ -x /usr/local/bin/xray ]; then
+            xray_bin="/usr/local/bin/xray"
+        elif [ -x /usr/bin/xray ]; then
+            xray_bin="/usr/bin/xray"
+        fi
+
+        if [ -n "$xray_bin" ] && [ -x "$xray_bin" ]; then
+            xmg_info "未检测到现有 xray.service，正在自动生成自包含 systemd unit..."
+            mkdir -p "${sys_dir}"
+            cat > "${sys_dir}/xray.service" << EOF_UNIT
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Environment="GOMEMLIMIT=100MiB"
+Environment="GODEBUG=madvdontneed=1"
+Environment="GOMAXPROCS=1"
+ExecStart=$xray_bin run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF_UNIT
+            chmod 644 "${sys_dir}/xray.service"
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable xray >/dev/null 2>&1 || true
+            xray_unit="${sys_dir}/xray.service"
+            unit_found=1
+            xmg_info "已成功自愈生成 Xray systemd unit: $xray_unit"
+            return 0
+        fi
+
+        xmg_warn "未找到 Xray 可执行程序与 systemd unit，跳过自动配置"
         return 1
     fi
 
@@ -378,10 +428,10 @@ xmg_core_install_official() {
     # args 故意不加引号：需要按空格拆成多个参数交给官方脚本
     # shellcheck disable=SC2086
     if [ "$custom_tmp_created" -eq 1 ] && [ -d "$run_tmpdir" ]; then
-        TMPDIR="$run_tmpdir" bash "$script_tmp" install $args "${extra[@]}" || ret=$?
+        TMPDIR="$run_tmpdir" bash "$script_tmp" install -f $args "${extra[@]}" || ret=$?
         rm -rf "$run_tmpdir" 2>/dev/null || true
     else
-        bash "$script_tmp" install $args "${extra[@]}" || ret=$?
+        bash "$script_tmp" install -f $args "${extra[@]}" || ret=$?
     fi
     rm -f "$script_tmp" 2>/dev/null || true
 

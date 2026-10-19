@@ -769,15 +769,27 @@ _xmg_xray_reload() {
     fi
     if command -v systemctl >/dev/null 2>&1; then
         local svc="${XMG_XRAY_SERVICE:-xray}"
+        # 重启前自愈检查：若缺少 unit 文件立即自动生成补齐
+        if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+            xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+
         local s_err=""
         if ! s_err="$(systemctl restart "$svc" 2>&1)"; then
-            xmg_error "重启 $svc 服务失败 (systemctl restart $svc):"
-            [ -n "$s_err" ] && printf '%s\n' "$s_err" >&2
-            if command -v journalctl >/dev/null 2>&1; then
-                xmg_warn "--- $svc 最近 15 行系统日志 ---"
-                journalctl -u "$svc" -n 15 --no-pager 2>&1 | sed 's/^/  /' >&2 || true
+            # 若 restart 失败，尝试 start 启动激活
+            if ! systemctl is-active "$svc" >/dev/null 2>&1; then
+                s_err="$(systemctl start "$svc" 2>&1 || echo "$s_err")"
             fi
-            return 1
+            if ! systemctl is-active "$svc" >/dev/null 2>&1; then
+                xmg_error "重启 $svc 服务失败 (systemctl restart $svc):"
+                [ -n "$s_err" ] && printf '%s\n' "$s_err" >&2
+                if command -v journalctl >/dev/null 2>&1; then
+                    xmg_warn "--- $svc 最近 15 行系统日志 ---"
+                    journalctl -u "$svc" -n 15 --no-pager 2>&1 | sed 's/^/  /' >&2 || true
+                fi
+                return 1
+            fi
         fi
         return 0
     fi
@@ -854,8 +866,13 @@ xmg_state_commit() {
         if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
             xmg_core_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
         fi
-        if [ -d /usr/local/etc/xray ] && [ "$XMG_XRAY_CONFIG" != "/usr/local/etc/xray/config.json" ]; then
+        if [ "$XMG_XRAY_CONFIG" != "/usr/local/etc/xray/config.json" ]; then
+            mkdir -p /usr/local/etc/xray 2>/dev/null || true
             ln -sf "$XMG_XRAY_CONFIG" /usr/local/etc/xray/config.json 2>/dev/null || true
+        fi
+        if [ "$XMG_XRAY_CONFIG" != "/etc/xray/config.json" ]; then
+            mkdir -p /etc/xray 2>/dev/null || true
+            ln -sf "$XMG_XRAY_CONFIG" /etc/xray/config.json 2>/dev/null || true
         fi
     fi
 

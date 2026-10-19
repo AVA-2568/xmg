@@ -124,52 +124,58 @@ xmg_xray_uninstall() {
         return 0
     fi
 
-    # 停止服务
+    # 停止并禁用服务
     if xmg_xray_is_systemd_available; then
         systemctl stop "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
         systemctl disable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
     fi
 
-    # 使用官方卸载脚本
-    xmg_info "使用 Xray 官方卸载脚本..."
-    if xmg_cmd_exists curl; then
-        bash <(curl -fsSL "$XMG_XRAY_INSTALL_URL") remove 2>/dev/null || xmg_warn "官方卸载脚本执行失败"
-    elif xmg_cmd_exists wget; then
-        bash <(wget -qO- "$XMG_XRAY_INSTALL_URL") remove 2>/dev/null || xmg_warn "官方卸载脚本执行失败"
-    else
-        xmg_warn "没有可用的下载工具，跳过官方卸载脚本"
-    fi
+    # 尝试使用官方卸载脚本（带镜像加速 fallback）
+    xmg_info "正在清理 Xray 系统文件与内核..."
+    local uninst_urls=(
+        "$XMG_XRAY_INSTALL_URL"
+        "https://ghfast.top/$XMG_XRAY_INSTALL_URL"
+        "https://mirror.ghproxy.com/$XMG_XRAY_INSTALL_URL"
+    )
+    local u=""
+    for u in "${uninst_urls[@]}"; do
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsSL --connect-timeout 8 --max-time 20 "$u" 2>/dev/null | bash -s -- remove >/dev/null 2>&1; then
+                break
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -q -T 8 -O- "$u" 2>/dev/null | bash -s -- remove >/dev/null 2>&1; then
+                break
+            fi
+        fi
+    done
+
+    # 自包含彻底兜底清理：即便官方远程脚本因网络问题不可达，亦能 100% 干净卸载
+    rm -f /usr/local/bin/xray /usr/bin/xray /opt/xmg/bin/xray 2>/dev/null || true
+    rm -rf /usr/local/share/xray /usr/share/xray /etc/xray /usr/local/etc/xray 2>/dev/null || true
 
     # 删除 XMG 管理的 Xray 配置目录
     if [ -d "$XMG_XRAY_DIR" ]; then
-        xmg_info "删除 XMG 管理的 Xray 配置目录: $XMG_XRAY_DIR"
-        rm -rf "$XMG_XRAY_DIR" && xmg_info "已删除: $XMG_XRAY_DIR" || xmg_warn "删除 $XMG_XRAY_DIR 失败"
+        rm -rf "$XMG_XRAY_DIR" 2>/dev/null || true
+        xmg_info "已删除配置目录: $XMG_XRAY_DIR"
     fi
 
     # 删除 XMG 管理的 Xray 日志目录
     if [ -d "$XMG_XRAY_LOG_DIR" ]; then
-        xmg_info "删除 XMG 管理的 Xray 日志目录: $XMG_XRAY_LOG_DIR"
-        rm -rf "$XMG_XRAY_LOG_DIR" && xmg_info "已删除: $XMG_XRAY_LOG_DIR" || xmg_warn "删除 $XMG_XRAY_LOG_DIR 失败"
+        rm -rf "$XMG_XRAY_LOG_DIR" 2>/dev/null || true
+        xmg_info "已删除日志目录: $XMG_XRAY_LOG_DIR"
     fi
 
     # 清理 systemd unit 残留
     if xmg_xray_is_systemd_available; then
-        for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
-            if [ -f "$path" ]; then
-                rm -f "$path" && xmg_info "已删除 systemd unit: $path"
-            fi
+        for path in "/etc/systemd/system/xray.service" "/etc/systemd/system/xray@.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
+            rm -f "$path" 2>/dev/null || true
         done
-
-        # 清理 XMG drop-in 覆盖目录
-        if [ -d "/etc/systemd/system/xray.service.d" ]; then
-            rm -rf "/etc/systemd/system/xray.service.d" \
-                && xmg_info "已删除 drop-in 覆盖目录: /etc/systemd/system/xray.service.d"
-        fi
-
+        rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
-    xmg_info "Xray 卸载流程完成"
+    xmg_info "Xray 卸载流程完成 (已彻底清理二进制、服务与配置)"
 }
 
 # ===== 配置管理 =====
