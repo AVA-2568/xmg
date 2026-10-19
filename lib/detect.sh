@@ -23,6 +23,8 @@ if [ "${XMG_DETECT_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_DETECT_SH_LOADED=1
 
+# XMG_MENU_LABEL: 系统环境感知
+
 # ------------------------------------------------------------------
 # 虚拟化与容器类型探测
 # 输出: kvm | openvz | lxc | docker | unknown
@@ -290,14 +292,28 @@ xmg_detect_network() {
             local v6_out=""
             v6_out="$($ip_cmd -6 addr show 2>/dev/null || true)"
             local line6=""
+            local cur_dev6=""
             while IFS= read -r line6 || [ -n "$line6" ]; do
+                if [[ "$line6" =~ ^[0-9]+:[[:space:]]+([^:@]+) ]]; then
+                    cur_dev6="${BASH_REMATCH[1]}"
+                fi
+                case "$cur_dev6" in
+                    lo|docker*|virbr*|br-*|veth*|dummy*)
+                        continue
+                        ;;
+                esac
                 if [[ "$line6" =~ inet6[[:space:]]+([^/[:space:]]+) ]]; then
                     local ip6="${BASH_REMATCH[1]:-}"
                     if [[ "$line6" =~ scope[[:space:]]+global ]]; then
-                        if [[ "$ip6" != "::1" ]] && [[ "$ip6" != fe80* ]]; then
-                            has_v6=1
-                            break
-                        fi
+                        case "$ip6" in
+                            ::1|[fF][eE]80:*|[fF][cC]*|[fF][dD]*)
+                                continue
+                                ;;
+                            *)
+                                has_v6=1
+                                break
+                                ;;
+                        esac
                     fi
                 fi
             done <<< "$v6_out"
@@ -328,10 +344,18 @@ xmg_detect_network() {
         if [ "$has_nat64" -eq 0 ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
             local nat64_probe=""
             if command -v getent >/dev/null 2>&1; then
-                nat64_probe="$(getent ahosts ipv4only.arpa 2>/dev/null | grep -E '^64:ff9b::' | head -n 1 || true)"
+                if command -v timeout >/dev/null 2>&1; then
+                    nat64_probe="$(timeout 2 getent ahosts ipv4only.arpa 2>/dev/null | grep -E '^64:ff9b::' | head -n 1 || true)"
+                else
+                    nat64_probe="$(getent ahosts ipv4only.arpa 2>/dev/null | grep -E '^64:ff9b::' | head -n 1 || true)"
+                fi
             fi
             if [ -z "$nat64_probe" ] && command -v nslookup >/dev/null 2>&1; then
-                nat64_probe="$(nslookup -type=AAAA ipv4only.arpa 2>/dev/null | grep -oE '64:ff9b::[0-9a-fA-F:]+' | head -n 1 || true)"
+                if command -v timeout >/dev/null 2>&1; then
+                    nat64_probe="$(timeout 2 nslookup -type=AAAA ipv4only.arpa 2>/dev/null | grep -oE '64:ff9b::[0-9a-fA-F:]+' | head -n 1 || true)"
+                else
+                    nat64_probe="$(nslookup -type=AAAA ipv4only.arpa 2>/dev/null | grep -oE '64:ff9b::[0-9a-fA-F:]+' | head -n 1 || true)"
+                fi
             fi
             if [ -n "$nat64_probe" ]; then
                 has_nat64=1

@@ -23,7 +23,7 @@ if [ "${XMG_DOCTOR_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_DOCTOR_SH_LOADED=1
 
-# XMG_MENU_LABEL: 系统健康诊断
+# XMG_MENU_LABEL: 系统健康体检
 
 # ===== 依赖安全引入 =====
 _XMG_DOCTOR_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -362,23 +362,36 @@ _xmg_doctor_get_listening_ports() {
     fi
 }
 
-_xmg_doctor_get_dns_info() {
+# 5. 提取 Xray 生效或预期的 DoH 配置
+_xmg_doctor_xray_dns() {
+    if [ -n "${MOCK_DOH_ADDR:-}" ]; then
+        printf '%s' "$MOCK_DOH_ADDR"
+        return 0
+    fi
     local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
-    local doh="" out_strat=""
-
-    # 尝试从实际生效的 config.json 中读取真实配置
+    local doh=""
     if [ -r "$cfg" ]; then
         doh="$(grep -oE 'https\+local://[^"]+' "$cfg" 2>/dev/null | head -n 1 || true)"
-        out_strat="$(grep -oE '"domainStrategy"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
     fi
-
-    # 若未从文件提取到，按当前网络栈推导
     if [ -z "$doh" ]; then
         if [ "${XMG_NET_IPV4:-0}" = "0" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
             doh="https+local://[2606:4700:4700::1111]/dns-query"
         else
             doh="https+local://1.1.1.1/dns-query"
         fi
+    fi
+    printf '%s' "$doh"
+}
+
+_xmg_doctor_get_dns_info() {
+    local doh="" out_strat=""
+    doh="$(_xmg_doctor_xray_dns)"
+
+    local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    if [ -n "${MOCK_DOMAIN_STRATEGY:-}" ]; then
+        out_strat="$MOCK_DOMAIN_STRATEGY"
+    elif [ -r "$cfg" ]; then
+        out_strat="$(grep -oE '"domainStrategy"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
     fi
     if [ -z "$out_strat" ]; then
         if [ "${XMG_NET_IPV4:-0}" = "0" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
@@ -389,6 +402,115 @@ _xmg_doctor_get_dns_info() {
     fi
 
     printf '%s|%s\n' "$doh" "$out_strat"
+}
+
+# 6. 采集防火墙状态
+_xmg_doctor_get_firewall_status() {
+    if [ -n "${MOCK_FIREWALL_STATUS:-}" ]; then
+        printf '%s' "$MOCK_FIREWALL_STATUS"
+        return 0
+    fi
+    if command -v ufw >/dev/null 2>&1; then
+        local ufw_out
+        ufw_out="$(ufw status 2>/dev/null || true)"
+        if [[ "$ufw_out" == *"Status: active"* ]]; then
+            printf 'ufw (active)'
+            return 0
+        fi
+    fi
+    if command -v nft >/dev/null 2>&1; then
+        local nft_rules
+        nft_rules="$(nft list ruleset 2>/dev/null || true)"
+        if [ -n "$nft_rules" ]; then
+            printf 'nftables (active)'
+            return 0
+        fi
+    fi
+    if command -v iptables >/dev/null 2>&1; then
+        local ipt_lines
+        ipt_lines="$(iptables -L -n 2>/dev/null | wc -l 2>/dev/null || echo 0)"
+        if [ "$ipt_lines" -gt 8 ]; then
+            printf 'iptables (active)'
+            return 0
+        fi
+    fi
+    printf '未启用/未配置'
+}
+
+# 7. 采集真实 SSH 端口
+_xmg_doctor_get_ssh_port() {
+    if [ -n "${MOCK_SSH_PORT:-}" ]; then
+        printf '%s' "$MOCK_SSH_PORT"
+        return 0
+    fi
+    if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
+        local p
+        p="$(xmg_ssh_get_port 2>/dev/null || true)"
+        if [ -n "$p" ]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    fi
+    local sshd_bin=""
+    if command -v sshd >/dev/null 2>&1; then
+        sshd_bin="$(command -v sshd)"
+    elif [ -x /usr/sbin/sshd ]; then
+        sshd_bin="/usr/sbin/sshd"
+    fi
+    if [ -n "$sshd_bin" ]; then
+        local val
+        val="$("$sshd_bin" -T 2>/dev/null | awk '$1=="port"{print $2; exit}' || true)"
+        if [ -n "$val" ]; then
+            printf '%s' "$val"
+            return 0
+        fi
+    fi
+    if [ -r /etc/ssh/sshd_config ]; then
+        local cfg_port
+        cfg_port="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
+        if [ -n "$cfg_port" ]; then
+            printf '%s' "$cfg_port"
+            return 0
+        fi
+    fi
+    printf '22'
+}
+
+# 8. 采集 NTP 时钟同步状态与偏差
+_xmg_doctor_get_ntp_status() {
+    if [ -n "${MOCK_NTP_STATUS:-}" ]; then
+        printf '%s' "$MOCK_NTP_STATUS"
+        return 0
+    fi
+    local offset=""
+    local synced=""
+    if command -v timedatectl >/dev/null 2>&1; then
+        synced="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)"
+        if [ "$synced" = "yes" ]; then
+            offset="$(timedatectl timesync-status 2>/dev/null | awk -F': ' '/Offset:/ {print $2; exit}' || true)"
+            if [ -n "$offset" ]; then
+                printf '已同步 (偏差: %s)' "$offset"
+            else
+                printf '已同步'
+            fi
+            return 0
+        fi
+        local status_out
+        status_out="$(timedatectl status 2>/dev/null || true)"
+        if [[ "$status_out" == *"synchronized: yes"* ]]; then
+            printf '已同步'
+            return 0
+        fi
+    fi
+    if command -v chronyc >/dev/null 2>&1; then
+        local sys_time
+        sys_time="$(chronyc tracking 2>/dev/null | awk -F': ' '/System time/ {print $2; exit}' || true)"
+        if [ -n "$sys_time" ]; then
+            printf '已同步 (偏差: %s)' "$sys_time"
+            return 0
+        fi
+    fi
+    printf '未同步/未配置'
 }
 
 # ==================================================================
@@ -484,19 +606,24 @@ xmg_doctor_run() {
     local listen_ports=""
     listen_ports="$(_xmg_doctor_get_listening_ports)"
 
-    # 6. DNS 与出站解析（从实际配置文件中读取真实参数）
+    # 6. DNS 与出站解析（真实读取，绝不无条件覆写）
     local dns_info=""
     dns_info="$(_xmg_doctor_get_dns_info)"
     local doh_addr="${dns_info%%|*}"
     local out_resolve="${dns_info##*|}"
-    if [ "$net_v4" = "0" ] && [ "$net_v6" = "1" ]; then
-        doh_addr="https+local://[2606:4700:4700::1111]/dns-query"
-        out_resolve="UseIPv6"
-    else
-        doh_addr="https+local://1.1.1.1/dns-query"
-        out_resolve="UseIP"
-    fi
 
+    # 7. 安全与系统体检项（防火墙、SSH 端口、NTP 时钟）
+    local fw_status=""
+    fw_status="$(_xmg_doctor_get_firewall_status)"
+    local ssh_port=""
+    ssh_port="$(_xmg_doctor_get_ssh_port)"
+    local ntp_status=""
+    ntp_status="$(_xmg_doctor_get_ntp_status)"
+
+    # 8. Critical 联合判定规则
+    if [ "${MOCK_NTP_CRITICAL:-0}" = "1" ]; then
+        has_critical=1
+    fi
     # 显式故障模拟覆盖
     if [ "${MOCK_DOCTOR_FAIL:-0}" = "1" ]; then
         has_critical=1
@@ -558,6 +685,13 @@ xmg_doctor_run() {
         "$c_bold" "$c_reset" \
         "$c_cyan" "$doh_addr" "$c_reset" \
         "$c_cyan" "$out_resolve" "$c_reset"
+
+    # [安全]
+    printf '%s[安全]%s 防火墙: %s%s%s | SSH 端口: %s%s%s | NTP 时钟: %s%s%s\n' \
+        "$c_bold" "$c_reset" \
+        "$c_cyan" "$fw_status" "$c_reset" \
+        "$c_cyan" "$ssh_port" "$c_reset" \
+        "$c_cyan" "$ntp_status" "$c_reset"
 
     printf '%s--------------------------------------------------------------------------------%s\n' "$c_cyan" "$c_reset"
 

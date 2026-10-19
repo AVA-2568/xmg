@@ -2,6 +2,7 @@
 # shellcheck shell=bash
 # coding: utf-8
 #
+# XMG_MENU_LABEL: 节点代理管理
 # proxy.sh - 代理方案管理与命令入口
 #
 # 说明：

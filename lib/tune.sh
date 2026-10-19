@@ -23,7 +23,7 @@ if [ "${XMG_TUNE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_TUNE_SH_LOADED=1
 
-# XMG_MENU_LABEL: 系统调优
+# XMG_MENU_LABEL: 系统与网络调优
 
 # ===== 默认配置 =====
 XMG_TUNE_SYSCTL_NET_CONF="${XMG_TUNE_SYSCTL_NET_CONF:-/etc/sysctl.d/99-xmg-tune.conf}"
@@ -42,9 +42,19 @@ XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
 XMG_TUNE_DOT_DEFAULT="${XMG_TUNE_DOT_DEFAULT:-1.1.1.1 1.0.0.1}"
 export XMG_TUNE_DNS_DEFAULT XMG_TUNE_DOT_DEFAULT
 
-# ===== 安全加载 detect.sh =====
+# ===== 自包含加载依赖 (common.sh + detect.sh) =====
+_XMG_TUNE_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -F xmg_info >/dev/null 2>&1; then
+    if [ -f "$_XMG_TUNE_LIBDIR/common.sh" ]; then
+        # shellcheck source=lib/common.sh
+        source "$_XMG_TUNE_LIBDIR/common.sh"
+    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/common.sh" ]; then
+        # shellcheck source=lib/common.sh
+        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/common.sh"
+    fi
+fi
+
 if ! declare -F xmg_detect_mem_profile >/dev/null 2>&1; then
-    _XMG_TUNE_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     if [ -f "$_XMG_TUNE_LIBDIR/detect.sh" ]; then
         # shellcheck source=lib/detect.sh
         source "$_XMG_TUNE_LIBDIR/detect.sh"
@@ -127,6 +137,50 @@ xmg_tune_mem_total_mb() {
     echo 512
 }
 
+# 读取总 Swap（MB）
+xmg_tune_swap_total_mb() {
+    if [ -n "${MOCK_SWAP_TOTAL_MB:-}" ]; then
+        echo "$MOCK_SWAP_TOTAL_MB"
+        return 0
+    fi
+
+    local key=""
+    local value=""
+
+    while read -r key value _; do
+        case "$key" in
+            SwapTotal:)
+                case "$value" in
+                    ''|*[!0-9]*) break ;;
+                esac
+                echo $((value / 1024))
+                return 0
+                ;;
+        esac
+    done < "${XMG_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null
+
+    echo 0
+}
+
+# 计算 vm.swappiness：极小内存且有 Swap 时设为 60（防止 Direct Reclaim 突发 OOM 崩溃），高配机设为 10
+xmg_tune_calc_swappiness() {
+    local mem_mb="${1:-}"
+    local swap_mb="${2:-}"
+
+    if [ -z "$mem_mb" ]; then
+        mem_mb="$(xmg_tune_mem_total_mb)"
+    fi
+    if [ -z "$swap_mb" ]; then
+        swap_mb="$(xmg_tune_swap_total_mb)"
+    fi
+
+    if [ "$mem_mb" -le 256 ] && [ "$swap_mb" -gt 0 ]; then
+        echo 60
+    else
+        echo 10
+    fi
+}
+
 # 按内存返回调优档位：extreme_low (<=256MB) / low (<=512MB) / mid (<=2048MB) / high
 xmg_tune_mem_profile() {
     local mem_mb="${1:-}"
@@ -206,7 +260,10 @@ xmg_tune_sysctl_apply() {
         return 0
     fi
 
-    return "$failed"
+    if [ "$failed" -gt 0 ]; then
+        return 1
+    fi
+    return 0
 }
 
 # ===== BBR + FQ =====
@@ -319,7 +376,7 @@ xmg_tune_net_optimize() {
     case "$profile" in
         extreme_low)
             conntrack_max=8192
-            buf_max=4194304
+            buf_max=1048576
             backlog=2048
             syn_backlog=1024
             tw_buckets=4096
@@ -372,6 +429,11 @@ xmg_tune_net_optimize() {
         echo "net.core.wmem_max = $buf_max"
         echo "net.ipv4.tcp_rmem = 4096 87380 $buf_max"
         echo "net.ipv4.tcp_wmem = 4096 16384 $buf_max"
+        if [ "$profile" = "extreme_low" ]; then
+            echo "# 历史基线对照: net.core.rmem_max = 4194304 / net.core.wmem_max = 4194304"
+            echo "# 历史基线对照: net.ipv4.tcp_rmem = 4096 87380 4194304 / net.ipv4.tcp_wmem = 4096 16384 4194304"
+            echo "net.ipv4.tcp_mem = 3072 4096 6144"
+        fi
         echo
         echo "# --- TCP 行为 ---"
         echo "net.ipv4.tcp_fastopen = 3"
@@ -400,8 +462,10 @@ xmg_tune_net_optimize() {
             echo "net.ipv6.conf.default.accept_ra = 2"
             echo
         fi
+        local swappiness_val
+        swappiness_val="$(xmg_tune_calc_swappiness "$mem_mb")"
         echo "# --- 虚拟内存 ---"
-        echo "vm.swappiness = 10"
+        echo "vm.swappiness = $swappiness_val"
     } > "$XMG_TUNE_SYSCTL_NET_CONF"
 
     # 个别 key 在容器/精简内核上不可写属正常现象：警告后继续，保证 limits 仍然落盘
@@ -452,13 +516,23 @@ xmg_tune_check_tcp_port() {
     local port="${2:-853}"
     local timeout_sec="${3:-2}"
 
+    if [ -n "${MOCK_CHECK_TCP_PORT:-}" ]; then
+        return "$MOCK_CHECK_TCP_PORT"
+    fi
+
+    local clean_host="${host#[}"
+    clean_host="${clean_host%]}"
+
     if command -v timeout >/dev/null 2>&1 && [ -n "${BASH_VERSION:-}" ]; then
-        if timeout "$timeout_sec" bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+        if timeout "$timeout_sec" bash -c "exec 3<>/dev/tcp/$clean_host/$port" 2>/dev/null; then
             return 0
         fi
     fi
     if command -v nc >/dev/null 2>&1; then
-        nc -z -w "$timeout_sec" "$host" "$port" 2>/dev/null && return 0
+        if [[ "$clean_host" =~ : ]]; then
+            nc -6 -z -w "$timeout_sec" "$clean_host" "$port" 2>/dev/null && return 0
+        fi
+        nc -z -w "$timeout_sec" "$clean_host" "$port" 2>/dev/null && return 0
     fi
     return 1
 }
@@ -1237,6 +1311,21 @@ xmg_tune_disk_avail_mb() {
 
 # 预检并计算安全 Swap 尺寸（MB）
 # 若可用空间不足 1200MB，自动将 Swap 尺寸收缩（如 256MB）或提示跳过，杜绝磁盘打满
+# 探测路径所在文件系统类型
+xmg_tune_fs_type() {
+    local target="${1:-$XMG_TUNE_SWAPFILE}"
+    local target_dir
+    target_dir="$(dirname "$target")"
+    local fstype=""
+    if command -v stat >/dev/null 2>&1; then
+        fstype="$(stat -f -c %T "$target_dir" 2>/dev/null || true)"
+    fi
+    if [ -z "$fstype" ] && command -v df >/dev/null 2>&1; then
+        fstype="$(df -T "$target_dir" 2>/dev/null | awk 'NR>1 {print $2; exit}' || true)"
+    fi
+    printf '%s' "$fstype"
+}
+
 xmg_tune_swap_calc_size() {
     local req_mb="$1"
     local target_file="${2:-$XMG_TUNE_SWAPFILE}"
@@ -1315,6 +1404,16 @@ xmg_tune_swap_create() {
 
     xmg_info "创建 ${mb}MB Swap: $XMG_TUNE_SWAPFILE"
 
+    # 在 Btrfs 文件系统创建 Swap 前先执行 chattr +C 禁用 COW
+    local fs_type
+    fs_type="$(xmg_tune_fs_type "$XMG_TUNE_SWAPFILE")"
+    if [ "$fs_type" = "btrfs" ]; then
+        touch "$XMG_TUNE_SWAPFILE"
+        if command -v chattr >/dev/null 2>&1; then
+            chattr +C "$XMG_TUNE_SWAPFILE" 2>/dev/null || true
+        fi
+    fi
+
     # dd 而非 fallocate：fallocate 产生的文件可能含 hole，swapon 会拒绝
     dd if=/dev/zero of="$XMG_TUNE_SWAPFILE" bs=1M count="$mb" status=none \
         || {
@@ -1340,9 +1439,11 @@ xmg_tune_swap_create() {
         printf '%s none swap sw 0 0\n' "$XMG_TUNE_SWAPFILE" >> /etc/fstab
     fi
 
-    cat > "$XMG_TUNE_SYSCTL_SWAP_CONF" <<'EOF'
+    local swap_swappiness
+    swap_swappiness="$(xmg_tune_calc_swappiness "$mem_mb" "$mb")"
+    cat > "$XMG_TUNE_SYSCTL_SWAP_CONF" <<EOF
 # XMG: Swap 参数（由 xmg tune 生成）
-vm.swappiness = 10
+vm.swappiness = $swap_swappiness
 EOF
     xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_SWAP_CONF"
 

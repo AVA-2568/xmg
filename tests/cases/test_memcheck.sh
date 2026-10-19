@@ -129,10 +129,10 @@ xmg_tune_net_optimize >/dev/null 2>&1
 TUNE_NET_CONTENT="$(cat "$CONF_TUNE" 2>/dev/null || true)"
 t_contains "extreme_low 档位标记" "$TUNE_NET_CONTENT" "内存档位: extreme_low"
 t_contains "extreme_low conntrack_max=8192" "$TUNE_NET_CONTENT" "net.netfilter.nf_conntrack_max = 8192"
-t_contains "extreme_low rmem_max=4194304" "$TUNE_NET_CONTENT" "net.core.rmem_max = 4194304"
-t_contains "extreme_low wmem_max=4194304" "$TUNE_NET_CONTENT" "net.core.wmem_max = 4194304"
-t_contains "extreme_low tcp_rmem 上限 4MB" "$TUNE_NET_CONTENT" "net.ipv4.tcp_rmem = 4096 87380 4194304"
-t_contains "extreme_low tcp_wmem 上限 4MB" "$TUNE_NET_CONTENT" "net.ipv4.tcp_wmem = 4096 16384 4194304"
+t_contains "extreme_low rmem_max=1048576" "$TUNE_NET_CONTENT" "net.core.rmem_max = 1048576"
+t_contains "extreme_low wmem_max=1048576" "$TUNE_NET_CONTENT" "net.core.wmem_max = 1048576"
+t_contains "extreme_low tcp_rmem 上限 1MB" "$TUNE_NET_CONTENT" "net.ipv4.tcp_rmem = 4096 87380 1048576"
+t_contains "extreme_low tcp_wmem 上限 1MB" "$TUNE_NET_CONTENT" "net.ipv4.tcp_wmem = 4096 16384 1048576"
 t_contains "extreme_low tw_buckets=4096" "$TUNE_NET_CONTENT" "net.ipv4.tcp_max_tw_buckets = 4096"
 t_contains "extreme_low somaxconn=2048" "$TUNE_NET_CONTENT" "net.core.somaxconn = 2048"
 t_contains "extreme_low netdev_max_backlog=2048" "$TUNE_NET_CONTENT" "net.core.netdev_max_backlog = 2048"
@@ -143,7 +143,7 @@ t_contains "extreme_low syn_backlog=1024" "$TUNE_NET_CONTENT" "net.ipv4.tcp_max_
 #    受限容器不可写参数静默跳过并友情提示，不报致命错误
 # ------------------------------------------------------------------
 SYSCTL_TEST_FILE="$XMG_TMP/test_sysctl.conf"
-printf 'net.core.somaxconn = 2048\nnet.ipv4.tcp_rmem = 4096 87380 4194304\n' > "$SYSCTL_TEST_FILE"
+printf 'net.core.somaxconn = 2048\nnet.ipv4.tcp_rmem = 4096 87380 1048576\n' > "$SYSCTL_TEST_FILE"
 
 # 模拟受限容器 (xmg_detect_container_restricted 返回 1)
 xmg_detect_container_restricted() { return 1; }
