@@ -30,11 +30,11 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AVA-2568/xmg/main/install.sh
   - 自动在 systemd drop-in 中注入 `GOMEMLIMIT` 堆限制；
   - 215MB 极小内存直接放行安装并自适应抑制策略。
 - **代理方案配置 (`xmg proxy`)**（交互菜单 + 幂等 CLI）：
-  - **VLESS + XHTTP + TLS**：严格遵循最新官方规范（`method: "xhttp"`、`mode: "packet-up"`）；注入 `"rejectUnknownSni": true` 防源站探测；出站显式声明 `domainStrategy` 闭环内置 DoH；`connIdle: 60` 极速回收空闲套接字。
+  - **VLESS + XHTTP + TLS**：严格遵循最新官方规范（`"network": "xhttp"`、`mode: "packet-up"`）；注入 `"rejectUnknownSni": true` 防源站探测；出站显式声明 `domainStrategy` 闭环内置 DoH；`connIdle: 60` 极速回收空闲套接字。
   - **SOCKS5**：公网或本地入口，`auth: password` 认证，支持绑定 `127.0.0.1` 本地安全转发或 `0.0.0.0` 公网暴露。
   - 状态批处理：消灭循环磁盘读写，单一原子事务落盘。
 - **专属系统调优 (`xmg tune`)**：
-  - **四阶内核网络缓冲优化**：新增 `extreme_low` (<=256MB) 档位（`conntrack_max=8192`，4MB TCP 缓冲，收敛突发连接内存峰值）；受限容器静默容错；
+  - **四阶内核网络缓冲优化**：新增 `extreme_low` (<=256MB) 档位（`conntrack_max=8192`，1MB TCP 缓冲与 tcp_mem 硬保护，收敛突发连接内存峰值）；受限容器静默容错；
   - 一键 BBR + FQ（内核 4.9+）；
   - nofile limits（PAM limits.d + systemd DefaultLimitNOFILE）；
   - 防磁盘打满的 Swap 管理（创建前预检根分区剩余空间，不足自动缩减；容器环境无法 `swapon` 平滑友好降级）；

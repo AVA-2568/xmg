@@ -34,7 +34,7 @@
 - Consumes: `xmg_mkdirs`, `install_dirs`, `manifest_entry_validate`
 - Produces: `xmg.files` 自包含且所有目录权限严格收敛至 0700/0600，`common.sh` 不再逆向加载 `detect.sh`/`doctor.sh`，`xmg_systemctl` 状态查询在 `set -e` 下安全返回。
 
-- [ ] **Step 1: 编写清单自包含与安装单元测试**
+- [x] **Step 1: 编写清单自包含与安装单元测试**
 
 ```bash
 # tests/cases/test_manifest_integrity.sh
@@ -56,12 +56,12 @@ t_assert "拒绝路径穿越条目" ! manifest_entry_validate "../etc/passwd"
 t_assert "拒绝根路径条目" ! manifest_entry_validate "/bin/sh"
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL（`清单自包含 xmg.files 自身` 失败）
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 在 `xmg.files` 顶部或末尾添加 `xmg.files` 自身；
 2. 修改 `install.sh` 中的 `install_dirs`：将 `$XMG_ETC_DIR`、`$XMG_BACKUP_DIR`、`$XMG_XRAY_DIR` 的权限由 `755` 修改为 `700`；
@@ -70,12 +70,12 @@ t_assert "拒绝根路径条目" ! manifest_entry_validate "/bin/sh"
    - 将 `xmg_mkdirs` 中 `/opt/xmg/log` 权限设为 `0750`，`error.log` 设为 `0640`，彻底移除 777/666；
    - 修改 `xmg_systemctl`：在 `status|is-active|is-enabled` 分支中使用 `systemctl "$action" "$service" || return $?` 并明确捕获退出码，防止触发 `set -e` 终止。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add xmg.files install.sh lib/common.sh tests/cases/test_manifest_integrity.sh tests/cases/test_install_unit.sh
@@ -96,7 +96,7 @@ git commit -m "fix(security): enforce manifest self-containment, tighten directo
 - Consumes: `xmg_main`, `xmg_usage`, `xmg_read_mem`, `xmg_read_disk_root`
 - Produces: `xmg` 支持 `tune`, `firewall`, `ssh`, `xray`, `detect`, `update`, `uninstall`, `system` 子命令；`system.sh` 具备 `LC_ALL=C` 保护与 Cgroup 容器内存计算。
 
-- [ ] **Step 1: 编写 CLI 门面与系统指标测试**
+- [x] **Step 1: 编写 CLI 门面与系统指标测试**
 
 ```bash
 # tests/cases/test_cli_facade.sh
@@ -120,12 +120,12 @@ LC_ALL=zh_CN.UTF-8 root_pct="$(xmg_read_disk_root)"
 t_assert "中文 Locale 下磁盘用量为纯数字百分比" test -n "$root_pct"
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL（`帮助含 tune` 失败）
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `xmg`：
    - 将 `version` 与 `help` 判断提前至最顶层，直接 echo 退出，不预加载任何非必要模块；
@@ -137,12 +137,12 @@ t_assert "中文 Locale 下磁盘用量为纯数字百分比" test -n "$root_pct
    - 在 `xmg_read_disk_root` 中强制使用 `LC_ALL=C df -hP /`；
    - 在 `xmg_read_mem` 中增加 Cgroup 内存探测（若存在 `/sys/fs/cgroup/memory.max` 或 v1 对应文件且数值有效，优先基于 Cgroup 限额计算百分比）。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add xmg lib/system.sh tests/cases/test_cli_facade.sh tests/cases/test_system_metrics.sh
@@ -163,7 +163,7 @@ git commit -m "feat(cli): complete all subcommand routing, prevent set +e leakag
 - Consumes: `xmg_state_commit`, `_xmg_render_config_bash`, `_xmg_json_escape_into`
 - Produces: `state.sh` 支持 `state.env` + `config.json` 联合原子提交与失败联动回滚；`render.sh` 遵循 `"network": "xhttp"` 并转义控制字符。
 
-- [ ] **Step 1: 编写联合两阶段提交与极端渲染测试**
+- [x] **Step 1: 编写联合两阶段提交与极端渲染测试**
 
 ```bash
 # tests/cases/test_state_atomic_dual.sh
@@ -181,12 +181,12 @@ source "$SRC/lib/render.sh"
 # 断言含有特殊控制字符的输入被安全转义为合法 JSON
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `lib/state.sh`：
    - 状态 Schema 扩充 `WARP_ENABLED`、`WARP_MODE`、`WARP_ENDPOINT`、`WARP_PRIVATE_KEY`、`WARP_PUBLIC_KEY`、`WARP_IPV4`、`WARP_IPV6`、`WARP_RESERVED`；
@@ -199,12 +199,12 @@ source "$SRC/lib/render.sh"
    - 对数字型字段（`port`、`bufferSize`）强制进行非空算术校验保底，杜绝裸逗号语法崩溃；
    - 支持动态渲染 `warp-out` 原生 WireGuard 出站与路由规则。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add lib/state.sh lib/render.sh tests/cases/test_state_atomic_dual.sh tests/cases/test_render_extreme.sh
@@ -224,7 +224,7 @@ git commit -m "fix(state): implement dual-file atomic commit & rollback and stan
 - Consumes: `xmg_warp_enable`, `xmg_warp_disable`, `xmg_proxy_apply`
 - Produces: WARP 配置通过 `state.sh` 统一管理，执行 `xmg proxy apply` 不再抹除 WARP，移除 `apt-get install jq`，修复端点 IPv6 方括号。
 
-- [ ] **Step 1: 编写 WARP 与 Proxy 协同状态一致性测试**
+- [x] **Step 1: 编写 WARP 与 Proxy 协同状态一致性测试**
 
 ```bash
 # tests/cases/test_warp_proxy_synergy.sh
@@ -235,12 +235,12 @@ SRC="$TESTS_DIR/.."
 # 断言 state.env 中 WARP_ENABLED 保持为 1
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `lib/warp.sh`：
    - 彻底删除使用 `jq` 原地改写现网 `config.json` 的代码；
@@ -251,12 +251,12 @@ SRC="$TESTS_DIR/.."
    - 修复提前提交草稿的时序漏洞，与 `state.sh` 的联合两阶段事务严格对齐；
    - 替换 OpenSSL 自签证书命令中的进程替换语法，改用原生 `-newkey ec -pkeyopt ec_paramgen_curve:prime256v1`。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add lib/warp.sh lib/proxy.sh tests/cases/test_warp_proxy_synergy.sh
@@ -277,7 +277,7 @@ git commit -m "fix(warp): eliminate state drift by unifying WARP into state engi
 - Consumes: `xmg_firewall_allow_basic`, `xmg_ssh_change_port`, `xmg_ssh_fail2ban_setup`
 - Produces: 防火墙自动感知自定义 SSH 端口并放行；`ssh.sh` 修复未定义函数并适配 Ubuntu `ssh.socket`。
 
-- [ ] **Step 1: 编写防火墙与 SSH 安全加固测试**
+- [x] **Step 1: 编写防火墙与 SSH 安全加固测试**
 
 ```bash
 # tests/cases/test_firewall.sh
@@ -294,12 +294,12 @@ source "$SRC/lib/ssh.sh"
 # 验证 fail2ban jail 生成时提取真实配置的 SSH 端口，而非写死 22
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `lib/firewall.sh`：
    - 头部补充依赖加载与自声明标签 `# XMG_MENU_LABEL: 防火墙管理`；
@@ -311,12 +311,12 @@ source "$SRC/lib/ssh.sh"
    - 适配 Ubuntu 22.10+ / 24.04：检测 `ssh.socket`，若存在则写入 `/etc/systemd/system/ssh.socket.d/listen.conf` 覆盖 `ListenStream`；
    - 禁用密码登录前严密复核 `.ssh` 目录（0700）与 `authorized_keys` 文件权限。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add lib/firewall.sh lib/ssh.sh tests/cases/test_firewall.sh tests/cases/test_ssh.sh
@@ -337,7 +337,7 @@ git commit -m "fix(security): prevent SSH lockout in firewall, fix fail2ban port
 - Consumes: `xmg_tune_net_extreme_low`, `xmg_doctor_cli`, `xmg_detect_network`
 - Produces: `extreme_low` 下缓冲区收敛至 1MB 且下发 `net.ipv4.tcp_mem`；`doctor.sh` 真实展示 DNS，`detect.sh` 排除 ULA 与虚拟网卡。
 
-- [ ] **Step 1: 编写调优 OOM 防护与体检纠偏测试**
+- [x] **Step 1: 编写调优 OOM 防护与体检纠偏测试**
 
 ```bash
 # tests/cases/test_tune_oom_guard.sh
@@ -347,12 +347,12 @@ source "$SRC/lib/tune.sh"
 # 验证 extreme_low 下 vm.swappiness 为 60
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `lib/tune.sh`：
    - 在 `extreme_low` 档位中将 `buf_max` 收敛为 `1048576` (1MB)，显式配置 `net.ipv4.tcp_mem`；
@@ -369,12 +369,12 @@ source "$SRC/lib/tune.sh"
    - 增设防火墙、SSH 端口、NTP 时钟同步体检项；
    - 完善 Critical 联合判定规则。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add lib/tune.sh lib/doctor.sh lib/detect.sh tests/cases/test_tune_oom_guard.sh
@@ -398,7 +398,7 @@ git commit -m "fix(tune): harden extreme-low memory TCP buffers, fix doctor DNS 
 - Consumes: `xmg_uninstall_cli`, `xmg_update_run`, `xmg_menu_discover_modules`
 - Produces: drop-in 收敛至 `xray.sh`；所有模块统一标签自声明；`update.sh` 支持原子替换与回滚；`uninstall.sh` 保护系统官方 unit 并支持 `--yes`。
 
-- [ ] **Step 1: 编写生命周期安全与回滚测试**
+- [x] **Step 1: 编写生命周期安全与回滚测试**
 
 ```bash
 # tests/cases/test_uninstall_safety.sh
@@ -416,12 +416,12 @@ source "$SRC/lib/update.sh"
 # 验证更新失败时触发完整自动回滚，恢复所有模块与清单
 ```
 
-- [ ] **Step 2: 运行测试验证失败**
+- [x] **Step 2: 运行测试验证失败**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: FAIL
 
-- [ ] **Step 3: 实施最小改动修复**
+- [x] **Step 3: 实施最小改动修复**
 
 1. 修改 `lib/core.sh` 与 `lib/xray.sh`：
    - 将 systemd drop-in 生成与覆盖逻辑统一移回 `lib/xray.sh`；
@@ -438,12 +438,12 @@ source "$SRC/lib/update.sh"
    - 将 `xmg-warp.service` 与孤儿进程纳入清理；
    - 增加 `$XMG_HOME` 路径安全断言，支持 `--yes` 非交互选项。
 
-- [ ] **Step 4: 运行测试验证通过**
+- [x] **Step 4: 运行测试验证通过**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS
 
-- [ ] **Step 5: 提交改动**
+- [x] **Step 5: 提交改动**
 
 ```bash
 git add lib/core.sh lib/xray.sh lib/menu.sh lib/update.sh lib/uninstall.sh tests/cases/test_lifecycle_update_rollback.sh tests/cases/test_uninstall_safety.sh
@@ -463,7 +463,7 @@ git commit -m "fix(lifecycle): secure uninstall boundaries, enforce atomic updat
 - Consumes: 全量测试套件
 - Produces: 自动化测试覆盖全部 20 个核心模块，全量用例 PASS，测试点 700+，文档与实现 100% 对齐。
 
-- [ ] **Step 1: 集成所有新增测试至 `tests/run.sh`**
+- [x] **Step 1: 集成所有新增测试至 `tests/run.sh`**
 
 将新增的 8 个测试用例加入 `tests/run.sh` 的执行序列中：
 - `test_manifest_integrity.sh`
@@ -479,21 +479,21 @@ git commit -m "fix(lifecycle): secure uninstall boundaries, enforce atomic updat
 - `test_lifecycle_update_rollback.sh`
 - `test_uninstall_safety.sh`
 
-- [ ] **Step 2: 运行全局全量回归测试**
+- [x] **Step 2: 运行全局全量回归测试**
 
 运行: `& "I:\Git\bin\bash.exe" tests/run.sh`
 预期: PASS >= 700, FAIL = 0
 
-- [ ] **Step 3: 运行语法与静态校验**
+- [x] **Step 3: 运行语法与静态校验**
 
 运行: `& "I:\Git\bin\bash.exe" -c 'for f in xmg install.sh lib/*.sh tests/*.sh tests/cases/*.sh; do bash -n "$f" || exit 1; done'`
 预期: 零语法错误
 
-- [ ] **Step 4: 同步更新 README.md 与帮助文档**
+- [x] **Step 4: 同步更新 README.md 与帮助文档**
 
 确保 README.md 中新增的 CLI 指令与实现完全一致。
 
-- [ ] **Step 5: 提交集成验收**
+- [x] **Step 5: 提交集成验收**
 
 ```bash
 git add tests/run.sh README.md
