@@ -4,6 +4,8 @@
 #
 # core.sh - Xray 内核管理
 #
+# XMG_MENU_LABEL: 核心架构引擎
+#
 # 说明：
 #   - 复用官方 Xray-install 脚本，不自行拼接下载地址
 #   - 官方脚本已内置 --beta（预览版，对应 PRE_RELEASE_LATEST）与 --version <tag>
@@ -172,147 +174,29 @@ xmg_core_install() {
 }
 
 # ===== systemd drop-in 生成与写入 =====
-xmg_core_generate_dropin_content() {
-    local cfg="${1:-${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}}"
-    local xray_bin="/usr/local/bin/xray"
-    if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
-        xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
-    elif command -v xray >/dev/null 2>&1; then
-        xray_bin="$(command -v xray)"
-    elif [ -x /usr/bin/xray ]; then
-        xray_bin="/usr/bin/xray"
+_xmg_core_ensure_xray_module() {
+    if ! declare -F xmg_xray_patch_systemd_unit >/dev/null 2>&1; then
+        local xray_file="${XMG_LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/xray.sh"
+        if [ -r "$xray_file" ]; then
+            # shellcheck source=/dev/null
+            source "$xray_file"
+        fi
     fi
-    [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || xray_bin="/usr/local/bin/xray"
+}
 
-    cat <<EOF
-# XMG 管理的 drop-in 覆盖文件
-# 此文件优先级高于官方的 10-donot_touch_single_conf.conf
-# 请勿手动编辑，由 XMG 自动管理
-[Service]
-User=root
-Environment="GOMEMLIMIT=100MiB"
-Environment="GODEBUG=madvdontneed=1"
-Environment="GOMAXPROCS=1"
-ExecStart=
-ExecStart=$xray_bin run -config $cfg
-EOF
+xmg_core_generate_dropin_content() {
+    _xmg_core_ensure_xray_module
+    xmg_xray_generate_dropin_content "$@"
 }
 
 xmg_core_patch_systemd_unit() {
-    local xray_unit=""
-    local unit_found=0
-    local sys_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
-
-    # 查找 Xray 的 systemd unit 文件
-    for path in "${sys_dir}/xray.service" "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
-        if [ -f "$path" ]; then
-            xray_unit="$path"
-            unit_found=1
-            break
-        fi
-    done
-
-    # 关键自愈：未找到 unit 时，若系统中存在 xray 二进制，直接自动生成 /etc/systemd/system/xray.service 自包含服务单元
-    if [ "$unit_found" -ne 1 ]; then
-        local xray_bin=""
-        if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
-            xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
-        elif command -v xray >/dev/null 2>&1; then
-            xray_bin="$(command -v xray)"
-        elif [ -x /usr/local/bin/xray ]; then
-            xray_bin="/usr/local/bin/xray"
-        elif [ -x /usr/bin/xray ]; then
-            xray_bin="/usr/bin/xray"
-        fi
-
-        if [ -n "$xray_bin" ] && [ -x "$xray_bin" ]; then
-            xmg_info "未检测到现有 xray.service，正在自动生成自包含 systemd unit..."
-            mkdir -p "${sys_dir}"
-            cat > "${sys_dir}/xray.service" << EOF_UNIT
-[Unit]
-Description=Xray Service
-Documentation=https://github.com/xtls
-After=network.target nss-lookup.target
-
-[Service]
-User=root
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-Environment="GOMEMLIMIT=100MiB"
-Environment="GODEBUG=madvdontneed=1"
-Environment="GOMAXPROCS=1"
-ExecStart=$xray_bin run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}
-Restart=on-failure
-RestartPreventExitStatus=23
-LimitNPROC=10000
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF_UNIT
-            chmod 644 "${sys_dir}/xray.service"
-            systemctl daemon-reload >/dev/null 2>&1 || true
-            systemctl enable xray >/dev/null 2>&1 || true
-            xray_unit="${sys_dir}/xray.service"
-            unit_found=1
-            xmg_info "已成功自愈生成 Xray systemd unit: $xray_unit"
-            return 0
-        fi
-
-        xmg_warn "未找到 Xray 可执行程序与 systemd unit，跳过自动配置"
-        return 1
-    fi
-
-    xmg_info "检测到 Xray systemd unit: $xray_unit"
-
-    local dropin_dir="${sys_dir}/xray.service.d"
-    local dropin_file="${dropin_dir}/20-xmg.conf"
-
-    mkdir -p "$dropin_dir"
-
-    local target_cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
-    # 检查 drop-in 是否已经指向 XMG 路径且已包含 GOMEMLIMIT
-    if [ -f "$dropin_file" ] && grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=100MiB" "$dropin_file" 2>/dev/null; then
-        xmg_info "drop-in 覆盖已存在且已应用 100MiB 内存抑制，无需修改"
-        return 0
-    fi
-
-    # 备份现有 drop-in（如果存在）
-    if [ -f "$dropin_file" ]; then
-        local backup_dropin="${dropin_file}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
-        cp "$dropin_file" "$backup_dropin" 2>/dev/null && \
-            xmg_info "已备份现有 drop-in 到: $backup_dropin" || true
-    fi
-
-    xmg_core_generate_dropin_content "$target_cfg" > "$dropin_file"
-
-    if grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=100MiB" "$dropin_file" 2>/dev/null; then
-        xmg_info "drop-in 覆盖已创建，已应用 GOMEMLIMIT=100MiB / GOMAXPROCS=1"
-    else
-        xmg_warn "drop-in 覆盖文件写入失败"
-        return 1
-    fi
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    return 0
+    _xmg_core_ensure_xray_module
+    xmg_xray_patch_systemd_unit "$@"
 }
 
 xmg_core_restore_systemd_unit() {
-    local sys_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
-    local dropin_dir="${sys_dir}/xray.service.d"
-    local dropin_file="${dropin_dir}/20-xmg.conf"
-
-    if [ ! -f "$dropin_file" ]; then
-        xmg_warn "未找到 XMG drop-in 覆盖: $dropin_file"
-        return 1
-    fi
-
-    rm -f "$dropin_file" && xmg_info "已移除 XMG drop-in 覆盖: $dropin_file"
-    rmdir "$dropin_dir" 2>/dev/null || true
-
-    systemctl daemon-reload >/dev/null 2>&1 || true
-    xmg_info "Xray 已恢复官方 systemd unit 配置（重启服务后生效）"
+    _xmg_core_ensure_xray_module
+    xmg_xray_restore_systemd_unit "$@"
 }
 
 # ===== 临时解压目录解析 =====
@@ -383,19 +267,14 @@ xmg_core_install_official() {
 
     local target_tmp=""
     target_tmp="$(xmg_core_resolve_tmpdir)"
-    local custom_tmp_created=0
-    local run_tmpdir=""
-
+    # 规范化临时解压目录路径，防止 /tmp 冲突与多实例竞争
+    local run_tmpdir="${target_tmp%/}/xmg-inst-$-$RANDOM"
+    mkdir -p "$run_tmpdir" 2>/dev/null || run_tmpdir="$target_tmp"
     if [ "$target_tmp" != "/tmp" ]; then
-        run_tmpdir="$target_tmp/xray-inst.$$"
-        mkdir -p "$run_tmpdir" 2>/dev/null || run_tmpdir="$target_tmp"
-        mkdir -p "$run_tmpdir" 2>/dev/null || true
-        custom_tmp_created=1
         xmg_info "使用物理临时目录解压以防 tmpfs OOM: $run_tmpdir"
     fi
 
-    local script_tmp=""
-    script_tmp="$(mktemp 2>/dev/null || echo "/tmp/xray-install.$$.sh")"
+    local script_tmp="${run_tmpdir}/xray-install.sh"
 
     local install_urls=(
         "$XMG_XRAY_INSTALL_URL"
@@ -427,13 +306,8 @@ xmg_core_install_official() {
     local ret=0
     # args 故意不加引号：需要按空格拆成多个参数交给官方脚本
     # shellcheck disable=SC2086
-    if [ "$custom_tmp_created" -eq 1 ] && [ -d "$run_tmpdir" ]; then
-        TMPDIR="$run_tmpdir" bash "$script_tmp" install -f $args "${extra[@]}" || ret=$?
-        rm -rf "$run_tmpdir" 2>/dev/null || true
-    else
-        bash "$script_tmp" install -f $args "${extra[@]}" || ret=$?
-    fi
-    rm -f "$script_tmp" 2>/dev/null || true
+    TMPDIR="$run_tmpdir" bash "$script_tmp" install -f $args "${extra[@]}" || ret=$?
+    rm -rf "$run_tmpdir" 2>/dev/null || rm -f "$script_tmp" 2>/dev/null || true
 
     return "$ret"
 }
@@ -554,7 +428,6 @@ xmg_core_memcheck() {
 }
 
 # ===== 菜单 =====
-# XMG_MENU_LABEL: Xray 内核
 xmg_core_menu() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local choice="" ver=""

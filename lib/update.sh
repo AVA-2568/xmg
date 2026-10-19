@@ -4,10 +4,13 @@
 #
 # update.sh - XMG 更新模块
 #
+# XMG_MENU_LABEL: 版本在线升级
+#
 # 说明：
 #   - 从 GitHub 拉取最新版本并更新本地安装
 #   - 版本对比：本地主程序 vs GitHub Raw 主程序中的 XMG_VERSION
-#   - 更新流程在子 shell 中执行，避免污染调用方的 trap
+#   - 原子替换与完整回滚保护 (lib, bin, templates, xmg.files)
+#   - 绝不依赖 17 模块硬编码 fallback
 #   - 所有 XMG 管理文件集中放在 /opt/xmg
 #
 
@@ -24,7 +27,7 @@ XMG_UPDATE_FORCE="${XMG_UPDATE_FORCE:-0}"
 XMG_UPDATE_SKIP_VERIFY="${XMG_UPDATE_SKIP_VERIFY:-0}"
 
 # ===== 依赖 common.sh 的路径变量 =====
-XMG_BIN="${XMG_BIN:-$XMG_HOME/bin/xmg}"
+XMG_BIN="${XMG_BIN:-${XMG_HOME:-/opt/xmg}/bin/xmg}"
 XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
 
 # ===== 版本检测 =====
@@ -93,11 +96,177 @@ xmg_update_check_updates() {
     return 1
 }
 
-# ===== 拉取更新 =====
+# ===== 清单刷新 =====
+xmg_update_refresh_manifest() {
+    local target_root="${1:-$XMG_HOME}"
+    local manifest="${target_root}/xmg.files"
+    local tmp_manifest="${manifest}.tmp.$$"
 
-# 实际拉取与安装在子 shell 中执行：
-#   - 子 shell 内的 EXIT trap 只影响子 shell，不覆盖调用方（monitor）的清理 trap
-#   - 子 shell 内 xmg_die 只退出子 shell，失败通过退出码传递
+    {
+        printf 'xmg\n'
+        if [ -d "$target_root/lib" ]; then
+            for f in "$target_root/lib"/*.sh; do
+                [ -f "$f" ] || continue
+                printf 'lib/%s\n' "${f##*/}"
+            done
+        fi
+        if [ -d "$target_root/templates" ]; then
+            for f in "$target_root/templates"/*; do
+                [ -f "$f" ] || continue
+                printf 'templates/%s\n' "${f##*/}"
+            done
+        fi
+        printf 'xmg.files\n'
+    } > "$tmp_manifest" 2>/dev/null || return 1
+
+    mv "$tmp_manifest" "$manifest" 2>/dev/null || cp "$tmp_manifest" "$manifest"
+    rm -f "$tmp_manifest" 2>/dev/null || true
+    chmod 0644 "$manifest" 2>/dev/null || true
+}
+
+# ===== 原子替换与完整回滚 =====
+xmg_update_apply_atomic() {
+    local src_dir="$1"
+    local src_bin=""
+    local src_lib=""
+    local src_tpl=""
+    local src_manifest=""
+
+    # 1. 查找源文件结构
+    if [ -f "$src_dir/xmg" ]; then
+        src_bin="$src_dir/xmg"
+    elif [ -f "$src_dir/bin/xmg" ]; then
+        src_bin="$src_dir/bin/xmg"
+    fi
+
+    if [ -d "$src_dir/lib" ]; then
+        src_lib="$src_dir/lib"
+    fi
+
+    if [ -d "$src_dir/templates" ]; then
+        src_tpl="$src_dir/templates"
+    fi
+
+    if [ -f "$src_dir/xmg.files" ]; then
+        src_manifest="$src_dir/xmg.files"
+    fi
+
+    if [ -z "$src_bin" ] || [ -z "$src_lib" ]; then
+        xmg_error "更新源不完整: 缺少 xmg 主程序或 lib 模块目录"
+        return 1
+    fi
+
+    # 2. 语法自检验证，严防损坏包破坏运行时
+    if ! bash -n "$src_bin" >/dev/null 2>&1; then
+        xmg_error "主程序语法校验失败: $src_bin"
+        return 1
+    fi
+
+    local f=""
+    for f in "$src_lib"/*.sh; do
+        [ -f "$f" ] || continue
+        if ! bash -n "$f" >/dev/null 2>&1; then
+            xmg_error "模块语法校验失败: $f"
+            return 1
+        fi
+    done
+
+    # 3. 准备 staging 暂存目录
+    local staging_dir="${XMG_HOME}/.staging_update_$$"
+    rm -rf "$staging_dir" 2>/dev/null || true
+    mkdir -p "$staging_dir/bin" "$staging_dir/lib"
+
+    cp "$src_bin" "$staging_dir/bin/xmg" || { rm -rf "$staging_dir"; return 1; }
+    chmod 0755 "$staging_dir/bin/xmg" 2>/dev/null || true
+
+    for f in "$src_lib"/*.sh; do
+        [ -f "$f" ] || continue
+        cp "$f" "$staging_dir/lib/" || { rm -rf "$staging_dir"; return 1; }
+        chmod 0644 "$staging_dir/lib/${f##*/}" 2>/dev/null || true
+    done
+
+    if [ -n "$src_tpl" ] && [ -d "$src_tpl" ]; then
+        mkdir -p "$staging_dir/templates"
+        cp -r "$src_tpl"/* "$staging_dir/templates/" 2>/dev/null || true
+    elif [ -d "$XMG_HOME/templates" ]; then
+        mkdir -p "$staging_dir/templates"
+        cp -r "$XMG_HOME/templates"/* "$staging_dir/templates/" 2>/dev/null || true
+    fi
+
+    if [ -n "$src_manifest" ] && [ -f "$src_manifest" ]; then
+        cp "$src_manifest" "$staging_dir/xmg.files" 2>/dev/null || true
+    else
+        xmg_update_refresh_manifest "$staging_dir"
+    fi
+
+    # 4. 校验 staging 完整性
+    if [ ! -x "$staging_dir/bin/xmg" ] || [ ! -f "$staging_dir/lib/common.sh" ]; then
+        xmg_error "staging 完整性校验失败"
+        rm -rf "$staging_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    # 5. 备份当前完整运行时 (lib, bin, templates, xmg.files)
+    local backup_dir="${XMG_BACKUP_DIR}/update_$(date +%Y%m%d_%H%M%S)"
+    mkdir -p "$backup_dir" 2>/dev/null || true
+
+    [ -d "$XMG_HOME/lib" ] && cp -r "$XMG_HOME/lib" "$backup_dir/lib" 2>/dev/null || true
+    [ -d "$XMG_HOME/bin" ] && cp -r "$XMG_HOME/bin" "$backup_dir/bin" 2>/dev/null || true
+    [ -d "$XMG_HOME/templates" ] && cp -r "$XMG_HOME/templates" "$backup_dir/templates" 2>/dev/null || true
+    [ -f "$XMG_HOME/xmg.files" ] && cp "$XMG_HOME/xmg.files" "$backup_dir/xmg.files" 2>/dev/null || true
+
+    # 6. 原子目录切换与回滚
+    local switch_ok=1
+
+    # 移出当前目录为旧备份临时态
+    [ -d "$XMG_HOME/lib" ] && mv "$XMG_HOME/lib" "$XMG_HOME/.lib.old.$$" 2>/dev/null || true
+    [ -d "$XMG_HOME/bin" ] && mv "$XMG_HOME/bin" "$XMG_HOME/.bin.old.$$" 2>/dev/null || true
+    [ -d "$XMG_HOME/templates" ] && mv "$XMG_HOME/templates" "$XMG_HOME/.templates.old.$$" 2>/dev/null || true
+    [ -f "$XMG_HOME/xmg.files" ] && mv "$XMG_HOME/xmg.files" "$XMG_HOME/.xmg.files.old.$$" 2>/dev/null || true
+
+    # 移入 staging
+    mv "$staging_dir/lib" "$XMG_HOME/lib" 2>/dev/null || switch_ok=0
+    mv "$staging_dir/bin" "$XMG_HOME/bin" 2>/dev/null || switch_ok=0
+    if [ -d "$staging_dir/templates" ]; then
+        mv "$staging_dir/templates" "$XMG_HOME/templates" 2>/dev/null || switch_ok=0
+    fi
+    if [ -f "$staging_dir/xmg.files" ]; then
+        mv "$staging_dir/xmg.files" "$XMG_HOME/xmg.files" 2>/dev/null || switch_ok=0
+    fi
+
+    # 若切换失败，立即触发原子回滚
+    if [ "$switch_ok" -ne 1 ]; then
+        xmg_error "原子替换失败，正在触发完整自动回滚..."
+        rm -rf "$XMG_HOME/lib" "$XMG_HOME/bin" "$XMG_HOME/templates" "$XMG_HOME/xmg.files" 2>/dev/null || true
+        [ -d "$XMG_HOME/.lib.old.$$" ] && mv "$XMG_HOME/.lib.old.$$" "$XMG_HOME/lib" 2>/dev/null || true
+        [ -d "$XMG_HOME/.bin.old.$$" ] && mv "$XMG_HOME/.bin.old.$$" "$XMG_HOME/bin" 2>/dev/null || true
+        [ -d "$XMG_HOME/.templates.old.$$" ] && mv "$XMG_HOME/.templates.old.$$" "$XMG_HOME/templates" 2>/dev/null || true
+        [ -f "$XMG_HOME/.xmg.files.old.$$" ] && mv "$XMG_HOME/.xmg.files.old.$$" "$XMG_HOME/xmg.files" 2>/dev/null || true
+        rm -rf "$staging_dir" 2>/dev/null || true
+        return 1
+    fi
+
+    # 清理暂存态与旧临时目录
+    rm -rf "$XMG_HOME/.lib.old.$$" "$XMG_HOME/.bin.old.$$" "$XMG_HOME/.templates.old.$$" "$XMG_HOME/.xmg.files.old.$$" "$staging_dir" 2>/dev/null || true
+
+    # 同步配置模板到 etc/xray
+    if [ -d "$XMG_HOME/templates" ]; then
+        mkdir -p "$XMG_ETC_DIR/xray"
+        cp -r "$XMG_HOME/templates"/* "$XMG_ETC_DIR/xray/" 2>/dev/null || true
+    fi
+
+    # 重建软链接
+    mkdir -p "$(dirname "$XMG_LINK")" 2>/dev/null || true
+    ln -sf "$XMG_BIN" "$XMG_LINK" 2>/dev/null || true
+
+    # 刷新 xmg.files 清单
+    xmg_update_refresh_manifest "$XMG_HOME"
+
+    xmg_info "原子更新与清单同步成功！"
+    return 0
+}
+
+# ===== 拉取更新 =====
 xmg_update_pull() {
     local branch="${1:-$XMG_UPDATE_BRANCH}"
 
@@ -112,12 +281,9 @@ xmg_update_pull_impl() {
         local branch="${1:-$XMG_UPDATE_BRANCH}"
         local tmp_dir=""
         local repo_url="https://github.com/$XMG_UPDATE_REPO.git"
-        local backup_dir=""
         local archive_url=""
         local extracted_dir=""
-        local file=""
 
-        # 分支名白名单校验：防止拼入 git 参数与下载 URL 时被注入
         case "$branch" in
             ''|*[!A-Za-z0-9._/-]*)
                 xmg_die "分支名包含非法字符: $branch"
@@ -127,7 +293,6 @@ xmg_update_pull_impl() {
         xmg_info "从 GitHub 拉取更新 (分支: $branch)"
         xmg_info "仓库: $repo_url"
 
-        # 检查 git
         if ! command -v git &>/dev/null; then
             xmg_warn "git 不存在，尝试安装"
             if command -v apt-get &>/dev/null; then
@@ -146,7 +311,7 @@ xmg_update_pull_impl() {
 
         # 克隆仓库
         if ! git clone --depth 1 -b "$branch" "$repo_url" "$tmp_dir" 2>/dev/null; then
-            xmg_warn "git clone 失败 (纯 IPv6 主机直连 GitHub 常见)，尝试使用 curl 下载压缩包"
+            xmg_warn "git clone 失败，尝试使用 curl/wget 下载压缩包"
             archive_url="https://github.com/$XMG_UPDATE_REPO/archive/refs/heads/$branch.tar.gz"
 
             rm -rf "$tmp_dir"
@@ -156,7 +321,6 @@ xmg_update_pull_impl() {
             local urls=(
                 "$archive_url"
                 "https://ghfast.top/$archive_url"
-                "https://mirror.ghproxy.com/$archive_url"
             )
 
             for u in "${urls[@]}"; do
@@ -175,13 +339,11 @@ xmg_update_pull_impl() {
             done
 
             if [ "$download_ok" -eq 0 ]; then
-                xmg_error "下载失败: 无法连接 GitHub (纯 IPv6 主机请在 /etc/resolv.conf 临时配置 DNS64，或配置 WARP IPv4 出口)"
-                xmg_info "临时恢复命令: echo -e \"nameserver 2a01:4f8:c2c:123f::1\\nnameserver 2a00:1098:2b::1\" > /etc/resolv.conf"
+                xmg_error "下载失败: 无法连接 GitHub"
                 return 1
             fi
 
             tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir" || xmg_die "解压失败"
-            # 压缩包会多一层目录，调整路径
             extracted_dir="$(find "$tmp_dir" -maxdepth 1 -mindepth 1 -type d ! -name '*.tar.gz' | head -1)"
             if [ -n "$extracted_dir" ] && [ "$extracted_dir" != "$tmp_dir" ]; then
                 mv "$extracted_dir"/* "$tmp_dir/" 2>/dev/null || true
@@ -189,60 +351,8 @@ xmg_update_pull_impl() {
             fi
         fi
 
-        # 确认代码已拉取
-        if [ ! -f "$tmp_dir/xmg" ] || [ ! -d "$tmp_dir/lib" ]; then
-            xmg_die "拉取的代码不完整，缺少 xmg 或 lib/ 目录"
-        fi
-
-        # 将新代码安装到 XMG 统一目录
-        xmg_info "正在安装更新到 $XMG_HOME"
-
-        # 备份当前配置
-        backup_dir="${XMG_BACKUP_DIR}/update_$(date +%Y%m%d_%H%M%S)"
-        mkdir -p "$backup_dir" 2>/dev/null || true
-
-        if [ -d "$XMG_LIB_DIR" ]; then
-            cp -r "$XMG_LIB_DIR" "$backup_dir/" 2>/dev/null || xmg_warn "备份当前模块失败"
-        fi
-        if [ -f "$XMG_BIN" ]; then
-            cp "$XMG_BIN" "$backup_dir/" 2>/dev/null || xmg_warn "备份当前主程序失败"
-        fi
-
-        xmg_info "已备份当前版本到: $backup_dir"
-
-        # 安装主程序
-        install -m 0755 -o root -g root "$tmp_dir/xmg" "$XMG_BIN" || xmg_die "安装主程序失败"
-
-        # 安装模块
-        mkdir -p "$XMG_LIB_DIR"
-        for file in "$tmp_dir/lib"/*.sh; do
-            [ -f "$file" ] || continue
-            install -m 0644 -o root -g root "$file" "$XMG_LIB_DIR/" || xmg_warn "安装模块失败: $file"
-        done
-
-        # 同步配置模板（xray 配置渲染依赖）
-        if [ -d "$tmp_dir/templates" ]; then
-            mkdir -p "$XMG_ETC_DIR/xray"
-            for file in "$tmp_dir/templates"/*.json; do
-                [ -f "$file" ] || continue
-                install -m 0644 -o root -g root "$file" "$XMG_ETC_DIR/xray/" || xmg_warn "安装模板失败: $file"
-            done
-        fi
-
-        # 同步模块清单（menu 模块发现依赖 $XMG_HOME/xmg.files）
-        if [ -f "$tmp_dir/xmg.files" ]; then
-            install -m 0644 -o root -g root "$tmp_dir/xmg.files" "$XMG_HOME/xmg.files" \
-                || xmg_warn "同步 xmg.files 失败"
-        fi
-
-        # 重建命令入口软链接
-        mkdir -p "$(dirname "$XMG_LINK")"
-        ln -sf "$XMG_BIN" "$XMG_LINK" || xmg_warn "重建命令入口软链接失败"
-
-        xmg_info "更新安装完成"
-        xmg_info "命令入口: $XMG_LINK"
-        xmg_info "主程序: $XMG_BIN"
-        xmg_info "模块目录: $XMG_LIB_DIR"
+        # 执行原子替换与完整回滚保护
+        xmg_update_apply_atomic "$tmp_dir" || return 1
     ) || return 1
 
     return 0
@@ -276,27 +386,26 @@ xmg_update_verify() {
         xmg_info "命令入口: OK ($XMG_LINK -> $XMG_BIN)"
     fi
 
-    # 检查核心模块
+    # 严格根据 xmg.files 清单校验，绝不使用 17 模块硬编码 fallback
     local core_modules=()
     local manifest="${XMG_HOME}/xmg.files"
     local line=""
-    if [ -r "$manifest" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in
-                ''|'#'*) continue ;;
-                lib/*.sh) core_modules+=("${line#lib/}") ;;
-            esac
-        done < "$manifest"
+
+    if [ ! -f "$manifest" ] || [ ! -r "$manifest" ]; then
+        xmg_warn "清单文件不存在或不可读: $manifest"
+        return 1
     fi
 
-    # 清单不存在时的兜底核心模块列表
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) continue ;;
+            lib/*.sh) core_modules+=("${line#lib/}") ;;
+        esac
+    done < "$manifest"
+
     if [ "${#core_modules[@]}" -eq 0 ]; then
-        core_modules=(
-            "common.sh" "detect.sh" "system.sh" "monitor.sh" "menu.sh"
-            "state.sh" "render.sh" "proxy.sh" "core.sh" "xray.sh"
-            "firewall.sh" "tune.sh" "doctor.sh" "ssh.sh" "maint.sh"
-            "update.sh" "uninstall.sh"
-        )
+        xmg_warn "清单中未定义任何 lib/*.sh 模块"
+        return 1
     fi
 
     local module=""
@@ -310,7 +419,7 @@ xmg_update_verify() {
     done
 
     # 检查统一目录结构
-    local required_dirs=("$XMG_BIN_DIR" "$XMG_LIB_DIR" "$XMG_ETC_DIR" "$XMG_ETC_DIR/xray" "$XMG_RUN_DIR" "$XMG_LOG_DIR" "$XMG_BACKUP_DIR" "$XMG_XRAY_DIR")
+    local required_dirs=("${XMG_BIN_DIR:-$XMG_HOME/bin}" "${XMG_LIB_DIR:-$XMG_HOME/lib}" "${XMG_ETC_DIR:-$XMG_HOME/etc}" "${XMG_RUN_DIR:-$XMG_HOME/run}" "${XMG_LOG_DIR:-$XMG_HOME/log}" "${XMG_BACKUP_DIR:-$XMG_HOME/backups}" "${XMG_XRAY_DIR:-$XMG_HOME/xray}")
     local dir=""
     for dir in "${required_dirs[@]}"; do
         if [ ! -d "$dir" ]; then
@@ -340,7 +449,6 @@ xmg_update_run() {
     xmg_info "分支: $branch"
     xmg_info "目标目录: $XMG_HOME"
 
-    # 检查更新（返回 0 表示有可用更新）
     if [ "$force" != "1" ]; then
         if xmg_update_check_updates; then
             if ! xmg_confirm "发现新版本，是否更新?"; then
@@ -356,12 +464,10 @@ xmg_update_run() {
         fi
     fi
 
-    # 拉取更新
     if ! xmg_update_pull "$branch"; then
         return 1
     fi
 
-    # 验证
     if [ "$skip_verify" != "1" ]; then
         xmg_update_verify
     fi
@@ -394,10 +500,8 @@ xmg_update_rollback() {
     local dir=""
     local i=0
     local choice=""
-    local file=""
 
     if [ -z "$backup_dir" ]; then
-        # 列出可用备份
         if [ -d "$XMG_BACKUP_DIR" ]; then
             for dir in "$XMG_BACKUP_DIR"/update_*; do
                 [ -d "$dir" ] || continue
@@ -433,26 +537,40 @@ xmg_update_rollback() {
 
     xmg_info "从备份回滚: $backup_dir"
 
-    # 回滚主程序
-    if [ -f "$backup_dir/xmg" ]; then
-        install -m 0755 -o root -g root "$backup_dir/xmg" "$XMG_BIN" || xmg_warn "回滚主程序失败"
-        xmg_info "主程序已回滚"
+    # 1. 回滚主程序与 bin 目录
+    mkdir -p "$XMG_HOME/bin"
+    if [ -d "$backup_dir/bin" ]; then
+        cp -r "$backup_dir/bin"/* "$XMG_HOME/bin/" 2>/dev/null || true
+    elif [ -f "$backup_dir/xmg" ]; then
+        cp "$backup_dir/xmg" "$XMG_HOME/bin/xmg"
     fi
+    [ -f "$XMG_BIN" ] && chmod 0755 "$XMG_BIN" 2>/dev/null || true
 
-    # 回滚模块
+    # 2. 回滚 lib 模块目录
     if [ -d "$backup_dir/lib" ]; then
-        for file in "$backup_dir/lib"/*.sh; do
-            [ -f "$file" ] || continue
-            install -m 0644 -o root -g root "$file" "$XMG_LIB_DIR/" || xmg_warn "回滚模块失败: $file"
-        done
-        xmg_info "模块已回滚"
+        mkdir -p "$XMG_HOME/lib"
+        cp -r "$backup_dir/lib"/* "$XMG_HOME/lib/" 2>/dev/null || true
+        chmod 0644 "$XMG_HOME/lib"/*.sh 2>/dev/null || true
     fi
 
-    # 重建命令入口
-    mkdir -p "$(dirname "$XMG_LINK")"
-    ln -sf "$XMG_BIN" "$XMG_LINK" || xmg_warn "重建命令入口失败"
+    # 3. 回滚 templates 目录
+    if [ -d "$backup_dir/templates" ]; then
+        mkdir -p "$XMG_HOME/templates"
+        cp -r "$backup_dir/templates"/* "$XMG_HOME/templates/" 2>/dev/null || true
+    fi
+
+    # 4. 回滚 xmg.files 清单
+    if [ -f "$backup_dir/xmg.files" ]; then
+        cp "$backup_dir/xmg.files" "$XMG_HOME/xmg.files" 2>/dev/null || true
+        chmod 0644 "$XMG_HOME/xmg.files" 2>/dev/null || true
+    fi
+
+    # 5. 重建命令入口软链接
+    mkdir -p "$(dirname "$XMG_LINK")" 2>/dev/null || true
+    ln -sf "$XMG_BIN" "$XMG_LINK" 2>/dev/null || true
 
     xmg_info "回滚完成"
+    return 0
 }
 
 # ===== 更新菜单 =====

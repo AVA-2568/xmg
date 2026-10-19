@@ -4,12 +4,14 @@
 #
 # menu.sh - XMG 管理菜单与模块发现
 #
+# XMG_MENU_LABEL: 交互主菜单
+#
 # 说明：
 #   - 本文件是 Bash 库文件，应由 xmg 主程序 source 加载
 #   - 使用 Bash 数组和正则匹配，因此不支持 sh/dash
 #   - 文件内容应使用 UTF-8 编码保存
 #   - 模块发现：从 xmg.files 清单读取 lib/*.sh 条目，按清单顺序生成菜单
-#   - 标签来源：模块文件内 # XMG_MENU_LABEL: xxx 自声明，兼容旧 case 硬编码
+#   - 标签来源：统一从目标文件头部读取规范标签 # XMG_MENU_LABEL: <显示名称>
 #
 
 # menu.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
@@ -100,14 +102,13 @@ xmg_menu_find_menu_func() {
     return 1
 }
 
-# 从模块文件中静态扫描菜单标签
+# 从模块文件头部静态扫描菜单规范标签
 #
 # 约定：在模块文件头部使用注释声明标签
-#   # XMG_MENU_LABEL: 外部工具
+#   # XMG_MENU_LABEL: <显示名称>
 #
 # 注意：
-#   - 只做轻量静态扫描，不执行模块内容
-#   - 与 xmg_menu_find_menu_func() 设计一致
+#   - 只做轻量静态扫描（前 100 行），不执行模块内容
 xmg_menu_find_label() {
     local path="$1"
     local line=""
@@ -115,17 +116,15 @@ xmg_menu_find_label() {
     [ -r "$path" ] || return 1
 
     while IFS= read -r line; do
-        # 跳过空行
-        case "$line" in
-            '')
-                continue
-                ;;
-        esac
-
         # 匹配 # XMG_MENU_LABEL: 标签文本
         if [[ "$line" =~ ^[[:space:]]*\#[[:space:]]*XMG_MENU_LABEL:[[:space:]]*(.+)$ ]]; then
-            printf '%s' "${BASH_REMATCH[1]}"
-            return 0
+            local label="${BASH_REMATCH[1]}"
+            label="${label#"${label%%[![:space:]]*}"}"
+            label="${label%"${label##*[![:space:]]}"}"
+            if [ -n "$label" ]; then
+                printf '%s' "$label"
+                return 0
+            fi
         fi
     done < "$path"
 
@@ -134,37 +133,16 @@ xmg_menu_find_label() {
 
 xmg_menu_label_for_file() {
     local file="$1"
-    local base="${file%.sh}"
     local path="$XMG_LIB_DIR/$file"
     local label=""
 
-    # 第一优先：从模块文件中静态扫描自声明标签
-    if label="$(xmg_menu_find_label "$path")"; then
+    # 统一从目标文件头部读取规范自声明标签，彻底移除硬编码映射
+    if label="$(xmg_menu_find_label "$path")" && [ -n "$label" ]; then
         printf '%s' "$label"
-        return
+        return 0
     fi
 
-    # 第二优先：硬编码标签映射（向后兼容已有模块）
-    case "$file" in
-        xray.sh)
-            printf 'Xray 管理'
-            ;;
-        firewall.sh)
-            printf '防火墙管理'
-            ;;
-        doctor.sh)
-            printf '系统健康诊断'
-            ;;
-        update.sh)
-            printf '更新 / 版本'
-            ;;
-        uninstall.sh)
-            printf '卸载 XMG'
-            ;;
-        *)
-            printf '%s' "$base"
-            ;;
-    esac
+    return 1
 }
 
 xmg_menu_module_seen() {
@@ -186,7 +164,7 @@ xmg_menu_add_module_if_valid() {
     local fn=""
     local label=""
 
-    # 核心模块不作为菜单项出现
+    # 核心支撑模块不作为菜单项出现
     xmg_menu_is_core_file "$file" && return 0
 
     # 避免重复添加
@@ -195,12 +173,15 @@ xmg_menu_add_module_if_valid() {
     # 不可读文件直接跳过
     [ -r "$path" ] || return 0
 
+    # 没有自声明标签的模块不被列为顶层功能模块
+    if ! label="$(xmg_menu_label_for_file "$file")" || [ -z "$label" ]; then
+        return 0
+    fi
+
     # 没有 xmg_xxx_menu 函数定义的模块直接跳过
     if ! fn="$(xmg_menu_find_menu_func "$path")"; then
         return 0
     fi
-
-    label="$(xmg_menu_label_for_file "$file")"
 
     XMG_MENU_FILES+=("$file")
     XMG_MENU_FUNCS+=("$fn")
