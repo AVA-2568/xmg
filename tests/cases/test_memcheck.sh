@@ -205,4 +205,4 @@ unset -f swapon mkswap dd xmg_detect_container_restricted
 unset MB _rc _mb CORE _prof_215 _prof_256 _prof_300 CONF_TUNE CONF_LIMITS MOCK_CONNTRACK
 unset TUNE_NET_CONTENT SYSCTL_TEST_FILE _sc_rc _sc_rc_normal _calc_size _calc_rc _calc_ok SWAP_TEST_FILE _swap_rc
 rm -rf "$XMG_TMP"
-unset XMG_TMP
+XMG_TMP=""

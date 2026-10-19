@@ -58,15 +58,19 @@ declare -gA XMG_STATE_STAGE=()
 # 关联数组 XMG_STATE_DEFAULTS 由本函数输出构建，不在此处重复抄写，避免两处漂移。
 # 用 printf 而非 cat <<EOF：heredoc 版的 cat 是一次 fork，这里是纯内建。
 xmg_state_defaults() {
+    local def_listen="0.0.0.0"
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        def_listen="::"
+    fi
     printf '%s\n' \
         'PROXY_SOCKS_ENABLED=0' \
-        'PROXY_SOCKS_LISTEN=0.0.0.0' \
+        "PROXY_SOCKS_LISTEN=$def_listen" \
         'PROXY_SOCKS_PORT=1080' \
         'PROXY_SOCKS_USER=' \
         'PROXY_SOCKS_PASS=' \
         'PROXY_SOCKS_UDP=0' \
         'PROXY_VLESS_ENABLED=0' \
-        'PROXY_VLESS_LISTEN=0.0.0.0' \
+        "PROXY_VLESS_LISTEN=$def_listen" \
         'PROXY_VLESS_PORT=443' \
         'PROXY_VLESS_DOMAIN=' \
         'PROXY_VLESS_UUID=' \

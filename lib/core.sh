@@ -171,6 +171,16 @@ xmg_core_install() {
 # ===== systemd drop-in 生成与写入 =====
 xmg_core_generate_dropin_content() {
     local cfg="${1:-${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}}"
+    local xray_bin="/usr/local/bin/xray"
+    if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+        xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+    elif command -v xray >/dev/null 2>&1; then
+        xray_bin="$(command -v xray)"
+    elif [ -x /usr/bin/xray ]; then
+        xray_bin="/usr/bin/xray"
+    fi
+    [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || xray_bin="/usr/local/bin/xray"
+
     cat <<EOF
 # XMG 管理的 drop-in 覆盖文件
 # 此文件优先级高于官方的 10-donot_touch_single_conf.conf
@@ -181,7 +191,7 @@ Environment="GOMEMLIMIT=100MiB"
 Environment="GODEBUG=madvdontneed=1"
 Environment="GOMAXPROCS=1"
 ExecStart=
-ExecStart=/usr/local/bin/xray run -config $cfg
+ExecStart=$xray_bin run -config $cfg
 EOF
 }
 
@@ -471,6 +481,13 @@ xmg_core_memcheck() {
     # 而是展示 extreme_low 极低内存模式，提示已自动应用 100MiB 内存抑制，允许继续安装。
     if [ "$profile" = "extreme_low" ] && [ "$threshold" -le 256 ]; then
         xmg_info "检测到极低内存模式 (extreme_low，可用: ${mb}MB)"
+        xmg_info "已自动应用 100MiB 内存抑制 (GOMEMLIMIT=100MiB) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
+        return 0
+    fi
+
+    # 小内存机器（low 档 <= 512MB，如 331MB）：可用内存已达 128MB 以上且未显式指定超大阈值时放行
+    if [ "$profile" = "low" ] && [ "$threshold" -le 256 ] && [ "$mb" -ge 128 ]; then
+        xmg_info "检测到低配内存模式 (low，可用: ${mb}MB)"
         xmg_info "已自动应用 100MiB 内存抑制 (GOMEMLIMIT=100MiB) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
         return 0
     fi

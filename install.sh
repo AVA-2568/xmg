@@ -83,9 +83,64 @@ cmd_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-ensure_jq() {
-    # install.sh 核心安装逻辑已全面纯 Bash 实现，零 jq 依赖，仅在后台守护可选组件
+ensure_dependencies() {
+    local missing=()
+    local dep=""
+    for dep in curl jq openssl ca-certificates; do
+        if ! cmd_exists "$dep"; then
+            if [ "$dep" = "ca-certificates" ]; then
+                [ -d /etc/ssl/certs ] || missing+=("$dep")
+            else
+                missing+=("$dep")
+            fi
+        fi
+    done
+
+    if [ "${#missing[@]}" -eq 0 ]; then
+        green "✓ 系统运行环境已就绪 (curl, jq, openssl, ca-certificates)"
+        return 0
+    fi
+
+    yellow "检测到未安装的基础依赖: ${missing[*]}，正在配置系统运行环境..."
+    if cmd_exists apt-get; then
+        export DEBIAN_FRONTEND=noninteractive
+        export NEEDRESTART_MODE=a
+        export UCF_FORCE_CONFFOLD=1
+        (apt-get update -y -q && apt-get install -y -q "${missing[@]}") >/dev/null 2>&1 || true
+    elif cmd_exists apk; then
+        apk add --no-cache "${missing[@]}" >/dev/null 2>&1 || true
+    elif cmd_exists dnf; then
+        dnf install -y -q "${missing[@]}" >/dev/null 2>&1 || true
+    elif cmd_exists yum; then
+        yum install -y -q "${missing[@]}" >/dev/null 2>&1 || true
+    elif cmd_exists pacman; then
+        pacman -Sy --noconfirm "${missing[@]}" >/dev/null 2>&1 || true
+    elif cmd_exists zypper; then
+        zypper --non-interactive install "${missing[@]}" >/dev/null 2>&1 || true
+    fi
+
+    local still_missing=()
+    for dep in "${missing[@]}"; do
+        if [ "$dep" = "ca-certificates" ]; then
+            [ -d /etc/ssl/certs ] || still_missing+=("$dep")
+        elif ! cmd_exists "$dep"; then
+            still_missing+=("$dep")
+        fi
+    done
+
+    if [ "${#still_missing[@]}" -eq 0 ]; then
+        green "✓ 系统运行环境配置完成 (已安装: ${missing[*]})"
+    else
+        yellow "提示: 部分依赖未能自动安装: ${still_missing[*]}"
+        if ! cmd_exists jq; then
+            yellow "      XMG 纯 Bash 内建引擎已生效，无需 jq 亦可稳定生成配置"
+        fi
+    fi
     return 0
+}
+
+ensure_jq() {
+    ensure_dependencies
 }
 
 manifest_local_path() {
@@ -402,6 +457,12 @@ print_summary() {
 
 main() {
     need_root
+
+    echo "============================================================"
+    echo "                 XMG 环境检查与系统安装"
+    echo "============================================================"
+    ensure_dependencies
+    echo
 
     if install_local; then
         green "已从本地源码安装 XMG"

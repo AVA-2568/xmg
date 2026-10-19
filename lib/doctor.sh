@@ -269,7 +269,7 @@ _xmg_doctor_validate_xray_config() {
     fi
 
     if [ -n "$bin" ] && [ -x "$bin" ]; then
-        if "$bin" -test -config "$cfg" >/dev/null 2>&1; then
+        if "$bin" run -test -format json -c "$cfg" >/dev/null 2>&1 || "$bin" run -test -c "$cfg" >/dev/null 2>&1 || "$bin" -test -config "$cfg" >/dev/null 2>&1; then
             return 0
         else
             return 1
@@ -304,23 +304,91 @@ _xmg_doctor_get_gomemlimit() {
 }
 
 _xmg_doctor_get_listening_ports() {
-    local ports=()
+    if [ -n "${MOCK_LISTENING_PORTS:-}" ]; then
+        printf '%s' "$MOCK_LISTENING_PORTS"
+        return 0
+    fi
+
+    # 仅检测 Xray 自身的业务入站端口，避免将宿主机 SSH (22) 等端口误报为 Xray 端口
+    local candidate_ports=()
+    local socks_on="0" vless_on="0"
+    if declare -F xmg_state_get >/dev/null 2>&1; then
+        socks_on="$(xmg_state_get PROXY_SOCKS_ENABLED "0")"
+        vless_on="$(xmg_state_get PROXY_VLESS_ENABLED "0")"
+        if [ "$vless_on" = "1" ]; then
+            local vp
+            vp="$(xmg_state_get PROXY_VLESS_PORT "443")"
+            [ -n "$vp" ] && candidate_ports+=("$vp")
+        fi
+        if [ "$socks_on" = "1" ]; then
+            local sp
+            sp="$(xmg_state_get PROXY_SOCKS_PORT "1080")"
+            [ -n "$sp" ] && candidate_ports+=("$sp")
+        fi
+    fi
+
+    # 若未启用任何代理入站方案
+    if [ "$socks_on" != "1" ] && [ "$vless_on" != "1" ]; then
+        # 兼容兜底：若 Xray 运行中且 443 处于监听（默认预设），展示 443
+        local xray_st=""
+        xray_st="$(_xmg_doctor_get_xray_status 2>/dev/null || true)"
+        if [ "$xray_st" = "running" ] && declare -F xmg_port_status >/dev/null 2>&1; then
+            if [ "$(xmg_port_status 443 2>/dev/null)" = "listen" ]; then
+                printf '443'
+                return 0
+            fi
+        fi
+        printf '未配置入站'
+        return 0
+    fi
+
+    local active_ports=()
     local p=""
-    for p in 22 80 443; do
+    for p in "${candidate_ports[@]}"; do
         if declare -F xmg_port_status >/dev/null 2>&1; then
             local st=""
             st="$(xmg_port_status "$p" 2>/dev/null || echo "closed")"
             if [ "$st" = "listen" ]; then
-                ports+=("$p")
+                active_ports+=("$p")
             fi
         fi
     done
-    if [ "${#ports[@]}" -gt 0 ]; then
+
+    if [ "${#active_ports[@]}" -gt 0 ]; then
         local IFS=','
-        printf '%s' "${ports[*]}"
+        printf '%s' "${active_ports[*]}"
     else
-        printf '无外部监听'
+        printf '未就绪 (端口未监听)'
     fi
+}
+
+_xmg_doctor_get_dns_info() {
+    local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    local doh="" out_strat=""
+
+    # 尝试从实际生效的 config.json 中读取真实配置
+    if [ -r "$cfg" ]; then
+        doh="$(grep -oE 'https\+local://[^"]+' "$cfg" 2>/dev/null | head -n 1 || true)"
+        out_strat="$(grep -oE '"domainStrategy"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | head -n 1 | cut -d'"' -f4 || true)"
+    fi
+
+    # 若未从文件提取到，按当前网络栈推导
+    if [ -z "$doh" ]; then
+        if [ "${XMG_NET_IPV4:-0}" = "0" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
+            doh="https+local://[2606:4700:4700::1111]/dns-query"
+        else
+            doh="https+local://1.1.1.1/dns-query"
+        fi
+    fi
+    if [ -z "$out_strat" ]; then
+        if [ "${XMG_NET_IPV4:-0}" = "0" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
+            out_strat="UseIPv6"
+        else
+            out_strat="UseIP"
+        fi
+    fi
+
+    printf '%s|%s\n' "$doh" "$out_strat"
 }
 
 # ==================================================================
@@ -416,9 +484,11 @@ xmg_doctor_run() {
     local listen_ports=""
     listen_ports="$(_xmg_doctor_get_listening_ports)"
 
-    # 6. DNS 与出站解析
-    local doh_addr=""
-    local out_resolve="UseIP"
+    # 6. DNS 与出站解析（从实际配置文件中读取真实参数）
+    local dns_info=""
+    dns_info="$(_xmg_doctor_get_dns_info)"
+    local doh_addr="${dns_info%%|*}"
+    local out_resolve="${dns_info##*|}"
     if [ "$net_v4" = "0" ] && [ "$net_v6" = "1" ]; then
         doh_addr="https+local://[2606:4700:4700::1111]/dns-query"
         out_resolve="UseIPv6"
@@ -437,12 +507,18 @@ xmg_doctor_run() {
     printf '%s                         XMG VPS 健康诊断报告 (Doctor)%s\n' "$c_bold" "$c_reset"
     printf '%s================================================================================%s\n' "$c_cyan" "$c_reset"
 
+    local render_mode="纯Bash (零依赖)"
+    if command -v jq >/dev/null 2>&1; then
+        render_mode="jq + 纯Bash"
+    fi
+
     # [环境]
-    printf '%s[环境]%s 架构: %s%s%s | 内存分档: %s%s%s | 容器特权: %s%s%s\n' \
+    printf '%s[环境]%s 架构: %s%s%s | 内存分档: %s%s%s | 容器特权: %s%s%s | 渲染引擎: %s%s%s\n' \
         "$c_bold" "$c_reset" \
         "$c_cyan" "$virt" "$c_reset" \
         "$c_cyan" "$mem_prof" "$c_reset" \
-        "$c_cyan" "$container_status" "$c_reset"
+        "$c_cyan" "$container_status" "$c_reset" \
+        "$c_cyan" "$render_mode" "$c_reset"
 
     # [网络]
     printf '%s[网络]%s IPv4: %s%s%s | IPv6: %s%s%s | NAT: %s%s%s | NAT64: %s%s%s\n' \

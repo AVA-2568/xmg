@@ -395,8 +395,13 @@ xmg_proxy_status() {
     echo "  版本: $(_xmg_proxy_kernel_version)"
     echo
     echo "[DNS]"
-    echo "  上游: https+local://1.1.1.1/dns-query, https+local://8.8.8.8/dns-query"
-    echo "  策略: UseIP"
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        echo "  上游: https+local://[2606:4700:4700::1111]/dns-query, https+local://[2001:4860:4860::8888]/dns-query"
+        echo "  策略: UseIPv6"
+    else
+        echo "  上游: https+local://1.1.1.1/dns-query, https+local://8.8.8.8/dns-query"
+        echo "  策略: UseIP"
+    fi
     echo
     echo "配置路径: ${XMG_XRAY_CONFIG:-}"
     return 0
@@ -424,19 +429,29 @@ xmg_proxy_acme_install() {
         return 4
     }
 
-    local raw_url="https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
-    if command -v curl >/dev/null 2>&1; then
-        curl -fsSL "$raw_url" -o "$XMG_ACME_DIR/acme.sh" || {
-            xmg_error "下载 acme.sh 失败"
-            return 4
-        }
-    elif command -v wget >/dev/null 2>&1; then
-        wget -qO "$XMG_ACME_DIR/acme.sh" "$raw_url" || {
-            xmg_error "下载 acme.sh 失败"
-            return 4
-        }
-    else
-        xmg_error "需要 curl 或 wget 才能安装 acme.sh"
+    local urls=(
+        "https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
+        "https://ghfast.top/https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
+        "https://mirror.ghproxy.com/https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
+    )
+    local dl_ok=0
+    for u in "${urls[@]}"; do
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsSL --connect-timeout 8 --max-time 25 "$u" -o "$XMG_ACME_DIR/acme.sh" 2>/dev/null && [ -s "$XMG_ACME_DIR/acme.sh" ]; then
+                dl_ok=1
+                break
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -q -T 8 -O "$XMG_ACME_DIR/acme.sh" "$u" 2>/dev/null && [ -s "$XMG_ACME_DIR/acme.sh" ]; then
+                dl_ok=1
+                break
+            fi
+        fi
+    done
+
+    if [ "$dl_ok" -ne 1 ]; then
+        rm -f "$XMG_ACME_DIR/acme.sh" 2>/dev/null || true
+        xmg_error "下载 acme.sh 失败 (纯 IPv6 主机直连 GitHub 受限，请检查 DNS64 或开启 WARP IPv4 出口)"
         return 4
     fi
     chmod +x "$XMG_ACME_DIR/acme.sh" 2>/dev/null || true
@@ -469,8 +484,11 @@ xmg_proxy_acme_issue() {
         xmg_proxy_acme_install || true
 
         if [ -x "$XMG_ACME_DIR/acme.sh" ]; then
-            "$XMG_ACME_DIR/acme.sh" --issue --server letsencrypt \
-                -d "$domain" --keylength ec-256 >/dev/null 2>&1 || true
+            local acme_cmd=("$XMG_ACME_DIR/acme.sh" --issue --server letsencrypt --standalone -d "$domain" --keylength ec-256)
+            if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+                acme_cmd+=(--listen-v6)
+            fi
+            "${acme_cmd[@]}" >/dev/null 2>&1 || true
             mkdir -p "$(dirname "$XMG_ACME_CERT_FILE")" 2>/dev/null || true
             "$XMG_ACME_DIR/acme.sh" --install-cert -d "$domain" \
                 --fullchain-file "$XMG_ACME_CERT_FILE" \
@@ -614,10 +632,17 @@ xmg_proxy_menu() {
                 echo
                 xmg_warn "SOCKS5 协议不对传输加密，公网使用仅提供访问控制，不提供保密性。"
                 xmg_confirm "确认继续?" || { xmg_pause; continue; }
+                local cur_s_listen
+                cur_s_listen="$(xmg_state_get PROXY_SOCKS_LISTEN)"
+                if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+                    if [ -z "$cur_s_listen" ] || [ "$cur_s_listen" = "0.0.0.0" ]; then
+                        cur_s_listen="::"
+                    fi
+                fi
                 xmg_proxy_apply \
                     --socks on \
                     --socks-port "$(_xmg_read "监听端口" "$(xmg_state_get PROXY_SOCKS_PORT)")" \
-                    --socks-listen "$(_xmg_read "监听地址" "$(xmg_state_get PROXY_SOCKS_LISTEN)")" \
+                    --socks-listen "$(_xmg_read "监听地址" "$cur_s_listen")" \
                     --socks-user "$(_xmg_read "用户名" "")" \
                     --socks-pass "$(_xmg_read "密码(至少8位)" "")" || true
                 xmg_pause
@@ -626,8 +651,15 @@ xmg_proxy_menu() {
                 local v_port v_listen v_domain v_uuid v_path v_mode v_src v_cert v_key
                 local def_cf="${XMG_ACME_CERT_FILE:-$XMG_HOME/etc/xray/certs/fullchain.crt}"
                 local def_kf="${XMG_ACME_KEY_FILE:-$XMG_HOME/etc/xray/certs/priv.key}"
+                local cur_v_listen
+                cur_v_listen="$(xmg_state_get PROXY_VLESS_LISTEN)"
+                if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+                    if [ -z "$cur_v_listen" ] || [ "$cur_v_listen" = "0.0.0.0" ]; then
+                        cur_v_listen="::"
+                    fi
+                fi
                 v_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_VLESS_PORT)")"
-                v_listen="$(_xmg_read "监听地址" "$(xmg_state_get PROXY_VLESS_LISTEN)")"
+                v_listen="$(_xmg_read "监听地址" "$cur_v_listen")"
                 v_domain="$(_xmg_read "域名(用于SNI/CDN回源)" "$(xmg_state_get PROXY_VLESS_DOMAIN)")"
                 v_uuid="$(_xmg_read "UUID" "$(xmg_state_get PROXY_VLESS_UUID)")"
                 v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")")"
@@ -646,12 +678,20 @@ xmg_proxy_menu() {
                 else
                     v_cert="$XMG_ACME_CERT_FILE"
                     v_key="$XMG_ACME_KEY_FILE"
+                    local need_issue=0
                     if [ ! -f "$v_cert" ] || [ ! -f "$v_key" ]; then
                         echo
                         xmg_warn "检测到域名 $v_domain 的 ACME 证书尚未签发"
-                        if xmg_confirm "是否立即申请证书 (acme.sh)?"; then
-                            xmg_proxy_acme_issue "$v_domain" || true
+                        need_issue=1
+                    else
+                        echo
+                        xmg_info "检测到已有证书文件: $v_cert"
+                        if xmg_confirm "是否重新申请域名 $v_domain 的正式 ACME 证书 (acme.sh)?"; then
+                            need_issue=1
                         fi
+                    fi
+                    if [ "$need_issue" -eq 1 ]; then
+                        xmg_proxy_acme_issue "$v_domain" || true
                     fi
                 fi
                 xmg_proxy_apply \

@@ -89,6 +89,30 @@ xmg_detect_virt() {
                 printf 'docker\n'
                 return 0
                 ;;
+            vmware)
+                printf 'vmware\n'
+                return 0
+                ;;
+            xen)
+                printf 'xen\n'
+                return 0
+                ;;
+            microsoft|hyperv)
+                printf 'hyperv\n'
+                return 0
+                ;;
+            wsl)
+                printf 'wsl\n'
+                return 0
+                ;;
+            none)
+                printf 'baremetal\n'
+                return 0
+                ;;
+            ?*)
+                printf '%s\n' "$sdv"
+                return 0
+                ;;
         esac
     fi
 
@@ -101,6 +125,22 @@ xmg_detect_virt() {
             case "$dmi_val" in
                 *QEMU*|*KVM*|*Bochs*)
                     printf 'kvm\n'
+                    return 0
+                    ;;
+                *VMware*|*VMW*)
+                    printf 'vmware\n'
+                    return 0
+                    ;;
+                *Microsoft*|*Hyper-V*)
+                    printf 'hyperv\n'
+                    return 0
+                    ;;
+                *Xen*)
+                    printf 'xen\n'
+                    return 0
+                    ;;
+                *VirtualBox*|*innotek*)
+                    printf 'virtualbox\n'
                     return 0
                     ;;
             esac
@@ -199,7 +239,16 @@ xmg_detect_network() {
             local v4_out=""
             v4_out="$($ip_cmd -4 addr show 2>/dev/null || true)"
             local line4=""
+            local cur_dev=""
             while IFS= read -r line4 || [ -n "$line4" ]; do
+                if [[ "$line4" =~ ^[0-9]+:[[:space:]]+([^:@]+) ]]; then
+                    cur_dev="${BASH_REMATCH[1]}"
+                fi
+                case "$cur_dev" in
+                    lo|docker*|virbr*|br-*|veth*|dummy*)
+                        continue
+                        ;;
+                esac
                 if [[ "$line4" =~ inet[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
                     local ip_addr="${BASH_REMATCH[1]}"
                     if [[ "$ip_addr" != 127.* ]]; then
@@ -266,7 +315,25 @@ xmg_detect_network() {
 
         local resolv_file="${XMG_RESOLV_CONF_FILE:-/etc/resolv.conf}"
         if [ "$has_nat64" -eq 0 ] && [ -r "$resolv_file" ]; then
-            if grep -qiE '(dns64|nat64|2001:67c:2b0|2a00:1098:2b|2a00:1098:2c|2a01:4f8:c2c:123f)' "$resolv_file" 2>/dev/null; then
+            # 扩充主流已知公共与常见 DNS64 地址池特征
+            # 包含: Google(2001:4860:4860::64/6464), Cloudflare(2606:4700:4700::64/6400),
+            #       Trezor/Kasper(2001:67c:2b0), Hetzner/Nat64.net(2a00:1098:2b/2c, 2a01:4f8:c2c:123f),
+            #       以及通用关键词 dns64, nat64
+            if grep -qiE '(dns64|nat64|2001:67c:2b0|2a00:1098:2b|2a00:1098:2c|2a01:4f8:c2c:123f|2001:4860:4860::64|2606:4700:4700::64)' "$resolv_file" 2>/dev/null; then
+                has_nat64=1
+            fi
+        fi
+
+        # RFC 7050 标准协议主动探测：当未命中静态特征时，尝试解析保留权威域名 ipv4only.arpa
+        if [ "$has_nat64" -eq 0 ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+            local nat64_probe=""
+            if command -v getent >/dev/null 2>&1; then
+                nat64_probe="$(getent ahosts ipv4only.arpa 2>/dev/null | grep -E '^64:ff9b::' | head -n 1 || true)"
+            fi
+            if [ -z "$nat64_probe" ] && command -v nslookup >/dev/null 2>&1; then
+                nat64_probe="$(nslookup -type=AAAA ipv4only.arpa 2>/dev/null | grep -oE '64:ff9b::[0-9a-fA-F:]+' | head -n 1 || true)"
+            fi
+            if [ -n "$nat64_probe" ]; then
                 has_nat64=1
             fi
         fi

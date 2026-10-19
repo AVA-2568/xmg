@@ -29,6 +29,28 @@ xmg_state_init
 t_equals "默认值 SOCKS 关闭" "$(xmg_state_get PROXY_SOCKS_ENABLED)" "0"
 t_equals "默认值 SOCKS 端口" "$(xmg_state_get PROXY_SOCKS_PORT)" "1080"
 t_equals "默认值 SOCKS listen" "$(xmg_state_get PROXY_SOCKS_LISTEN)" "0.0.0.0"
+
+# 纯 IPv6 场景下默认监听地址应为 ::
+_SAVED_V4="${XMG_NET_IPV4-}"
+_SAVED_V6="${XMG_NET_IPV6-}"
+_SAVED_SF="${XMG_STATE_FILE-}"
+_SAVED_SD="${XMG_XRAY_STATE_DIR-}"
+export XMG_NET_IPV4=0
+export XMG_NET_IPV6=1
+TMP_DEF="$(mktemp -d)"
+export XMG_STATE_FILE="$TMP_DEF/state.env"
+export XMG_XRAY_STATE_DIR="$TMP_DEF"
+xmg_state_init
+t_equals "纯 IPv6 下默认 SOCKS listen 为 ::" "$(xmg_state_get PROXY_SOCKS_LISTEN)" "::"
+t_equals "纯 IPv6 下默认 VLESS listen 为 ::" "$(xmg_state_get PROXY_VLESS_LISTEN)" "::"
+rm -rf "$TMP_DEF"
+[ -n "$_SAVED_V4" ] && export XMG_NET_IPV4="$_SAVED_V4" || unset XMG_NET_IPV4
+[ -n "$_SAVED_V6" ] && export XMG_NET_IPV6="$_SAVED_V6" || unset XMG_NET_IPV6
+[ -n "$_SAVED_SF" ] && export XMG_STATE_FILE="$_SAVED_SF" || unset XMG_STATE_FILE
+[ -n "$_SAVED_SD" ] && export XMG_XRAY_STATE_DIR="$_SAVED_SD" || unset XMG_XRAY_STATE_DIR
+unset _SAVED_V4 _SAVED_V6 _SAVED_SF _SAVED_SD TMP_DEF
+# 恢复默认测试 state
+xmg_state_init
 t_equals "默认值 VLESS 关闭" "$(xmg_state_get PROXY_VLESS_ENABLED)" "0"
 t_equals "默认值 mode" "$(xmg_state_get PROXY_VLESS_MODE)" "auto"
 t_equals "默认值 path" "$(xmg_state_get PROXY_VLESS_PATH)" "/"

@@ -823,7 +823,21 @@ xmg_warp_enable() {
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
-    if [ -f "$xray_cfg" ] && command -v jq >/dev/null 2>&1; then
+    if [ -f "$xray_cfg" ]; then
+        if ! command -v jq >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y jq >/dev/null 2>&1 || true
+            elif command -v yum >/dev/null 2>&1; then
+                yum install -y jq >/dev/null 2>&1 || true
+            elif command -v apk >/dev/null 2>&1; then
+                apk add jq >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! command -v jq >/dev/null 2>&1; then
+            xmg_error "WARP 规则注入依赖 jq 工具，自动安装失败，请先安装 jq 后重试"
+            return 1
+        fi
         local warp_json=""
         warp_json="$(cat "$XMG_WARP_XRAY_OUTBOUND" 2>/dev/null || true)"
         if [ -n "$warp_json" ]; then
@@ -1040,7 +1054,21 @@ xmg_warp_disable() {
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
-    if [ -f "$xray_cfg" ] && command -v jq >/dev/null 2>&1; then
+    if [ -f "$xray_cfg" ]; then
+        if ! command -v jq >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+                DEBIAN_FRONTEND=noninteractive apt-get install -y jq >/dev/null 2>&1 || true
+            elif command -v yum >/dev/null 2>&1; then
+                yum install -y jq >/dev/null 2>&1 || true
+            elif command -v apk >/dev/null 2>&1; then
+                apk add jq >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! command -v jq >/dev/null 2>&1; then
+            xmg_error "移除 WARP 出站依赖 jq 工具，自动安装失败，请先安装 jq 后重试"
+            return 1
+        fi
         local bak=""
         bak="$(_xmg_warp_backup_config "$xray_cfg")"
         [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"

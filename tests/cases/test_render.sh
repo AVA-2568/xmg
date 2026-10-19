@@ -299,6 +299,43 @@ t_json_valid "回退内置骨架模板配置是合法 JSON" "$C_FALLBACK"
 t_contains "回退内置骨架时包含 socks 入站" "$C_FALLBACK" '"inbound-socks"'
 unset XMG_CONFIG_TEMPLATE
 
+# 6.9 模拟无 jq 环境下纯 Bash 内建引擎全量测试
+_real_command() { builtin command "$@"; }
+command() {
+    if [ "$1" = "-v" ] && [ "$2" = "jq" ]; then
+        return 1
+    fi
+    _real_command "$@"
+}
+
+C_BASH_EMPTY="$(xmg_render_config 0 0)"
+t_json_valid "纯 Bash 模式两方案均未启用配置是合法 JSON" "$C_BASH_EMPTY"
+t_contains "纯 Bash 模式空入站正确输出 []" "$C_BASH_EMPTY" '"inbounds": []'
+
+C_BASH_SOCKS="$(xmg_render_config 1 0)"
+t_json_valid "纯 Bash 模式仅 SOCKS 配置是合法 JSON" "$C_BASH_SOCKS"
+t_contains "纯 Bash 模式包含 inbound-socks" "$C_BASH_SOCKS" '"inbound-socks"'
+
+C_BASH_VLESS="$(xmg_render_config 0 1)"
+t_json_valid "纯 Bash 模式仅 VLESS 配置是合法 JSON" "$C_BASH_VLESS"
+t_contains "纯 Bash 模式包含 inbound-vless" "$C_BASH_VLESS" '"inbound-vless"'
+t_contains "纯 Bash 模式包含 rejectUnknownSni: true" "$C_BASH_VLESS" '"rejectUnknownSni": true'
+
+C_BASH_DUAL="$(xmg_render_config 1 1)"
+t_json_valid "纯 Bash 模式双方案共存配置是合法 JSON" "$C_BASH_DUAL"
+t_contains "纯 Bash 模式双方案包含 inbound-socks" "$C_BASH_DUAL" '"inbound-socks"'
+t_contains "纯 Bash 模式双方案包含 inbound-vless" "$C_BASH_DUAL" '"inbound-vless"'
+
+XMG_NET_IPV4=0
+XMG_NET_IPV6=1
+C_BASH_V6="$(xmg_render_config 0 1)"
+t_json_valid "纯 Bash 模式纯 IPv6 配置是合法 JSON" "$C_BASH_V6"
+t_contains "纯 Bash 模式纯 IPv6 出站为 UseIPv6" "$C_BASH_V6" '"domainStrategy": "UseIPv6"'
+t_contains "纯 Bash 模式纯 IPv6 DNS 包含 Cloudflare IPv6 DoH" "$C_BASH_V6" '"https+local://[2606:4700:4700::1111]/dns-query"'
+unset XMG_NET_IPV4 XMG_NET_IPV6
+
+unset -f command _real_command
+
 # ============================================================================
 # 负例：证明 JSON 检查器真的会响（否则「合法 JSON」断言在检查器恒 0 时也会全绿）
 # ============================================================================
