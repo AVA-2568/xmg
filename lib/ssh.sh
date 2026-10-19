@@ -24,12 +24,14 @@ if [ "${XMG_SSH_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_SSH_SH_LOADED=1
 
-# XMG_MENU_LABEL: SSH 安全
+# XMG_MENU_LABEL: SSH 安全加固
 
 # ===== 默认配置 =====
 XMG_SSH_CONFIG="${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}"
 XMG_SSH_DROPIN_CONF="${XMG_SSH_DROPIN_CONF:-/etc/ssh/sshd_config.d/00-xmg-security.conf}"
 XMG_SSH_F2B_JAIL_CONF="${XMG_SSH_F2B_JAIL_CONF:-/etc/fail2ban/jail.d/xmg-sshd.conf}"
+XMG_SSH_SOCKET_DROPIN_CONF="${XMG_SSH_SOCKET_DROPIN_CONF:-/etc/systemd/system/ssh.socket.d/listen.conf}"
+XMG_SSH_AUTH_KEYS="${XMG_SSH_AUTH_KEYS:-}"
 
 # ===== 依赖 common.sh 的兜底 =====
 
@@ -129,6 +131,91 @@ xmg_ssh_effective() {
     printf '%s\n' "${val:-未设置(默认)}"
 }
 
+# 获取当前生效的 SSH 端口（纯数字，无效回退 22）
+xmg_ssh_get_port() {
+    local val=""
+    val="$(xmg_ssh_effective port 2>/dev/null || true)"
+    case "$val" in
+        ''|*[!0-9]*)
+            printf '22\n'
+            ;;
+        *)
+            if [ "$val" -ge 1 ] && [ "$val" -le 65535 ]; then
+                printf '%s\n' "$val"
+            else
+                printf '22\n'
+            fi
+            ;;
+    esac
+}
+
+# 检测是否存在 ssh.socket 单元 (Ubuntu 22.10+ / 24.04 特性)
+xmg_ssh_has_socket() {
+    if [ -n "${XMG_SSH_HAS_SOCKET:-}" ]; then
+        [ "$XMG_SSH_HAS_SOCKET" = "1" ] && return 0 || return 1
+    fi
+
+    if xmg_cmd_exists systemctl; then
+        if systemctl cat ssh.socket >/dev/null 2>&1; then
+            return 0
+        fi
+        if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.socket'; then
+            return 0
+        fi
+    fi
+
+    if [ -f /lib/systemd/system/ssh.socket ] || [ -f /usr/lib/systemd/system/ssh.socket ] || [ -f /etc/systemd/system/ssh.socket ]; then
+        return 0
+    fi
+
+    return 1
+}
+
+# 配置 ssh.socket override 以覆盖默认监听端口
+xmg_ssh_configure_socket_port() {
+    local port="$1"
+    local conf="${XMG_SSH_SOCKET_DROPIN_CONF:-/etc/systemd/system/ssh.socket.d/listen.conf}"
+
+    mkdir -p "$(dirname "$conf")" || return 1
+    cat > "$conf" <<EOF
+[Socket]
+ListenStream=
+ListenStream=$port
+EOF
+    xmg_info "已配置 ssh.socket override: $conf (ListenStream=$port)"
+}
+
+# 检查 authorized_keys 是否有效（文件存在、非空、且包含有效公钥）
+xmg_ssh_check_authorized_keys() {
+    local auth_file="${XMG_SSH_AUTH_KEYS:-}"
+    if [ -z "$auth_file" ]; then
+        if [ -f "${HOME:-/root}/.ssh/authorized_keys" ]; then
+            auth_file="${HOME:-/root}/.ssh/authorized_keys"
+        elif [ -f "/root/.ssh/authorized_keys" ]; then
+            auth_file="/root/.ssh/authorized_keys"
+        else
+            auth_file="${HOME:-/root}/.ssh/authorized_keys"
+        fi
+    fi
+
+    if [ ! -f "$auth_file" ] || [ ! -s "$auth_file" ]; then
+        xmg_error "SSH 授权密钥文件不存在或为空 ($auth_file)"
+        xmg_warn "禁用密码登录前必须先配置公钥，否则将导致无法远程登录！"
+        return 1
+    fi
+
+    # 检查是否包含有效公钥（排除空行和以 # 开头的注释）
+    local valid_keys
+    valid_keys="$(grep -vE '^[[:space:]]*(#|$)' "$auth_file" | grep -E '^(ssh-|ecdsa-|sk-)' || true)"
+    if [ -z "$valid_keys" ]; then
+        xmg_error "$auth_file 中未检测到有效的 SSH 公钥（仅有注释或格式无效）"
+        xmg_warn "禁用密码登录前必须配置至少一个有效公钥，防止被锁死！"
+        return 1
+    fi
+
+    return 0
+}
+
 # 写入配置项（key value...），自动选择 drop-in 或主文件
 # drop-in 模式：主配置不动，校验失败整体删除 drop-in 即可恢复
 # 旧版模式：先写临时副本并 sshd -t -f 校验，通过才替换主配置，任何情况下不落坏配置
@@ -174,7 +261,7 @@ xmg_ssh_set_conf() {
     return 1
 }
 
-# 配置校验 + 重启 sshd
+# 配置校验 + 重启 sshd / ssh.socket
 # drop-in 模式下校验失败自动删除 drop-in 恢复原状；
 # 旧版模式在写入阶段已保证主配置有效，此处仅防御 drop-in 场景
 xmg_ssh_apply() {
@@ -194,9 +281,24 @@ xmg_ssh_apply() {
         return 1
     fi
 
+    if xmg_ssh_has_socket; then
+        local target_port
+        target_port="$(xmg_ssh_get_port)"
+        xmg_ssh_configure_socket_port "$target_port"
+    fi
+
     if ! xmg_cmd_exists systemctl; then
         xmg_warn "非 systemd 环境，请手动重启 sshd 生效"
         return 0
+    fi
+
+    if xmg_ssh_has_socket; then
+        systemctl daemon-reload 2>/dev/null || true
+        if systemctl restart ssh.socket 2>/dev/null; then
+            xmg_info "ssh.socket 已重启"
+            systemctl restart ssh 2>/dev/null || true
+            return 0
+        fi
     fi
 
     svc="$(xmg_ssh_service_name)"
@@ -218,13 +320,25 @@ xmg_ssh_show() {
     printf 'root 登录策略         : %s\n' "$(xmg_ssh_effective permitrootlogin)"
     printf '配置文件              : %s\n' "$XMG_SSH_CONFIG"
     [ -f "$XMG_SSH_DROPIN_CONF" ] && printf 'XMG drop-in           : %s\n' "$XMG_SSH_DROPIN_CONF"
+    [ -f "$XMG_SSH_SOCKET_DROPIN_CONF" ] && printf 'ssh.socket drop-in    : %s\n' "$XMG_SSH_SOCKET_DROPIN_CONF"
     echo
 
     echo "===== 密钥状态 ====="
-    if [ -s /root/.ssh/authorized_keys ]; then
-        printf 'root authorized_keys  : 已配置 (%s 个密钥)\n' "$(grep -c -E '^(ssh|ecdsa)' /root/.ssh/authorized_keys)"
+    local auth_file="${XMG_SSH_AUTH_KEYS:-}"
+    if [ -z "$auth_file" ]; then
+        if [ -f "${HOME:-/root}/.ssh/authorized_keys" ]; then
+            auth_file="${HOME:-/root}/.ssh/authorized_keys"
+        elif [ -f "/root/.ssh/authorized_keys" ]; then
+            auth_file="/root/.ssh/authorized_keys"
+        else
+            auth_file="${HOME:-/root}/.ssh/authorized_keys"
+        fi
+    fi
+
+    if [ -s "$auth_file" ] && grep -vE '^[[:space:]]*(#|$)' "$auth_file" | grep -qE '^(ssh-|ecdsa-|sk-)'; then
+        printf 'authorized_keys       : 已配置 (%s 个有效密钥)\n' "$(grep -vE '^[[:space:]]*(#|$)' "$auth_file" | grep -c -E '^(ssh-|ecdsa-|sk-)')"
     else
-        printf 'root authorized_keys  : 未配置或为空\n'
+        printf 'authorized_keys       : 未配置或无有效公钥\n'
     fi
     echo
 
@@ -244,7 +358,7 @@ xmg_ssh_change_port() {
     local port=""
     local cur_port=""
 
-    cur_port="$(xmg_ssh_effective port)"
+    cur_port="$(xmg_ssh_get_port)"
 
     printf "当前 SSH 端口: %s\n" "$cur_port"
     printf "请输入新端口 (1-65535，建议 1024 以上): "
@@ -301,9 +415,7 @@ xmg_ssh_change_port() {
 xmg_ssh_disable_password() {
     xmg_require_root
 
-    if [ ! -s /root/.ssh/authorized_keys ]; then
-        xmg_error "root 尚未配置 SSH 密钥 (authorized_keys 为空)"
-        xmg_warn "禁用密码登录前必须先配置密钥，否则会锁死"
+    if ! xmg_ssh_check_authorized_keys; then
         return 1
     fi
 
@@ -410,9 +522,7 @@ xmg_ssh_fail2ban_install() {
     fi
 
     local current_port="22"
-    if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
-        current_port="$(xmg_ssh_get_port 2>/dev/null || echo 22)"
-    fi
+    current_port="$(xmg_ssh_get_port)"
 
     # 选择初始后端：若存在 /var/log/auth.log 则优先 auto，否则 systemd
     local primary_backend="systemd"
@@ -468,7 +578,7 @@ xmg_ssh_menu() {
 
     while true; do
         clear
-        echo "========== SSH 安全 =========="
+        echo "========== SSH 安全加固 =========="
         echo "1. 查看 SSH 当前配置"
         echo "2. 修改 SSH 端口"
         echo "3. 禁用密码登录（仅密钥）"
