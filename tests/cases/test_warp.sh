@@ -349,3 +349,61 @@ t_contains "停用后原有 VLESS 依然完好" "$REVERTED_CFG" '"tag": "inbound
 t_contains "停用后原有 SOCKS 依然完好" "$REVERTED_CFG" '"tag": "inbound-socks"'
 t_contains "停用后原有 direct 出站依然完好" "$REVERTED_CFG" '"tag": "direct"'
 t_contains "停用后原有广告拦截规则依然完好" "$REVERTED_CFG" "geosite:category-ads-all"
+
+
+# 20. 网络栈感知与 curl 协议族参数检测测试
+export XMG_MOCK_WARP_STACK="ipv6_only"
+FAM_V6="$(_xmg_warp_curl_family)"
+t_equals "纯 IPv6 下 curl 参数输出 -6" "$FAM_V6" "-6"
+
+export XMG_MOCK_WARP_STACK="dual_stack"
+export XMG_NET_IPV4=1
+export XMG_NET_IPV6=0
+FAM_V4="$(_xmg_warp_curl_family)"
+t_equals "纯 IPv4 下 curl 参数输出 -4" "$FAM_V4" "-4"
+
+export XMG_NET_IPV4=1
+export XMG_NET_IPV6=1
+FAM_DUAL="$(_xmg_warp_curl_family)"
+t_equals "双栈下 curl 参数不强制族限制 (留空)" "$FAM_DUAL" ""
+
+# 21. WARP 凭据导入测试 (xmg_warp_import)
+IMPORT_SRC="$XMG_TMP/valid_external_account.json"
+cat > "$IMPORT_SRC" << 'EOF_IMP'
+{
+  "device_id": "imp-device-999",
+  "token": "imp-tok-888",
+  "private_key": "importedPrivateKeyForTesting1234567890=",
+  "public_key": "importedPublicKeyForTesting12345678901=",
+  "address_v4": "172.16.0.5",
+  "address_v6": "2606:4700:110:9999::5",
+  "client_id": "5hMK"
+}
+EOF_IMP
+
+t_assert "导入有效凭据成功" xmg_warp_import "$IMPORT_SRC"
+t_assert "目标 account.json 已写入" test -f "$XMG_WARP_ACCOUNT_FILE"
+IMP_CONTENT="$(cat "$XMG_WARP_ACCOUNT_FILE")"
+t_contains "导入凭据包含 private_key" "$IMP_CONTENT" "importedPrivateKeyForTesting1234567890="
+t_contains "导入凭据自动根据 client_id 补全 reserved 标识" "$IMP_CONTENT" '"reserved"'
+t_contains "导入凭据 reserved 包含字节 230" "$IMP_CONTENT" '230'
+t_contains "导入凭据 reserved 包含字节 19" "$IMP_CONTENT" '19'
+t_contains "导入凭据 reserved 包含字节 10" "$IMP_CONTENT" '10'
+
+# 22. 凭据导入防呆: 拒绝缺失 private_key 的非法文件
+INVALID_SRC="$XMG_TMP/invalid_account.json"
+cat > "$INVALID_SRC" << 'EOF_INV'
+{
+  "device_id": "some-id",
+  "token": "tok"
+}
+EOF_INV
+
+INV_RC=0
+xmg_warp_import "$INVALID_SRC" >/dev/null 2>&1 || INV_RC=$?
+t_equals "拒绝缺失 private_key 的非法文件" "$INV_RC" "1"
+
+# 23. 凭据导入防呆: 拒绝不存在的文件
+NOT_FOUND_RC=0
+xmg_warp_import "$XMG_TMP/non_existent_file.json" >/dev/null 2>&1 || NOT_FOUND_RC=$?
+t_equals "拒绝不存在的文件" "$NOT_FOUND_RC" "1"

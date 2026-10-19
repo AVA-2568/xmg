@@ -40,7 +40,7 @@ XMG $XMG_VERSION
   xmg core version         查看内核版本
   xmg core status          查看内核状态
   xmg core menu            内核管理菜单
-  xmg warp [apply|auto|enable|disable|status|optimize|test|export|menu] WARP 原生出站管理
+  xmg warp [apply|auto|enable|disable|status|optimize|test|export|import|menu] WARP 原生出站管理
   xmg tune [bbr|net|dns|dot|swap|status|menu] 系统与内核网络调优
   xmg firewall [status|allow|enable|disable|menu] UFW 防火墙端口管理
   xmg ssh [status|port|disable-pwd|enable-pwd|fail2ban|menu] SSH 安全与防爆破
@@ -199,6 +199,7 @@ xmg_main() {
                 optimize)   shift; xmg_warp_optimize_endpoint "$@" ;;
                 test)       shift; xmg_warp_test_unlock "$@" ;;
                 export)     shift; xmg_warp_export_xray_outbound "$@" ;;
+                import)     shift; xmg_warp_import "$@" ;;
                 uninstall)  shift; xmg_warp_uninstall "$@" ;;
                 menu)       shift || true; ( set +e; xmg_warp_menu "$@" ) ;;
                 *)          xmg_error "未知的 warp 子命令: $1"; exit 2 ;;

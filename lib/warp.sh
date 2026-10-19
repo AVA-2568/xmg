@@ -212,8 +212,16 @@ xmg_warp_detect_native_geo() {
         return 0
     fi
 
+    local fam
+    fam="$(_xmg_warp_curl_family)"
+    local curl_net=()
+    [ -n "$fam" ] && curl_net=("$fam")
+
     local trace=""
-    trace="$(curl -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+    trace="$(curl "${curl_net[@]}" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+    if [ -z "$trace" ] && [ -z "$fam" ]; then
+        trace="$(curl -6 -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+    fi
     if [ -n "$trace" ]; then
         XMG_WARP_NATIVE_LOC="$(echo "$trace" | grep -E '^loc=' | head -1 | cut -d= -f2 | tr -d '[:space:]')"
         XMG_WARP_NATIVE_COLO="$(echo "$trace" | grep -E '^colo=' | head -1 | cut -d= -f2 | tr -d '[:space:]')"
@@ -221,7 +229,10 @@ xmg_warp_detect_native_geo() {
 
     if [ -z "$XMG_WARP_NATIVE_LOC" ]; then
         local ip_info=""
-        ip_info="$(curl -sSL --connect-timeout 4 --max-time 6 https://ipinfo.io/json 2>/dev/null || true)"
+        ip_info="$(curl "${curl_net[@]}" -sSL --connect-timeout 4 --max-time 6 https://ipinfo.io/json 2>/dev/null || true)"
+        if [ -z "$ip_info" ] && [ -z "$fam" ]; then
+            ip_info="$(curl -6 -sSL --connect-timeout 4 --max-time 6 https://ipinfo.io/json 2>/dev/null || true)"
+        fi
         if [ -n "$ip_info" ]; then
             XMG_WARP_NATIVE_LOC="$(echo "$ip_info" | grep -o '"country"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
             XMG_WARP_NATIVE_COLO="DEFAULT"
@@ -231,6 +242,19 @@ xmg_warp_detect_native_geo() {
     [ -n "$XMG_WARP_NATIVE_LOC" ] || XMG_WARP_NATIVE_LOC="UNKNOWN"
     [ -n "$XMG_WARP_NATIVE_COLO" ] || XMG_WARP_NATIVE_COLO="UNKNOWN"
     return 0
+}
+
+# ===== 网络栈与 curl 协议族参数检测 =====
+
+_xmg_warp_curl_family() {
+    if xmg_warp_is_ipv6_only; then
+        echo "-6"
+        return 0
+    elif [ "${XMG_NET_IPV4:-0}" = "1" ] && [ "${XMG_NET_IPV6:-0}" = "0" ]; then
+        echo "-4"
+        return 0
+    fi
+    echo ""
 }
 
 # ===== 判断 VPS 是否为纯 IPv6 (无公网 IPv4) =====
@@ -571,21 +595,79 @@ _xmg_warp_register() {
         local cur_time=""
         cur_time="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
         local req_body="{\"key\":\"$pubkey\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$cur_time\",\"model\":\"Linux\",\"type\":\"Android\",\"locale\":\"zh_CN\"}"
-        # 优先 v0a2158，若失败回退 v0a884
-        resp="$(curl -sSL --connect-timeout 8 --max-time 15 -X POST "https://api.cloudflareclient.com/v0a2158/reg" \
-            -H "Content-Type: application/json; charset=UTF-8" \
-            -H "User-Agent: okhttp/3.12.1" \
-            -d "$req_body" 2>/dev/null || true)"
-        if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
-            resp="$(curl -sSL --connect-timeout 8 --max-time 15 -X POST "https://api.cloudflareclient.com/v0a884/reg" \
-                -H "Content-Type: application/json; charset=UTF-8" \
-                -H "User-Agent: okhttp/3.12.1" \
-                -d "$req_body" 2>/dev/null || true)"
+
+        local endpoints=(
+            "https://api.cloudflareclient.com/v0a2158/reg"
+            "https://api.cloudflareclient.com/v0a884/reg"
+            "https://api.cloudflareclient.com/v0a1922/reg"
+        )
+
+        local net_fam
+        net_fam="$(_xmg_warp_curl_family)"
+
+        local attempts=("$net_fam")
+        if [ -z "$net_fam" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
+            attempts=("" "-6")
         fi
+
+        local tmp_body tmp_err
+        tmp_body="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.json")"
+        tmp_err="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.err")"
+        local last_http="000" last_err=""
+
+        for fam_opt in "${attempts[@]}"; do
+            local curl_args=()
+            [ -n "$fam_opt" ] && curl_args=("$fam_opt")
+
+            for ep_url in "${endpoints[@]}"; do
+                : > "$tmp_body"
+                : > "$tmp_err"
+
+                local http_code="000"
+                http_code="$(curl "${curl_args[@]}" -sS -o "$tmp_body" -w "%{http_code}" \
+                    --connect-timeout 8 --max-time 15 -X POST "$ep_url" \
+                    -H "Content-Type: application/json; charset=UTF-8" \
+                    -H "User-Agent: okhttp/3.12.1" \
+                    -d "$req_body" 2>"$tmp_err" || echo "000")"
+
+                last_http="$http_code"
+                if [ -s "$tmp_body" ] && grep -q '"id"' "$tmp_body"; then
+                    resp="$(cat "$tmp_body")"
+                    break 2
+                fi
+
+                if [ -s "$tmp_err" ]; then
+                    last_err="$(head -n 1 "$tmp_err" | tr -d '\r\n')"
+                fi
+            done
+        done
+
+        rm -f "$tmp_body" "$tmp_err" 2>/dev/null || true
     fi
 
     if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
-        xmg_error "向 Cloudflare 注册账号失败，响应异常"
+        if [ "$last_http" = "429" ]; then
+            xmg_error "向 Cloudflare 注册账号失败: HTTP 429 请求频次超限 (Rate Limited)"
+            xmg_warn "说明: 当前 IP 近期申请 Cloudflare WARP 设备数量已达官方上限"
+        elif [ "$last_http" = "403" ]; then
+            xmg_error "向 Cloudflare 注册账号失败: HTTP 403 访问被拦截 (Forbidden / Cloudflare 边缘安全防护)"
+            xmg_warn "说明: 当前 VPS 机房 IP 被 Cloudflare 判定为数据中心风险流量"
+        elif [ "$last_http" = "000" ]; then
+            xmg_error "向 Cloudflare 注册账号失败: 网络连接超时或不可达 (HTTP 000)"
+            [ -n "$last_err" ] && xmg_warn "底层报错: $last_err"
+            if xmg_warp_is_ipv6_only; then
+                xmg_warn "环境提示: 当前为纯 IPv6 VPS，请确保系统 DNS 能够解析 Cloudflare API 并具备 IPv6 外网连通性"
+            fi
+        else
+            xmg_error "向 Cloudflare 注册账号失败: 响应异常 (HTTP $last_http)"
+            [ -n "$last_err" ] && xmg_warn "详情: $last_err"
+        fi
+
+        xmg_warn "------------------------------------------------------------"
+        xmg_warn "自愈指引: 若当前 VPS 机房受限无法在线注册，可选用以下方式一键解决:"
+        xmg_warn "  1. 外部导入: 在本地电脑或未受限设备生成凭据，执行: xmg warp import <account.json>"
+        xmg_warn "  2. 手动放置: 将有效凭据文件直接保存至 $XMG_WARP_ACCOUNT_FILE"
+        xmg_warn "------------------------------------------------------------"
         return 1
     fi
 
@@ -678,6 +760,60 @@ EOF
 
 xmg_warp_register_account() {
     _xmg_warp_register 0
+}
+
+# ===== 导入已有 WARP 凭据 (突破机房 IP 注册受限) =====
+
+xmg_warp_import() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
+    local src="${1:-}"
+
+    if [ -z "$src" ]; then
+        if [ -t 0 ]; then
+            printf "请输入 WARP 账号凭据文件路径 (account.json): "
+            read -r src || return 1
+        else
+            xmg_error "请指定待导入的 WARP account.json 路径"
+            return 1
+        fi
+    fi
+
+    if [ ! -f "$src" ]; then
+        xmg_error "凭据文件不存在: $src"
+        return 1
+    fi
+
+    local priv_k cid
+    priv_k="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$src" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
+    if [ -z "$priv_k" ]; then
+        xmg_error "无效的凭据文件: 缺少 private_key 字段"
+        return 1
+    fi
+
+    mkdir -p "$XMG_WARP_DIR"
+    cp -f "$src" "$XMG_WARP_ACCOUNT_FILE"
+    chmod 600 "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+
+    local cur_res
+    cur_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true)"
+    if [ -z "$cur_res" ]; then
+        cid="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
+        if [ -n "$cid" ] && [ "$cid" != "null" ]; then
+            local r_bytes r0="0" r1="0" r2="0"
+            r_bytes="$(_xmg_warp_decode_client_id "$cid")"
+            read -r r0 r1 r2 _ <<< "$r_bytes"
+            [ -n "$r0" ] || r0="0"
+            [ -n "$r1" ] || r1="0"
+            [ -n "$r2" ] || r2="0"
+            if command -v jq >/dev/null 2>&1; then
+                local tmp_acc="${XMG_WARP_ACCOUNT_FILE}.tmp"
+                jq ".reserved = [$r0, $r1, $r2]" "$XMG_WARP_ACCOUNT_FILE" > "$tmp_acc" && mv -f "$tmp_acc" "$XMG_WARP_ACCOUNT_FILE"
+            fi
+        fi
+    fi
+
+    xmg_info "成功导入 WARP 账号凭据至: $XMG_WARP_ACCOUNT_FILE"
+    return 0
 }
 
 # ===== Xray 原生 WireGuard 出站配置片段导出 =====
@@ -1534,7 +1670,8 @@ xmg_warp_menu() {
         echo "7. 测试流媒体 / ChatGPT / Google 地区与 IP 清洁度"
         echo "8. 导出 / 查看 Xray 原生 WireGuard 出站配置片段"
         echo "9. 重新注册 Cloudflare WARP 纯净账号凭据 (含 3 字节保留标识)"
-        echo "10. 清理 / 卸载 WARP 配置与凭据"
+        echo "10. 导入已有 WARP 凭据 (突破机房 IP 注册受限)"
+        echo "11. 清理 / 卸载 WARP 配置与凭据"
         echo "0. 返回"
         echo
         printf "请选择: "
@@ -1588,6 +1725,11 @@ xmg_warp_menu() {
                 xmg_pause
                 ;;
             10)
+                clear
+                xmg_warp_import || true
+                xmg_pause
+                ;;
+            11)
                 clear
                 xmg_warp_uninstall || true
                 xmg_pause
