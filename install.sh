@@ -165,10 +165,13 @@ install_dirs() {
         "$XMG_HOME" \
         "$XMG_BIN_DIR" \
         "$XMG_LIB_DIR" \
+        "$XMG_RUN_DIR" \
+        "$XMG_LOG_DIR"
+
+    # 敏感配置及备份目录强化为 700 权限
+    chmod 700 \
         "$XMG_ETC_DIR" \
         "$XMG_ETC_DIR/xray" \
-        "$XMG_RUN_DIR" \
-        "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
         "$XMG_XRAY_DIR"
 }
@@ -178,7 +181,7 @@ manifest_entry_validate() {
 
     case "$entry" in
         ""|"/"*|*".."*|*"/../"*|*"/.."|"../"*)
-            die "不安全的清单条目: $entry"
+            return 1
             ;;
     esac
 
@@ -187,7 +190,7 @@ manifest_entry_validate() {
             return 0
             ;;
         *)
-            die "不支持的清单条目: $entry"
+            return 1
             ;;
     esac
 }
@@ -195,7 +198,7 @@ manifest_entry_validate() {
 manifest_entry_mode() {
     local entry="$1"
 
-    manifest_entry_validate "$entry"
+    manifest_entry_validate "$entry" || die "不支持的清单条目: $entry"
 
     case "$entry" in
         xmg)
@@ -214,7 +217,7 @@ manifest_entry_dest() {
     local entry="$1"
     local base=""
 
-    manifest_entry_validate "$entry"
+    manifest_entry_validate "$entry" || die "不支持的清单条目: $entry"
 
     case "$entry" in
         xmg)
@@ -240,7 +243,7 @@ manifest_entry_dest() {
 manifest_entry_local_src() {
     local entry="$1"
 
-    manifest_entry_validate "$entry"
+    manifest_entry_validate "$entry" || die "不支持的清单条目: $entry"
     printf '%s/%s\n' "$SCRIPT_DIR" "$entry"
 }
 
@@ -264,7 +267,7 @@ read_manifest_file() {
                 ;;
         esac
 
-        manifest_entry_validate "$line"
+        manifest_entry_validate "$line" || die "不安全的清单条目: $line"
         printf '%s\n' "$line"
     done < "$manifest"
 }
@@ -479,4 +482,6 @@ main() {
     print_summary
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main "$@"
+fi

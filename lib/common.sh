@@ -144,9 +144,9 @@ xmg_mkdirs() {
         "$XMG_BACKUP_DIR" \
         "$XMG_XRAY_DIR" \
         "$XMG_ETC_DIR/xray"
-    chmod 777 "$XMG_LOG_DIR" "$XMG_LOG_DIR/xray" 2>/dev/null || true
+    chmod 0750 "$XMG_LOG_DIR" "$XMG_LOG_DIR/xray" 2>/dev/null || true
     touch "$XMG_LOG_DIR/xray/error.log" 2>/dev/null || true
-    chmod 666 "$XMG_LOG_DIR/xray/error.log" 2>/dev/null || true
+    chmod 0640 "$XMG_LOG_DIR/xray/error.log" 2>/dev/null || true
 }
 
 xmg_pause() {
@@ -356,7 +356,7 @@ xmg_systemctl() {
             fi
             ;;
         status|is-active|is-enabled)
-            systemctl "$action" "$service"
+            systemctl "$action" "$service" || return $?
             ;;
         *)
             xmg_die "不支持的 systemctl 操作: $action"
@@ -364,22 +364,6 @@ xmg_systemctl() {
     esac
 }
 
-# ===== 安全加载 detect.sh =====
-if [ -r "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh" ]; then
-    # shellcheck source=/dev/null
-    source "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh"
-elif [ -r "$(dirname "${BASH_SOURCE[0]}")/detect.sh" ]; then
-    # shellcheck source=/dev/null
-    source "$(dirname "${BASH_SOURCE[0]}")/detect.sh"
-fi
 
-# ===== 安全加载 doctor.sh =====
-if [ -r "${XMG_LIB_DIR:-$XMG_HOME/lib}/doctor.sh" ]; then
-    # shellcheck source=/dev/null
-    source "${XMG_LIB_DIR:-$XMG_HOME/lib}/doctor.sh"
-elif [ -r "$(dirname "${BASH_SOURCE[0]}")/doctor.sh" ]; then
-    # shellcheck source=/dev/null
-    source "$(dirname "${BASH_SOURCE[0]}")/doctor.sh"
-fi
 
 

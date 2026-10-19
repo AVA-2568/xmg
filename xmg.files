@@ -18,3 +18,4 @@ lib/maint.sh
 lib/update.sh
 lib/uninstall.sh
 templates/config.template.json
+xmg.files
