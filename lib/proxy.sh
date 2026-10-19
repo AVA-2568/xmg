@@ -254,15 +254,7 @@ xmg_proxy_apply() {
         return 4
     fi
 
-    # 校验通过：一次性原子落盘草稿（消除 N+1 磁盘写放大与半提交风险）
-    if ! xmg_state_commit_draft; then
-        rm -rf "$tmpdir"
-        xmg_state_stage_clear
-        xmg_error "状态草稿落盘失败"
-        return 4
-    fi
-
-    # 原子提交 config.json：含内核校验(3)/备份/原子替换/reload 失败回滚(4)
+    # 双文件联合两阶段原子提交：由 xmg_state_commit 执行（Phase 1 预检失败绝不污染 state.env）
     xmg_state_commit "$tmp"
     rc=$?
     rm -rf "$tmpdir"
@@ -539,7 +531,7 @@ xmg_proxy_self_sign_cert() {
 
     mkdir -p "$(dirname "$cert")" "$(dirname "$key")" 2>/dev/null || true
     if command -v openssl >/dev/null 2>&1; then
-        if openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1 2>/dev/null) \
+        if openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
             -keyout "$key" -out "$cert" \
             -subj "/CN=$domain" -days 3650 >/dev/null 2>&1; then
             :
