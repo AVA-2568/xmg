@@ -37,9 +37,34 @@ _xmg_json_escape_into() {
     s="${s//$'\n'/\\n}"
     s="${s//$'\r'/\\r}"
     s="${s//$'\t'/\\t}"
+    s="${s//$'\x01'/\\u0001}"
+    s="${s//$'\x02'/\\u0002}"
+    s="${s//$'\x03'/\\u0003}"
+    s="${s//$'\x04'/\\u0004}"
+    s="${s//$'\x05'/\\u0005}"
+    s="${s//$'\x06'/\\u0006}"
+    s="${s//$'\x07'/\\u0007}"
+    s="${s//$'\x0b'/\\u000b}"
+    s="${s//$'\x0e'/\\u000e}"
+    s="${s//$'\x0f'/\\u000f}"
+    s="${s//$'\x10'/\\u0010}"
+    s="${s//$'\x11'/\\u0011}"
+    s="${s//$'\x12'/\\u0012}"
+    s="${s//$'\x13'/\\u0013}"
+    s="${s//$'\x14'/\\u0014}"
+    s="${s//$'\x15'/\\u0015}"
+    s="${s//$'\x16'/\\u0016}"
+    s="${s//$'\x17'/\\u0017}"
+    s="${s//$'\x18'/\\u0018}"
+    s="${s//$'\x19'/\\u0019}"
+    s="${s//$'\x1a'/\\u001a}"
+    s="${s//$'\x1b'/\\u001b}"
+    s="${s//$'\x1c'/\\u001c}"
+    s="${s//$'\x1d'/\\u001d}"
+    s="${s//$'\x1e'/\\u001e}"
+    s="${s//$'\x1f'/\\u001f}"
     printf -v "$__vname" '%s' "$s"
 }
-
 xmg_json_escape() {
     local out=""
     _xmg_json_escape_into out "${1-}"
@@ -132,9 +157,52 @@ _xmg_render_config_bash() {
     local socks_listen="$6" socks_port="$7" socks_user="$8" socks_pass="$9" socks_udp_bool="${10}"
     local vless_listen="${11}" vless_port="${12}" vless_domain="${13}" vless_uuid="${14}"
     local vless_path="${15}" vless_mode="${16}" vless_cert_file="${17}" vless_key_file="${18}"
+    local warp_on="${19:-$(_xmg_render_get_val WARP_ENABLED 0)}"
+    local warp_mode="${20:-$(_xmg_render_get_val WARP_MODE global)}"
+    local warp_endpoint="${21:-$(_xmg_render_get_val WARP_ENDPOINT "")}"
+    local warp_privkey="${22:-$(_xmg_render_get_val WARP_PRIVATE_KEY "")}"
+    local warp_pubkey="${23:-$(_xmg_render_get_val WARP_PUBLIC_KEY "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=")}"
+    local warp_v4="${24:-$(_xmg_render_get_val WARP_IPV4 "172.16.0.2")}"
+    local warp_v6="${25:-$(_xmg_render_get_val WARP_IPV6 "")}"
+    local warp_reserved="${26:-$(_xmg_render_get_val WARP_RESERVED "[0,0,0]")}"
+
+    # 数字保底
+    [[ "$bufsz" =~ ^[0-9]+$ ]] && [ "$bufsz" -gt 0 ] || bufsz=4
+    [[ "$socks_port" =~ ^[0-9]+$ ]] && [ "$socks_port" -gt 0 ] && [ "$socks_port" -le 65535 ] || socks_port=1080
+    [[ "$vless_port" =~ ^[0-9]+$ ]] && [ "$vless_port" -gt 0 ] && [ "$vless_port" -le 65535 ] || vless_port=443
+
+    [ -n "$error_log" ] || error_log="/opt/xmg/log/xray/error.log"
+    [ -n "$socks_listen" ] || socks_listen="0.0.0.0"
+    [ -n "$vless_listen" ] || vless_listen="0.0.0.0"
+    [ -n "$vless_path" ] || vless_path="/"
+    [ -n "$vless_mode" ] || vless_mode="auto"
+    [ -n "$socks_udp_bool" ] || socks_udp_bool=false
+
+    # WARP 参数清洗与兜底
+    [ -n "$warp_mode" ] || warp_mode="global"
+    if [ "$is_ipv6_only" = "true" ]; then
+        [ -n "$warp_endpoint" ] || warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+    else
+        [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
+    fi
+    if [[ "$warp_endpoint" =~ :0$ ]]; then
+        warp_endpoint="${warp_endpoint%:0}:2408"
+    fi
+    [ -n "$warp_pubkey" ] || warp_pubkey="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    [ -n "$warp_v4" ] || warp_v4="172.16.0.2"
+    [[ "$warp_v4" == */* ]] || warp_v4="${warp_v4}/32"
+    if [ -n "$warp_v6" ] && [[ "$warp_v6" != */* ]]; then
+        warp_v6="${warp_v6}/128"
+    fi
+    if [ -z "$warp_reserved" ] || [ "$warp_reserved" = "null" ]; then
+        warp_reserved="[0, 0, 0]"
+    elif [[ ! "$warp_reserved" =~ ^\[.*\]$ ]]; then
+        warp_reserved="[$(echo "$warp_reserved" | tr ' ' ',')]"
+    fi
 
     local esc_error_log esc_socks_listen esc_socks_user esc_socks_pass
     local esc_vless_listen esc_vless_domain esc_vless_uuid esc_vless_path esc_vless_mode esc_vless_cert_file esc_vless_key_file
+    local esc_warp_privkey esc_warp_pubkey esc_warp_endpoint
 
     _xmg_json_escape_into esc_error_log "$error_log"
     _xmg_json_escape_into esc_socks_listen "$socks_listen"
@@ -147,6 +215,9 @@ _xmg_render_config_bash() {
     _xmg_json_escape_into esc_vless_mode "$vless_mode"
     _xmg_json_escape_into esc_vless_cert_file "$vless_cert_file"
     _xmg_json_escape_into esc_vless_key_file "$vless_key_file"
+    _xmg_json_escape_into esc_warp_privkey "$warp_privkey"
+    _xmg_json_escape_into esc_warp_pubkey "$warp_pubkey"
+    _xmg_json_escape_into esc_warp_endpoint "$warp_endpoint"
 
     local dns_servers dns_query_strat out_strat
     if [ "$is_ipv6_only" = "true" ]; then
@@ -227,7 +298,7 @@ _xmg_render_config_bash() {
             printf '        "decryption": "none"\n'
             printf '      },\n'
             printf '      "streamSettings": {\n'
-            printf '        "method": "xhttp",\n'
+            printf '        "network": "xhttp",\n'
             printf '        "xhttpSettings": {\n'
             printf '          "path": "%s",\n' "$esc_vless_path"
             printf '          "mode": "%s"\n' "$esc_vless_mode"
@@ -256,15 +327,120 @@ _xmg_render_config_bash() {
         printf '\n  ],\n'
     fi
 
+    local direct_outbound
+    direct_outbound='    {
+      "protocol": "freedom",
+      "tag": "direct",
+      "settings": {
+        "domainStrategy": "'"$out_strat"'"
+      }
+    }'
+
+    local warp_outbound=""
+    if [ "$warp_on" = "1" ]; then
+        local warp_addr_json="\"$warp_v4\""
+        if [ -n "$warp_v6" ]; then
+            warp_addr_json="\"$warp_v4\",
+          \"$warp_v6\""
+        fi
+        warp_outbound='    {
+      "tag": "warp-out",
+      "protocol": "wireguard",
+      "settings": {
+        "secretKey": "'"$esc_warp_privkey"'",
+        "address": [
+          '"$warp_addr_json"'
+        ],
+        "peers": [
+          {
+            "publicKey": "'"$esc_warp_pubkey"'",
+            "endpoint": "'"$esc_warp_endpoint"'",
+            "keepAlive": 25,
+            "allowedIPs": [
+              "0.0.0.0/0",
+              "::/0"
+            ]
+          }
+        ],
+        "reserved": '"$warp_reserved"',
+        "noKernelTun": true,
+        "mtu": 1280
+      }
+    }'
+    fi
+
     printf '  "outbounds": [\n'
-    printf '    {\n'
-    printf '      "protocol": "freedom",\n'
-    printf '      "tag": "direct",\n'
-    printf '      "settings": {\n'
-    printf '        "domainStrategy": "%s"\n' "$out_strat"
-    printf '      }\n'
-    printf '    }\n'
-    printf '  ]\n'
+    if [ "$warp_on" = "1" ]; then
+        if [ "$warp_mode" = "routing" ]; then
+            printf '%s,\n%s\n' "$direct_outbound" "$warp_outbound"
+        else
+            printf '%s,\n%s\n' "$warp_outbound" "$direct_outbound"
+        fi
+    else
+        printf '%s\n' "$direct_outbound"
+    fi
+    printf '  ]'
+
+    if [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
+        printf ',\n'
+        printf '  "routing": {\n'
+        printf '    "domainStrategy": "IPIfNonMatch",\n'
+        printf '    "rules": [\n'
+        printf '      {\n'
+        printf '        "type": "field",\n'
+        printf '        "outboundTag": "warp-out",\n'
+        printf '        "domain": [\n'
+        printf '          "domain:openai.com",\n'
+        printf '          "domain:chatgpt.com",\n'
+        printf '          "domain:oaistatic.com",\n'
+        printf '          "domain:oaiusercontent.com",\n'
+        printf '          "domain:sora.com",\n'
+        printf '          "domain:anthropic.com",\n'
+        printf '          "domain:claude.ai",\n'
+        printf '          "domain:gemini.google.com",\n'
+        printf '          "domain:bard.google.com",\n'
+        printf '          "domain:generativeai.googleapis.com",\n'
+        printf '          "domain:makersuite.google.com",\n'
+        printf '          "domain:deepmind.com",\n'
+        printf '          "domain:deepmind.google",\n'
+        printf '          "domain:copilot.microsoft.com",\n'
+        printf '          "domain:sydney.bing.com",\n'
+        printf '          "domain:perplexity.ai",\n'
+        printf '          "domain:pplx.ai",\n'
+        printf '          "domain:midjourney.com",\n'
+        printf '          "domain:huggingface.co",\n'
+        printf '          "domain:groq.com",\n'
+        printf '          "domain:poe.com",\n'
+        printf '          "domain:cursor.com",\n'
+        printf '          "domain:cursor.sh",\n'
+        printf '          "domain:netflix.com",\n'
+        printf '          "domain:byteoversea.com",\n'
+        printf '          "domain:ibytedtos.com",\n'
+        printf '          "domain:musical.ly",\n'
+        printf '          "domain:tiktokcdn.com",\n'
+        printf '          "domain:tiktokv.com",\n'
+        printf '          "domain:gamer.com.tw",\n'
+        printf '          "domain:bilibili.tv",\n'
+        printf '          "domain:viu.com",\n'
+        printf '          "domain:viu.tv"\n'
+        printf '        ]\n'
+        if [ "$is_ipv6_only" = "true" ]; then
+            printf '      },\n'
+            printf '      {\n'
+            printf '        "type": "field",\n'
+            printf '        "outboundTag": "warp-out",\n'
+            printf '        "ip": [\n'
+            printf '          "0.0.0.0/0"\n'
+            printf '        ]\n'
+            printf '      }\n'
+        else
+            printf '      }\n'
+        fi
+        printf '    ]\n'
+        printf '  }\n'
+    else
+        printf '\n'
+    fi
     printf '}\n'
 }
 
@@ -279,25 +455,17 @@ xmg_render_config() {
     # 提取 SOCKS 参数
     local socks_listen socks_port socks_user socks_pass socks_udp socks_udp_bool
     socks_listen="$(_xmg_render_get_val PROXY_SOCKS_LISTEN "0.0.0.0")"
-    socks_port="$(_xmg_render_get_val PROXY_SOCKS_PORT 1080)"
-    case "$socks_port" in
-        ''|*[!0-9]*) socks_port=1080 ;;
-    esac
+    socks_port="$(_xmg_render_get_val PROXY_SOCKS_PORT "1080")"
     socks_user="$(_xmg_render_get_val PROXY_SOCKS_USER "")"
     socks_pass="$(_xmg_render_get_val PROXY_SOCKS_PASS "")"
-    socks_udp="$(_xmg_render_get_val PROXY_SOCKS_UDP 0)"
-    case "$socks_udp" in
-        1|true|TRUE) socks_udp_bool=true ;;
-        *) socks_udp_bool=false ;;
-    esac
+    socks_udp="$(_xmg_render_get_val PROXY_SOCKS_UDP "0")"
+    socks_udp_bool=false
+    [ "$socks_udp" = "1" ] && socks_udp_bool=true
 
     # 提取 VLESS 参数
     local vless_listen vless_port vless_domain vless_uuid vless_path vless_mode vless_cert_file vless_key_file
     vless_listen="$(_xmg_render_get_val PROXY_VLESS_LISTEN "0.0.0.0")"
-    vless_port="$(_xmg_render_get_val PROXY_VLESS_PORT 443)"
-    case "$vless_port" in
-        ''|*[!0-9]*) vless_port=443 ;;
-    esac
+    vless_port="$(_xmg_render_get_val PROXY_VLESS_PORT "443")"
     vless_domain="$(_xmg_render_get_val PROXY_VLESS_DOMAIN "")"
     vless_uuid="$(_xmg_render_get_val PROXY_VLESS_UUID "")"
     vless_path="$(_xmg_render_get_val PROXY_VLESS_PATH "/xhttpx")"
@@ -305,27 +473,68 @@ xmg_render_config() {
     vless_cert_file="$(_xmg_render_get_val PROXY_VLESS_CERT_FILE "")"
     vless_key_file="$(_xmg_render_get_val PROXY_VLESS_KEY_FILE "")"
 
-    # 提取 Policy 参数
+    # 提取全局 policy bufferSize 与端口保底
     local bufsz
-    bufsz="$(_xmg_render_get_val XMG_BUFFER_SIZE 4)"
-    case "$bufsz" in
-        ''|*[!0-9]*) bufsz=4 ;;
-    esac
-    [ "$bufsz" -ge 1 ] 2>/dev/null || bufsz=4
+    bufsz="$(_xmg_render_get_val XMG_BUFFER_SIZE "4")"
+    [[ "$bufsz" =~ ^[0-9]+$ ]] && [ "$bufsz" -gt 0 ] || bufsz=4
+    [[ "$socks_port" =~ ^[0-9]+$ ]] && [ "$socks_port" -gt 0 ] && [ "$socks_port" -le 65535 ] || socks_port=1080
+    [[ "$vless_port" =~ ^[0-9]+$ ]] && [ "$vless_port" -gt 0 ] && [ "$vless_port" -le 65535 ] || vless_port=443
 
     # 提取日志参数
     local logdir error_log
     logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
-    chmod 777 "$logdir" 2>/dev/null || true
+    chmod 750 "$logdir" 2>/dev/null || true
     error_log="$logdir/error.log"
     touch "$error_log" 2>/dev/null || true
-    chmod 666 "$error_log" 2>/dev/null || true
+    chmod 640 "$error_log" 2>/dev/null || true
 
     # IPv6 模式判断
     local is_ipv6_only=false
     if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
         is_ipv6_only=true
+    fi
+
+    # 提取 WARP 参数
+    local warp_on warp_mode warp_endpoint warp_privkey warp_pubkey warp_v4 warp_v6 warp_reserved
+    warp_on="$(_xmg_render_get_val WARP_ENABLED 0)"
+    warp_mode="$(_xmg_render_get_val WARP_MODE global)"
+    warp_endpoint="$(_xmg_render_get_val WARP_ENDPOINT "")"
+    warp_privkey="$(_xmg_render_get_val WARP_PRIVATE_KEY "")"
+    warp_pubkey="$(_xmg_render_get_val WARP_PUBLIC_KEY "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=")"
+    warp_v4="$(_xmg_render_get_val WARP_IPV4 "172.16.0.2")"
+    warp_v6="$(_xmg_render_get_val WARP_IPV6 "")"
+    warp_reserved="$(_xmg_render_get_val WARP_RESERVED "[0,0,0]")"
+
+    local warp_bool=false
+    [ "$warp_on" = "1" ] && warp_bool=true
+    [ -n "$warp_mode" ] || warp_mode="global"
+
+    if [ "$is_ipv6_only" = "true" ]; then
+        [ -n "$warp_endpoint" ] || warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+    else
+        [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
+    fi
+    if [[ "$warp_endpoint" =~ :0$ ]]; then
+        warp_endpoint="${warp_endpoint%:0}:2408"
+    fi
+    [ -n "$warp_pubkey" ] || warp_pubkey="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
+    [ -n "$warp_v4" ] || warp_v4="172.16.0.2"
+    [[ "$warp_v4" == */* ]] || warp_v4="${warp_v4}/32"
+    if [ -n "$warp_v6" ] && [[ "$warp_v6" != */* ]]; then
+        warp_v6="${warp_v6}/128"
+    fi
+    if [ -z "$warp_reserved" ] || [ "$warp_reserved" = "null" ]; then
+        warp_reserved="[0, 0, 0]"
+    elif [[ ! "$warp_reserved" =~ ^\[.*\]$ ]]; then
+        warp_reserved="[$(echo "$warp_reserved" | tr ' ' ',')]"
+    fi
+
+    local warp_addr_json
+    if [ -n "$warp_v6" ]; then
+        warp_addr_json="[\"$warp_v4\", \"$warp_v6\"]"
+    else
+        warp_addr_json="[\"$warp_v4\"]"
     fi
 
     local has_jq=0
@@ -354,81 +563,183 @@ xmg_render_config() {
 ) |
 .dns.queryStrategy = (if $is_ipv6_only then "UseIPv6" else "UseIP" end) |
 (
-  if (.outbounds | type) == "array" and (.outbounds | length) > 0 then
-    .outbounds[0].settings.domainStrategy = (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
-  else
-    .outbounds = [{
-      "protocol": "freedom",
-      "tag": "direct",
+  if $warp_on then
+    {
+      "tag": "warp-out",
+      "protocol": "wireguard",
       "settings": {
-        "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+        "secretKey": $warp_privkey,
+        "address": $warp_address,
+        "peers": [
+          {
+            "publicKey": $warp_pubkey,
+            "endpoint": $warp_endpoint,
+            "keepAlive": 25,
+            "allowedIPs": [
+              "0.0.0.0/0",
+              "::/0"
+            ]
+          }
+        ],
+        "reserved": $warp_reserved,
+        "noKernelTun": true,
+        "mtu": 1280
       }
-    }]
+    }
+  else null end
+) as $warp_out |
+(
+  if $warp_on then
+    if $warp_mode == "routing" then
+      .outbounds = [
+        {
+          "protocol": "freedom",
+          "tag": "direct",
+          "settings": {
+            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+          }
+        },
+        $warp_out
+      ] |
+      .routing = {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": (
+          [
+            {
+              "type": "field",
+              "outboundTag": "warp-out",
+              "domain": [
+                "domain:openai.com",
+                "domain:chatgpt.com",
+                "domain:oaistatic.com",
+                "domain:oaiusercontent.com",
+                "domain:sora.com",
+                "domain:anthropic.com",
+                "domain:claude.ai",
+                "domain:gemini.google.com",
+                "domain:bard.google.com",
+                "domain:generativeai.googleapis.com",
+                "domain:makersuite.google.com",
+                "domain:deepmind.com",
+                "domain:deepmind.google",
+                "domain:copilot.microsoft.com",
+                "domain:sydney.bing.com",
+                "domain:perplexity.ai",
+                "domain:pplx.ai",
+                "domain:midjourney.com",
+                "domain:huggingface.co",
+                "domain:groq.com",
+                "domain:poe.com",
+                "domain:cursor.com",
+                "domain:cursor.sh",
+                "domain:netflix.com",
+                "domain:byteoversea.com",
+                "domain:ibytedtos.com",
+                "domain:musical.ly",
+                "domain:tiktokcdn.com",
+                "domain:tiktokv.com",
+                "domain:gamer.com.tw",
+                "domain:bilibili.tv",
+                "domain:viu.com",
+                "domain:viu.tv"
+              ]
+            }
+          ] + (if $is_ipv6_only then [{ "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }] else [] end)
+        )
+      }
+    else
+      .outbounds = [
+        $warp_out,
+        {
+          "protocol": "freedom",
+          "tag": "direct",
+          "settings": {
+            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+          }
+        }
+      ] |
+      (if .routing and .routing.rules then
+        .routing.rules = [.routing.rules[] | select((.outboundTag // "") != "warp-out")]
+       else . end)
+    end
+  else
+    .outbounds = [
+      {
+        "protocol": "freedom",
+        "tag": "direct",
+        "settings": {
+          "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+        }
+      }
+    ] |
+    (if .routing and .routing.rules then
+      .routing.rules = [.routing.rules[] | select((.outboundTag // "") != "warp-out")]
+     else . end)
   end
 ) |
-	(
-	  (if $socks_on then [
-	    {
-	      "tag": "inbound-socks",
-	      "listen": $socks_listen,
-	      "port": ($socks_port | tonumber),
-	      "protocol": "socks",
-	      "settings": {
-	        "auth": "password",
-	        "users": [
-	          {
-	            "user": $socks_user,
-	            "pass": $socks_pass
-	          }
-	        ],
-	        "udp": $socks_udp
-	      }
-	    }
-	  ] else [] end) +
-	  (if $vless_on then [
-	    {
-	      "tag": "inbound-vless",
-	      "listen": $vless_listen,
-	      "port": ($vless_port | tonumber),
-	      "protocol": "vless",
-	      "settings": {
-	        "users": [
-	          {
-	            "id": $vless_uuid,
-	            "level": 0
-	          }
-	        ],
-	        "decryption": "none"
-	      },
-	      "streamSettings": {
-	        "method": "xhttp",
-	        "xhttpSettings": {
-	          "path": $vless_path,
-	          "mode": $vless_mode
-	        },
-	        "security": "tls",
-	        "tlsSettings": {
-	          "serverName": $vless_domain,
-	          "rejectUnknownSni": true,
-	          "alpn": [
-	            "h2",
-	            "http/1.1"
-	          ],
-	          "minVersion": "1.2",
-	          "maxVersion": "1.3",
-	          "certificates": [
-	            {
-	              "usage": "encipherment",
-	              "certificateFile": $vless_cert_file,
-	              "keyFile": $vless_key_file
-	            }
-	          ]
-	        }
-	      }
-	    }
-	  ] else [] end)
-	) as $active_inbounds |
-	.inbounds = $active_inbounds'
+(
+  (if $socks_on then [
+    {
+      "tag": "inbound-socks",
+      "listen": $socks_listen,
+      "port": ($socks_port | tonumber),
+      "protocol": "socks",
+      "settings": {
+        "auth": "password",
+        "users": [
+          {
+            "user": $socks_user,
+            "pass": $socks_pass
+          }
+        ],
+        "udp": $socks_udp
+      }
+    }
+  ] else [] end) +
+  (if $vless_on then [
+    {
+      "tag": "inbound-vless",
+      "listen": $vless_listen,
+      "port": ($vless_port | tonumber),
+      "protocol": "vless",
+      "settings": {
+        "users": [
+          {
+            "id": $vless_uuid,
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "xhttp",
+        "xhttpSettings": {
+          "path": $vless_path,
+          "mode": $vless_mode
+        },
+        "security": "tls",
+        "tlsSettings": {
+          "serverName": $vless_domain,
+          "rejectUnknownSni": true,
+          "alpn": [
+            "h2",
+            "http/1.1"
+          ],
+          "minVersion": "1.2",
+          "maxVersion": "1.3",
+          "certificates": [
+            {
+              "usage": "encipherment",
+              "certificateFile": $vless_cert_file,
+              "keyFile": $vless_key_file
+            }
+          ]
+        }
+      }
+    }
+  ] else [] end)
+) as $active_inbounds |
+.inbounds = $active_inbounds'
 
         local jq_args=(
             --arg error_log "$error_log"
@@ -449,6 +760,13 @@ xmg_render_config() {
             --arg vless_mode "$vless_mode"
             --arg vless_cert_file "$vless_cert_file"
             --arg vless_key_file "$vless_key_file"
+            --argjson warp_on "$warp_bool"
+            --arg warp_mode "$warp_mode"
+            --arg warp_endpoint "$warp_endpoint"
+            --arg warp_privkey "$warp_privkey"
+            --arg warp_pubkey "$warp_pubkey"
+            --argjson warp_address "$warp_addr_json"
+            --argjson warp_reserved "$warp_reserved"
         )
 
         if [ -n "$tpl_file" ] && [ -f "$tpl_file" ]; then
@@ -469,6 +787,8 @@ xmg_render_config() {
             "$error_log" "$bufsz" "$is_ipv6_only" \
             "$socks_listen" "$socks_port" "$socks_user" "$socks_pass" "$socks_udp_bool" \
             "$vless_listen" "$vless_port" "$vless_domain" "$vless_uuid" \
-            "$vless_path" "$vless_mode" "$vless_cert_file" "$vless_key_file"
+            "$vless_path" "$vless_mode" "$vless_cert_file" "$vless_key_file" \
+            "$warp_on" "$warp_mode" "$warp_endpoint" "$warp_privkey" "$warp_pubkey" \
+            "$warp_v4" "$warp_v6" "$warp_reserved"
     fi
 }

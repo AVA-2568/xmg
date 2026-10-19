@@ -82,7 +82,15 @@ xmg_state_defaults() {
         'XMG_BUFFER_SIZE=4' \
         'XMG_BACKUP_KEEP=5' \
         'XRAY_CHANNEL=preview' \
-        'XRAY_PINNED_VERSION='
+        'XRAY_PINNED_VERSION=' \
+        'WARP_ENABLED=0' \
+        'WARP_MODE=global' \
+        'WARP_ENDPOINT=' \
+        'WARP_PRIVATE_KEY=' \
+        'WARP_PUBLIC_KEY=' \
+        'WARP_IPV4=' \
+        'WARP_IPV6=' \
+        'WARP_RESERVED='
 }
 
 declare -gA XMG_STATE_DEFAULTS=()
@@ -252,6 +260,10 @@ xmg_state_load() {
 # 已显式写空的值（键存在但值为空）返回空，不触发回退——否则无法把某个键清空。
 xmg_state_get() {
     local key="${1:-}" def="${2:-}"
+    if [ -n "$key" ] && [ -n "${XMG_STATE_STAGE[$key]+set}" ]; then
+        printf '%s\n' "${XMG_STATE_STAGE[$key]}"
+        return 0
+    fi
     if [ -n "$key" ] && [ -n "${XMG_STATE[$key]+set}" ]; then
         printf '%s\n' "${XMG_STATE[$key]}"
         return 0
@@ -275,7 +287,9 @@ xmg_state_get() {
 _xmg_state_v=""
 _xmg_state_peek() {
     local key="${1:-}"
-    if [ -n "$key" ] && [ -n "${XMG_STATE[$key]+set}" ]; then
+    if [ -n "$key" ] && [ -n "${XMG_STATE_STAGE[$key]+set}" ]; then
+        _xmg_state_v="${XMG_STATE_STAGE[$key]}"
+    elif [ -n "$key" ] && [ -n "${XMG_STATE[$key]+set}" ]; then
         _xmg_state_v="${XMG_STATE[$key]}"
     elif [ -n "$key" ] && [ -n "${XMG_STATE_DEFAULTS[$key]+set}" ]; then
         _xmg_state_v="${XMG_STATE_DEFAULTS[$key]}"
@@ -318,6 +332,63 @@ xmg_state_stage_clear() {
     xmg_state_load >/dev/null 2>&1 || true
 }
 
+# 将当前暂存区合并到目标文件 (原子写入的目标暂存文件)
+_xmg_state_render_merged() {
+    local target="$1"
+    local line="" k=""
+    local -A written=()
+    local src_file="$XMG_STATE_FILE"
+
+    if [ -f "$src_file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*)
+                    printf '%s\n' "$line" >> "$target"
+                    ;;
+                *=*)
+                    k="${line%%=*}"
+                    if [ -n "${XMG_STATE_STAGE[$k]+set}" ]; then
+                        printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$target"
+                        written["$k"]=1
+                    else
+                        printf '%s\n' "$line" >> "$target"
+                    fi
+                    ;;
+                *)
+                    printf '%s\n' "$line" >> "$target"
+                    ;;
+            esac
+        done < "$src_file"
+    else
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*)
+                    printf '%s\n' "$line" >> "$target"
+                    ;;
+                *=*)
+                    k="${line%%=*}"
+                    if [ -n "${XMG_STATE_STAGE[$k]+set}" ]; then
+                        printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$target"
+                        written["$k"]=1
+                    else
+                        printf '%s\n' "$line" >> "$target"
+                    fi
+                    ;;
+                *)
+                    printf '%s\n' "$line" >> "$target"
+                    ;;
+            esac
+        done < <(xmg_state_defaults)
+    fi
+
+    for k in "${!XMG_STATE_STAGE[@]}"; do
+        if [ -z "${written[$k]+set}" ]; then
+            printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$target"
+        fi
+    done
+    return 0
+}
+
 # 将当前暂存区中的所有键一次性合并并原子写入 state.env（单一事务落盘）。
 # 外部命令只有 chmod 与 mv 两个，其余全部走 bash 内建。
 xmg_state_commit_draft() {
@@ -330,9 +401,8 @@ xmg_state_commit_draft() {
         }
     fi
     chmod 700 "$XMG_XRAY_STATE_DIR" 2>/dev/null || true
-    [ -f "$XMG_STATE_FILE" ] || xmg_state_defaults > "$XMG_STATE_FILE" || return 1
 
-    local tmp="" line="" k=""
+    local tmp=""
     tmp="$XMG_XRAY_STATE_DIR/.state.$$"
     if ( set -o noclobber; : > "$tmp" ) 2>/dev/null; then
         :
@@ -344,32 +414,10 @@ xmg_state_commit_draft() {
         }
     fi
 
-    local -A written=()
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*)
-                printf '%s\n' "$line" >> "$tmp"
-                ;;
-            *=*)
-                k="${line%%=*}"
-                if [ -n "${XMG_STATE_STAGE[$k]+set}" ]; then
-                    printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$tmp"
-                    written["$k"]=1
-                else
-                    printf '%s\n' "$line" >> "$tmp"
-                fi
-                ;;
-            *)
-                printf '%s\n' "$line" >> "$tmp"
-                ;;
-        esac
-    done < "$XMG_STATE_FILE"
-
-    for k in "${!XMG_STATE_STAGE[@]}"; do
-        if [ -z "${written[$k]+set}" ]; then
-            printf '%s=%s\n' "$k" "${XMG_STATE_STAGE[$k]}" >> "$tmp"
-        fi
-    done
+    _xmg_state_render_merged "$tmp" || {
+        rm -f "$tmp"
+        return 1
+    }
 
     chmod 600 "$tmp" 2>/dev/null || true
     mv -f "$tmp" "$XMG_STATE_FILE" || {
@@ -379,6 +427,7 @@ xmg_state_commit_draft() {
     }
 
     XMG_STATE_STAGE=()
+    xmg_state_load >/dev/null 2>&1 || true
     return 0
 }
 
@@ -617,6 +666,36 @@ xmg_state_validate() {
         fi
     fi
 
+    # WARP 状态校验
+    local warp_on warp_mode warp_ep
+    _state_val warp_on WARP_ENABLED
+    _xmg_state_validate_onoff WARP_ENABLED "$warp_on" || return 2
+
+    _state_val warp_mode WARP_MODE
+    if [ -n "$warp_mode" ]; then
+        case "$warp_mode" in
+            global|routing) ;;
+            *)
+                xmg_error "非法 WARP_MODE: '$warp_mode'（仅支持 global 或 routing）"
+                return 2
+                ;;
+        esac
+    elif [ "$warp_on" = "1" ]; then
+        xmg_error "WARP 启用时 WARP_MODE 不能为空（仅支持 global 或 routing）"
+        return 2
+    fi
+
+    _state_val warp_ep WARP_ENDPOINT
+    if [ -n "$warp_ep" ]; then
+        if [[ "$warp_ep" =~ ^(\[[0-9a-fA-F:]+\]|[0-9.]+|[A-Za-z0-9.-]+):([0-9]+)$ ]]; then
+            local ep_port="${BASH_REMATCH[2]}"
+            xmg_state_validate_port "$ep_port" || return 2
+        else
+            xmg_error "非法 WARP_ENDPOINT 格式: '$warp_ep'（需为 IP:端口、[IPv6]:端口 或 域名:端口）"
+            return 2
+        fi
+    fi
+
     return 0
 }
 
@@ -796,72 +875,185 @@ _xmg_xray_reload() {
     return 0
 }
 
-# ===== 原子提交 =====
-# 顺序：校验新配置 → 备份旧配置 → 清理旧备份 → 原子替换 → restart 重启服务 → 失败回滚。
+# ===== 原子提交 (两阶段联合事务) =====
+# 阶段：
+#   Phase 1 (Prepare): 校验待提交配置（xray run -test），失败立即返回 3，现网与状态绝不触碰。
+#   Phase 2 (Commit): 对 config.json 与 state.env 分别创建对齐备份，原子更新两份文件；
+#                     若服务重载失败，触发双回滚（原子恢复两份文件至提交前）并返回 4。
 #
-# 核心不变量：进入「替换」阶段前，只要现网存在旧配置，旧配置必已备份成功；
-# 备份失败立即中止、绝不替换——无法保证可回滚，就不动现网。
-# 首次安装（原本无现网配置）是唯一没有旧备份的合法情形，重启失败时
-# 如实报告「新配置已写入但未生效」，不再谎称已回滚。
-#
-# 返回：0 成功 / 3 校验失败（现网未被触碰）/ 4 运行失败
-#       （有旧配置时已尽力原子回滚；首次安装时返回 4 且新配置保留待排查）。
+# 返回：0 成功 / 3 校验失败（现网未被触碰）/ 4 运行失败（已尽力原子双回滚）。
 xmg_state_commit() {
     local new_cfg="${1:-}"
-    local old_backup=""
-    local had_old=0
-    local dir_tmp=""
+    local need_clean_cfg=0
+    local old_cfg_backup=""
+    local old_state_backup=""
+    local had_old_cfg=0
+    local had_old_state=0
+    local had_staged_state=0
+    local dir_cfg=""
+    local dir_state=""
+
+    # 检查是否存在未落盘的状态暂存草稿
+    if [ "${#XMG_STATE_STAGE[@]}" -gt 0 ]; then
+        had_staged_state=1
+    fi
+
+    # 若未传入待提交配置，自动从当前状态/草稿联动渲染
+    if [ -z "$new_cfg" ]; then
+        if declare -F xmg_render_config >/dev/null 2>&1; then
+            local tmpdir=""
+            tmpdir="$(mktemp -d)" || {
+                xmg_error "无法创建临时目录"
+                xmg_state_stage_clear
+                return 4
+            }
+            new_cfg="$tmpdir/config.json"
+            need_clean_cfg=1
+            local s_on="${XMG_STATE_STAGE[PROXY_SOCKS_ENABLED]:-${XMG_STATE[PROXY_SOCKS_ENABLED]:-0}}"
+            local v_on="${XMG_STATE_STAGE[PROXY_VLESS_ENABLED]:-${XMG_STATE[PROXY_VLESS_ENABLED]:-0}}"
+            if ! xmg_render_config "$s_on" "$v_on" > "$new_cfg"; then
+                rm -rf "$tmpdir"
+                xmg_state_stage_clear
+                xmg_error "渲染待生效配置失败"
+                return 4
+            fi
+        else
+            xmg_error "未指定待提交配置且渲染器不可用"
+            xmg_state_stage_clear
+            return 4
+        fi
+    fi
 
     local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
-    chmod 777 "$logdir" 2>/dev/null || true
+    chmod 750 "$logdir" 2>/dev/null || true
     touch "$logdir/error.log" 2>/dev/null || true
-    chmod 666 "$logdir/error.log" 2>/dev/null || true
+    chmod 640 "$logdir/error.log" 2>/dev/null || true
 
-    # 1. 校验新配置（失败绝不触碰现网配置）
+    # ===== Phase 1: Prepare (校验新配置，失败绝不触碰现网配置与状态) =====
     xmg_state_validate_config "$new_cfg"
     local vrc=$?
-    [ "$vrc" -eq 0 ] || return 3
+    if [ "$vrc" -ne 0 ]; then
+        [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+        # 校验失败丢弃暂存区草稿，恢复内存状态为当前磁盘真相，绝不产生 Ghost State
+        xmg_state_stage_clear
+        return 3
+    fi
 
-    dir_tmp="$(dirname "$XMG_XRAY_CONFIG")"
-    mkdir -p "$dir_tmp" || {
+    dir_cfg="$(dirname "$XMG_XRAY_CONFIG")"
+    mkdir -p "$dir_cfg" || {
+        [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
         xmg_error "无法创建配置目录"
+        xmg_state_stage_clear
         return 4
     }
 
-    # 2. 备份旧配置。备份失败立即中止、不进入替换阶段：没有可用备份就没有
-    #    可靠退路，若照常替换，reload 失败就会把现网换成未生效的新配置。
-    #    备份名含时间戳 + PID + 自增序号，避免同秒提交互相覆盖。
+    dir_state="$(dirname "$XMG_STATE_FILE")"
+    mkdir -p "$dir_state" 2>/dev/null || true
+
+    # ===== Phase 2: Commit =====
+    mkdir -p "$XMG_BACKUP_DIR" 2>/dev/null || true
+    chmod 700 "$XMG_BACKUP_DIR" 2>/dev/null || true
+
+    _XMG_BAK_SEQ=$(( ${_XMG_BAK_SEQ:-0} + 1 ))
+    local ts=""
+    ts="$(xmg_timestamp)"
+
+    # 1. 备份 config.json
     if [ -f "$XMG_XRAY_CONFIG" ]; then
-        mkdir -p "$XMG_BACKUP_DIR" 2>/dev/null || true
-        _XMG_BAK_SEQ=$(( ${_XMG_BAK_SEQ:-0} + 1 ))
-        old_backup="$XMG_BACKUP_DIR/config.json.$(xmg_timestamp).$$.$_XMG_BAK_SEQ.bak"
-        if ! cp -a "$XMG_XRAY_CONFIG" "$old_backup" 2>/dev/null || [ ! -f "$old_backup" ]; then
-            rm -f "$old_backup" 2>/dev/null || true
+        old_cfg_backup="$XMG_BACKUP_DIR/config.json.$ts.$$.$_XMG_BAK_SEQ.bak"
+        if ! cp -a "$XMG_XRAY_CONFIG" "$old_cfg_backup" 2>/dev/null || [ ! -f "$old_cfg_backup" ]; then
+            rm -f "$old_cfg_backup" 2>/dev/null || true
+            [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+            xmg_state_stage_clear
             xmg_error "无法备份现有配置，为安全起见中止本次变更（现网配置未改动）"
             return 4
         fi
-        had_old=1
-
-        # 3. 清理旧备份（保留 XMG_BACKUP_KEEP 份）
-        xmg_backup_prune "$XMG_BACKUP_DIR" "$(xmg_state_get XMG_BACKUP_KEEP)" "config.json."
+        had_old_cfg=1
     fi
 
-    # 4. 原子替换：先写同目录暂存文件，再 mv 覆盖，中断不会留下半个 config.json
-    local staged=""
-    staged="$(mktemp "$dir_tmp/.config.XXXXXX")" || {
-        xmg_error "无法创建临时文件"
+    # 2. 备份 state.env (存在暂存修改时必须对旧状态创建对齐备份)
+    if [ -f "$XMG_STATE_FILE" ]; then
+        if [ "$had_staged_state" -eq 1 ]; then
+            old_state_backup="$XMG_BACKUP_DIR/state.env.$ts.$$.$_XMG_BAK_SEQ.bak"
+            if ! cp -a "$XMG_STATE_FILE" "$old_state_backup" 2>/dev/null || [ ! -f "$old_state_backup" ]; then
+                rm -f "$old_cfg_backup" "$old_state_backup" 2>/dev/null || true
+                [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+                xmg_state_stage_clear
+                xmg_error "无法备份现有状态文件，为安全起见中止本次变更（现网配置未改动）"
+                return 4
+            fi
+            had_old_state=1
+        fi
+    fi
+
+    # 3. 清理旧备份（保留 XMG_BACKUP_KEEP 份）
+    local keep=""
+    keep="$(xmg_state_get XMG_BACKUP_KEEP)"
+    [ "$had_old_cfg" -eq 1 ] && xmg_backup_prune "$XMG_BACKUP_DIR" "$keep" "config.json."
+    [ "$had_old_state" -eq 1 ] && xmg_backup_prune "$XMG_BACKUP_DIR" "$keep" "state.env."
+
+    # 4. 原子落盘 state.env (若有暂存草稿，或首次生成)
+    local staged_state=""
+    if [ "$had_staged_state" -eq 1 ] || [ ! -f "$XMG_STATE_FILE" ]; then
+        staged_state="$(mktemp "$dir_state/.state.XXXXXX")" || {
+            [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+            xmg_error "无法创建状态临时文件"
+            xmg_state_stage_clear
+            return 4
+        }
+        _xmg_state_render_merged "$staged_state" || {
+            rm -f "$staged_state"
+            [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+            xmg_error "写入状态暂存文件失败"
+            xmg_state_stage_clear
+            return 4
+        }
+        chmod 600 "$staged_state" 2>/dev/null || true
+        mv -f "$staged_state" "$XMG_STATE_FILE" || {
+            rm -f "$staged_state"
+            [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+            xmg_error "原子替换状态文件失败"
+            xmg_state_stage_clear
+            return 4
+        }
+    fi
+
+    # 5. 原子落盘 config.json
+    local staged_cfg=""
+    staged_cfg="$(mktemp "$dir_cfg/.config.XXXXXX")" || {
+        [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+        xmg_error "无法创建配置临时文件"
+        if [ -n "$old_state_backup" ] && [ -f "$old_state_backup" ]; then
+            cp -a "$old_state_backup" "$XMG_STATE_FILE" 2>/dev/null || true
+        fi
+        xmg_state_stage_clear
         return 4
     }
-    cat "$new_cfg" > "$staged" || { rm -f "$staged"; return 4; }
-    chmod 644 "$staged" 2>/dev/null || true
-    mv -f "$staged" "$XMG_XRAY_CONFIG" || {
-        rm -f "$staged"
+    cat "$new_cfg" > "$staged_cfg" || {
+        rm -f "$staged_cfg"
+        [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+        if [ -n "$old_state_backup" ] && [ -f "$old_state_backup" ]; then
+            cp -a "$old_state_backup" "$XMG_STATE_FILE" 2>/dev/null || true
+        fi
+        xmg_state_stage_clear
+        return 4
+    }
+    chmod 600 "$staged_cfg" 2>/dev/null || true
+    mv -f "$staged_cfg" "$XMG_XRAY_CONFIG" || {
+        rm -f "$staged_cfg"
+        [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+        if [ -n "$old_state_backup" ] && [ -f "$old_state_backup" ]; then
+            cp -a "$old_state_backup" "$XMG_STATE_FILE" 2>/dev/null || true
+        fi
         xmg_error "替换配置失败"
+        xmg_state_stage_clear
         return 4
     }
 
-    # 4.1 自动同步 systemd 配置路径与双重兜底
+    [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
+
+    # 5.1 自动同步 systemd 配置路径与双重兜底
     if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
         if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
             xmg_core_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
@@ -876,29 +1068,54 @@ xmg_state_commit() {
         fi
     fi
 
-    # 5. 重启服务加载新配置
-    _xmg_xray_reload && return 0
+    # 6. 重启服务加载新配置
+    if _xmg_xray_reload; then
+        XMG_STATE_STAGE=()
+        xmg_state_load >/dev/null 2>&1 || true
+        return 0
+    fi
 
-    # 重启失败。文案必须与实际行为一致，任何分支都不谎称已回滚。
-    if [ "$had_old" -ne 1 ]; then
-        # 首次安装：原本没有配置，没有旧配置可回滚。如实报告，默认保留新配置。
+    # 7. 重启服务失败：执行双回滚 (Dual Rollback)
+    if [ "$had_old_cfg" -ne 1 ]; then
         xmg_error "Xray 服务重启失败；本次为首次安装，原状态为无配置，新配置已写入但未生效：$XMG_XRAY_CONFIG（未自动删除，便于排查）"
+        XMG_STATE_STAGE=()
+        xmg_state_load >/dev/null 2>&1 || true
         return 4
     fi
 
-    # 有旧配置：用「同目录暂存 + mv -f」原子回滚（回滚也要原子，且失败必须可见）。
-    local rb_staged=""
-    if rb_staged="$(mktemp "$dir_tmp/.config.rb.XXXXXX")" \
-        && cp -a "$old_backup" "$rb_staged" 2>/dev/null \
-        && mv -f "$rb_staged" "$XMG_XRAY_CONFIG" 2>/dev/null; then
+    local rb_cfg_staged="" rb_state_staged=""
+    local rb_cfg_ok=0 rb_state_ok=0
+
+    # 回滚 config.json
+    if rb_cfg_staged="$(mktemp "$dir_cfg/.config.rb.XXXXXX")" \
+        && cp -a "$old_cfg_backup" "$rb_cfg_staged" 2>/dev/null \
+        && mv -f "$rb_cfg_staged" "$XMG_XRAY_CONFIG" 2>/dev/null; then
+        rb_cfg_ok=1
+    else
+        [ -n "$rb_cfg_staged" ] && rm -f "$rb_cfg_staged" 2>/dev/null || true
+    fi
+
+    # 回滚 state.env
+    if [ "$had_old_state" -eq 1 ] && [ -n "$old_state_backup" ]; then
+        if rb_state_staged="$(mktemp "$dir_state/.state.rb.XXXXXX")" \
+            && cp -a "$old_state_backup" "$rb_state_staged" 2>/dev/null \
+            && mv -f "$rb_state_staged" "$XMG_STATE_FILE" 2>/dev/null; then
+            rb_state_ok=1
+        else
+            [ -n "$rb_state_staged" ] && rm -f "$rb_state_staged" 2>/dev/null || true
+        fi
+    else
+        rb_state_ok=1
+    fi
+
+    xmg_state_stage_clear
+
+    if [ "$rb_cfg_ok" -eq 1 ] && [ "$rb_state_ok" -eq 1 ]; then
         _xmg_xray_reload >/dev/null 2>&1 || \
             xmg_warn "已回滚到原配置，但重启服务仍然失败，请检查 xray 服务状态"
-        xmg_error "Xray 服务重启失败，已回滚到原配置"
+        xmg_error "Xray 服务重启失败，已触发双回滚（已还原 config.json 与 state.env 到提交前状态）"
     else
-        if [ -n "$rb_staged" ]; then
-            rm -f "$rb_staged" 2>/dev/null || true
-        fi
-        xmg_error "Xray 服务重启失败，且回滚未能完成；现网配置可能未生效，请立即检查 $XMG_XRAY_CONFIG"
+        xmg_error "Xray 服务重启失败，且双回滚未能完全成功；请立即检查 $XMG_XRAY_CONFIG 与 $XMG_STATE_FILE"
     fi
     return 4
 }

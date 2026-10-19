@@ -232,13 +232,13 @@ t_equals "共存时两入站端口不同" "$_t_c3_ports" "2"
 # ============================================================================
 t_assert "共存产物不含铁律禁止字段" \
     _t_absent_tokens "$C3" \
-    '"network"' '"mux"' '"flow"' '"extra"' '"email"' '"accounts"' 'noauth' 'tcpSettings'
+    '"mux"' '"flow"' '"extra"' '"email"' '"accounts"' 'noauth' 'tcpSettings'
 
 # ============================================================================
 # 4. 必备字段必须出现（依据 https://lcuwx2016.github.io/xtls/config 规范）
 # ============================================================================
-t_assert "共存产物含必备字段 method/users/decryption/auth" \
-    _t_has_all "$C3" '"method": "xhttp"' '"users"' '"decryption": "none"' '"auth": "password"'
+t_assert "共存产物含必备字段 network/users/decryption/auth" \
+    _t_has_all "$C3" '"network": "xhttp"' '"users"' '"decryption": "none"' '"auth": "password"'
 
 # ============================================================================
 # 5. SOCKS 入站不得带 streamSettings：全产物中 streamSettings 只应出现 1 次（VLESS）
