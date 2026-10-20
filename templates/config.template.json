@@ -26,8 +26,24 @@
       "protocol": "freedom",
       "tag": "direct",
       "settings": {
-        "domainStrategy": "UseIP"
+        "finalRules": [
+          {
+            "action": "allow",
+            "network": "tcp",
+            "port": "22"
+          }
+        ]
+      },
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIP"
+        }
       }
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked",
+      "settings": {}
     }
   ]
 }

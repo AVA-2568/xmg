@@ -100,7 +100,18 @@ _XMG_DEFAULT_CONFIG_TEMPLATE='{
       "protocol": "freedom",
       "tag": "direct",
       "settings": {
-        "domainStrategy": "UseIP"
+        "finalRules": [
+          {
+            "action": "allow",
+            "network": "tcp",
+            "port": "22"
+          }
+        ]
+      },
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "UseIP"
+        }
       }
     }
   ]
@@ -172,10 +183,12 @@ _xmg_render_config_bash() {
     [[ "$vless_port" =~ ^[0-9]+$ ]] && [ "$vless_port" -gt 0 ] && [ "$vless_port" -le 65535 ] || vless_port=443
 
     [ -n "$error_log" ] || error_log="/opt/xmg/log/xray/error.log"
-    [ -n "$socks_listen" ] || socks_listen="0.0.0.0"
-    [ -n "$vless_listen" ] || vless_listen="0.0.0.0"
+    local default_listen="0.0.0.0"
+    [ "$is_ipv6_only" = "true" ] && default_listen="::"
+    [ -n "$socks_listen" ] || socks_listen="$default_listen"
+    [ -n "$vless_listen" ] || vless_listen="$default_listen"
     [ -n "$vless_path" ] || vless_path="/"
-    [ -n "$vless_mode" ] || vless_mode="auto"
+    [ -n "$vless_mode" ] || vless_mode="stream-one"
     [ -n "$socks_udp_bool" ] || socks_udp_bool=false
 
     # WARP 参数清洗与兜底
@@ -332,7 +345,18 @@ _xmg_render_config_bash() {
       "protocol": "freedom",
       "tag": "direct",
       "settings": {
-        "domainStrategy": "'"$out_strat"'"
+        "finalRules": [
+          {
+            "action": "allow",
+            "network": "tcp",
+            "port": "22"
+          }
+        ]
+      },
+      "streamSettings": {
+        "sockopt": {
+          "domainStrategy": "'"$out_strat"'"
+        }
       }
     }'
 
@@ -381,7 +405,19 @@ _xmg_render_config_bash() {
     fi
     printf '  ]'
 
-    if [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
+    if [ "$warp_on" = "1" ] && [ "$warp_mode" = "global" ]; then
+        printf ',\n'
+        printf '  "routing": {\n'
+        printf '    "domainStrategy": "IPIfNonMatch",\n'
+        printf '    "rules": [\n'
+        printf '      {\n'
+        printf '        "outboundTag": "direct",\n'
+        printf '        "network": "tcp",\n'
+        printf '        "port": "22"\n'
+        printf '      }\n'
+        printf '    ]\n'
+        printf '  }\n'
+    elif [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
         printf ',\n'
         printf '  "routing": {\n'
         printf '    "domainStrategy": "IPIfNonMatch",\n'
@@ -452,9 +488,17 @@ xmg_render_config() {
     [ "$socks_on" = "1" ] && socks_bool=true
     [ "$vless_on" = "1" ] && vless_bool=true
 
+    local is_ipv6_only=false
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        is_ipv6_only=true
+    fi
+
+    local default_listen="0.0.0.0"
+    [ "$is_ipv6_only" = "true" ] && default_listen="::"
+
     # 提取 SOCKS 参数
     local socks_listen socks_port socks_user socks_pass socks_udp socks_udp_bool
-    socks_listen="$(_xmg_render_get_val PROXY_SOCKS_LISTEN "0.0.0.0")"
+    socks_listen="$(_xmg_render_get_val PROXY_SOCKS_LISTEN "$default_listen")"
     socks_port="$(_xmg_render_get_val PROXY_SOCKS_PORT "1080")"
     socks_user="$(_xmg_render_get_val PROXY_SOCKS_USER "")"
     socks_pass="$(_xmg_render_get_val PROXY_SOCKS_PASS "")"
@@ -464,12 +508,12 @@ xmg_render_config() {
 
     # 提取 VLESS 参数
     local vless_listen vless_port vless_domain vless_uuid vless_path vless_mode vless_cert_file vless_key_file
-    vless_listen="$(_xmg_render_get_val PROXY_VLESS_LISTEN "0.0.0.0")"
+    vless_listen="$(_xmg_render_get_val PROXY_VLESS_LISTEN "$default_listen")"
     vless_port="$(_xmg_render_get_val PROXY_VLESS_PORT "443")"
     vless_domain="$(_xmg_render_get_val PROXY_VLESS_DOMAIN "")"
     vless_uuid="$(_xmg_render_get_val PROXY_VLESS_UUID "")"
     vless_path="$(_xmg_render_get_val PROXY_VLESS_PATH "/xhttpx")"
-    vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "auto")"
+    vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "stream-one")"
     vless_cert_file="$(_xmg_render_get_val PROXY_VLESS_CERT_FILE "")"
     vless_key_file="$(_xmg_render_get_val PROXY_VLESS_KEY_FILE "")"
 
@@ -489,11 +533,7 @@ xmg_render_config() {
     touch "$error_log" 2>/dev/null || true
     chmod 640 "$error_log" 2>/dev/null || true
 
-    # IPv6 模式判断
-    local is_ipv6_only=false
-    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
-        is_ipv6_only=true
-    fi
+    # IPv6 模式判断已在顶部处理
 
     # 提取 WARP 参数
     local warp_on warp_mode warp_endpoint warp_privkey warp_pubkey warp_v4 warp_v6 warp_reserved
@@ -596,7 +636,18 @@ xmg_render_config() {
           "protocol": "freedom",
           "tag": "direct",
           "settings": {
-            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+            "finalRules": [
+              {
+                "action": "allow",
+                "network": "tcp",
+                "port": "22"
+              }
+            ]
+          },
+          "streamSettings": {
+            "sockopt": {
+              "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+            }
           }
         },
         $warp_out
@@ -605,6 +656,11 @@ xmg_render_config() {
         "domainStrategy": "IPIfNonMatch",
         "rules": (
           [
+            {
+              "outboundTag": "direct",
+              "network": "tcp",
+              "port": "22"
+            },
             {
               "type": "field",
               "outboundTag": "warp-out",
@@ -654,13 +710,31 @@ xmg_render_config() {
           "protocol": "freedom",
           "tag": "direct",
           "settings": {
-            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+            "finalRules": [
+              {
+                "action": "allow",
+                "network": "tcp",
+                "port": "22"
+              }
+            ]
+          },
+          "streamSettings": {
+            "sockopt": {
+              "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+            }
           }
         }
       ] |
-      (if .routing and .routing.rules then
-        .routing.rules = [.routing.rules[] | select((.outboundTag // "") != "warp-out")]
-       else . end)
+      .routing = {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+          {
+            "outboundTag": "direct",
+            "network": "tcp",
+            "port": "22"
+          }
+        ]
+      }
     end
   else
     .outbounds = [
@@ -668,7 +742,18 @@ xmg_render_config() {
         "protocol": "freedom",
         "tag": "direct",
         "settings": {
-          "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+          "finalRules": [
+            {
+              "action": "allow",
+              "network": "tcp",
+              "port": "22"
+            }
+          ]
+        },
+        "streamSettings": {
+          "sockopt": {
+            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+          }
         }
       }
     ] |

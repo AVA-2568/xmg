@@ -243,9 +243,10 @@ t_assert "共存产物含必备字段 network/users/decryption/auth" \
 # ============================================================================
 # 5. SOCKS 入站不得带 streamSettings：全产物中 streamSettings 只应出现 1 次（VLESS）
 # ============================================================================
-_t_c3_ss="$(printf '%s' "$C3" | grep -c 'streamSettings')"
-t_equals "共存产物 streamSettings 恰出现在 VLESS 一处" "$_t_c3_ss" "1"
-t_not_contains "仅 SOCKS 产物无 streamSettings" "$C1" 'streamSettings'
+_t_c3_ss="$(printf '%s' "$C3" | jq '[.inbounds[] | select(.streamSettings != null)] | length')"
+t_equals "共存产物入站中 streamSettings 恰出现在 VLESS 一处" "$_t_c3_ss" "1"
+_t_c1_in_ss="$(printf '%s' "$C1" | jq '[.inbounds[] | select(.streamSettings != null)] | length')"
+t_equals "仅 SOCKS 产物入站无 streamSettings" "$_t_c1_in_ss" "0"
 
 # ============================================================================
 # 6. Task 4 加固字段断言 (rejectUnknownSni, domainStrategy, connIdle, IPv6 DoH)

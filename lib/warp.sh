@@ -1193,6 +1193,12 @@ xmg_warp_enable() {
         local tmp_cfg="${xray_cfg}.tmp.$.json"
         local merged_ok=0
 
+        local ssh_p=22
+        if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
+            ssh_p="$(xmg_ssh_get_port 2>/dev/null || echo 22)"
+        fi
+        [[ "$ssh_p" =~ ^[0-9]+$ ]] && [ "$ssh_p" -gt 0 ] && [ "$ssh_p" -le 65535 ] || ssh_p=22
+
         if command -v jq >/dev/null 2>&1; then
             local jq_file="${xray_cfg}.tmp.$.jq"
             if [ "$mode" = "routing" ]; then
@@ -1202,12 +1208,36 @@ xmg_warp_enable() {
                 fi
                 cat > "$jq_file" << EOF_ROUTING_JQ
 (.outbounds = (
-  [ (.outbounds // [])[] | select(.tag != "warp-out") ] + [ $warp_json ]
+  [ (.outbounds // [])[] | select(.tag != "warp-out") |
+    if .protocol == "freedom" then
+      (if .settings and .settings.domainStrategy then
+         .streamSettings = (.streamSettings // {}) |
+         .streamSettings.sockopt = (.streamSettings.sockopt // {}) |
+         .streamSettings.sockopt.domainStrategy = (.streamSettings.sockopt.domainStrategy // .settings.domainStrategy) |
+         del(.settings.domainStrategy)
+       else . end) |
+      .settings = (.settings // {}) |
+      .settings.finalRules = [
+        {
+          "action": "allow",
+          "network": "tcp",
+          "port": "$ssh_p"
+        }
+      ]
+    else . end
+  ] + [ $warp_json ]
 )) |
 (.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
 (.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
 (.routing.rules = (
-  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out") ] + [
+  [
+    {
+      "outboundTag": "direct",
+      "network": "tcp",
+      "port": "$ssh_p"
+    }
+  ] +
+  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.port // "") != "$ssh_p") ] + [
     {
       "type": "field",
       "outboundTag": "warp-out",
@@ -1277,11 +1307,37 @@ EOF_ROUTING_JQ
             else
                 cat > "$jq_file" << EOF_GLOBAL_JQ
 (.outbounds = (
-  [ $warp_json ] + [ (.outbounds // [])[] | select(.tag != "warp-out") ]
+  [ $warp_json ] + [ (.outbounds // [])[] | select(.tag != "warp-out") |
+    if .protocol == "freedom" then
+      (if .settings and .settings.domainStrategy then
+         .streamSettings = (.streamSettings // {}) |
+         .streamSettings.sockopt = (.streamSettings.sockopt // {}) |
+         .streamSettings.sockopt.domainStrategy = (.streamSettings.sockopt.domainStrategy // .settings.domainStrategy) |
+         del(.settings.domainStrategy)
+       else . end) |
+      .settings = (.settings // {}) |
+      .settings.finalRules = [
+        {
+          "action": "allow",
+          "network": "tcp",
+          "port": "$ssh_p"
+        }
+      ]
+    else . end
+  ]
 )) |
-(if (.routing and .routing.rules) then
-   .routing.rules = [ .routing.rules[] | select((.outboundTag // "") != "warp-out") ]
- else . end)
+(.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
+(.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
+(.routing.rules = (
+  [
+    {
+      "outboundTag": "direct",
+      "network": "tcp",
+      "port": "$ssh_p"
+    }
+  ] +
+  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.port // "") != "$ssh_p") ]
+))
 EOF_GLOBAL_JQ
             fi
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
