@@ -488,6 +488,12 @@ xmg_render_config() {
     [ "$socks_on" = "1" ] && socks_bool=true
     [ "$vless_on" = "1" ] && vless_bool=true
 
+    if [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; then
+        if declare -F xmg_detect_network >/dev/null 2>&1; then
+            xmg_detect_network >/dev/null 2>&1 || true
+        fi
+    fi
+
     local is_ipv6_only=false
     if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
         is_ipv6_only=true
@@ -509,6 +515,10 @@ xmg_render_config() {
     # 提取 VLESS 参数
     local vless_listen vless_port vless_domain vless_uuid vless_path vless_mode vless_cert_file vless_key_file
     vless_listen="$(_xmg_render_get_val PROXY_VLESS_LISTEN "$default_listen")"
+    if [ "$is_ipv6_only" = "true" ]; then
+        [ "$socks_listen" = "0.0.0.0" ] && socks_listen="::"
+        [ "$vless_listen" = "0.0.0.0" ] && vless_listen="::"
+    fi
     vless_port="$(_xmg_render_get_val PROXY_VLESS_PORT "443")"
     vless_domain="$(_xmg_render_get_val PROXY_VLESS_DOMAIN "")"
     vless_uuid="$(_xmg_render_get_val PROXY_VLESS_UUID "")"
