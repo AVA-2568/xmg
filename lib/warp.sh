@@ -1031,21 +1031,11 @@ _xmg_warp_backup_config() {
 }
 
 # ===== 辅助: 判断是否为外部已有非标准配置 =====
+# ===== 辅助: 判断是否需要无损增量保护 (只要文件存在，永远无损增量，绝不覆盖用户现有节点) =====
 _xmg_warp_is_external_config() {
     local cfg="$1"
     [ -f "$cfg" ] || return 1
-    [ -f "${XMG_STATE_FILE:-}" ] || return 0
-    if grep -q 'geosite:' "$cfg" 2>/dev/null; then
-        return 0
-    fi
-    if grep -q '"tag"' "$cfg" 2>/dev/null; then
-        local non_standard_tags
-        non_standard_tags="$(grep -oE '"tag"[[:space:]]*:[[:space:]]*"[^"]+"' "$cfg" 2>/dev/null | grep -v -E 'inbound-socks|inbound-vless|direct|blocked|warp-out' || true)"
-        if [ -n "$non_standard_tags" ]; then
-            return 0
-        fi
-    fi
-    return 1
+    return 0
 }
 
 # ===== 辅助: 从 account.json 提取账号变量 =====
@@ -1187,27 +1177,30 @@ xmg_warp_enable() {
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
 
-    if [ -f "$xray_cfg" ] || [ -f "${XMG_STATE_FILE:-}" ]; then
-        if _xmg_warp_is_external_config "$xray_cfg"; then
-        # ===== 外部已有非标准配置增量合成分支 =====
+    if [ -f "$xray_cfg" ]; then
+        # ===== 增量无损合成: 100% 保留现有所有 inbounds/节点/证书/路由，仅注入/置顶 warp-out =====
         local warp_json=""
         warp_json="$(cat "$XMG_WARP_XRAY_OUTBOUND" 2>/dev/null || true)"
-        if [ -n "$warp_json" ]; then
-            local bak=""
-            bak="$(_xmg_warp_backup_config "$xray_cfg")"
-            [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
+        if [ -z "$warp_json" ]; then
+            xmg_error "未找到 WARP 出站配置片段: $XMG_WARP_XRAY_OUTBOUND"
+            return 1
+        fi
 
-            local tmp_cfg="${xray_cfg}.tmp.$$.json"
-            local merged_ok=0
+        local bak=""
+        bak="$(_xmg_warp_backup_config "$xray_cfg")"
+        [ -n "$bak" ] && xmg_info "已安全备份当前原始 Xray 配置至: $bak"
 
-            if command -v jq >/dev/null 2>&1; then
-                local jq_file="${xray_cfg}.tmp.$$.jq"
-                if [ "$mode" = "routing" ]; then
-                    local v6_fallback_rule=""
-                    if xmg_warp_is_ipv6_only; then
-                        v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
-                    fi
-                    cat > "$jq_file" << EOF_ROUTING_JQ
+        local tmp_cfg="${xray_cfg}.tmp.$.json"
+        local merged_ok=0
+
+        if command -v jq >/dev/null 2>&1; then
+            local jq_file="${xray_cfg}.tmp.$.jq"
+            if [ "$mode" = "routing" ]; then
+                local v6_fallback_rule=""
+                if xmg_warp_is_ipv6_only; then
+                    v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
+                fi
+                cat > "$jq_file" << EOF_ROUTING_JQ
 (.outbounds = (
   [ (.outbounds // [])[] | select(.tag != "warp-out") ] + [ $warp_json ]
 )) |
@@ -1281,8 +1274,8 @@ xmg_warp_enable() {
   ]
 ))
 EOF_ROUTING_JQ
-                else
-                    cat > "$jq_file" << EOF_GLOBAL_JQ
+            else
+                cat > "$jq_file" << EOF_GLOBAL_JQ
 (.outbounds = (
   [ $warp_json ] + [ (.outbounds // [])[] | select(.tag != "warp-out") ]
 )) |
@@ -1290,59 +1283,60 @@ EOF_ROUTING_JQ
    .routing.rules = [ .routing.rules[] | select((.outboundTag // "") != "warp-out") ]
  else . end)
 EOF_GLOBAL_JQ
-                fi
-                if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
-                    rm -f "$jq_file" 2>/dev/null || true
-                    merged_ok=1
-                else
-                    rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
-                fi
-            else
-                _xmg_warp_patch_external_bash "enable" "$mode" "$xray_cfg" "$tmp_cfg" "$warp_json"
-                [ -s "$tmp_cfg" ] && merged_ok=1
             fi
-
-            if [ "$merged_ok" -eq 1 ]; then
-                local xray_bin=""
-                if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
-                    xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
-                elif command -v xray >/dev/null 2>&1; then
-                    xray_bin="$(command -v xray)"
-                elif [ -x /usr/local/bin/xray ]; then
-                    xray_bin="/usr/local/bin/xray"
-                fi
-
-                if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
-                    local test_out=""
-                    if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
-                        xmg_error "Xray 内核校验新配置失败，详细错误信息如下:"
-                        printf '%s\n' "$test_out" >&2
-                        rm -f "$tmp_cfg" 2>/dev/null || true
-                        return 1
-                    fi
-                fi
-
-                mv -f "$tmp_cfg" "$xray_cfg"
-                local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
-                if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
-                    cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
-                fi
-                if [ "$mode" = "routing" ]; then
-                    xmg_info "Xray 配置增量补强完成: 已在 outbounds 追加 warp-out 并添加流媒体/AI 智能分流规则"
-                else
-                    xmg_info "Xray 配置增量补强完成: 已将 warp-out 设为首选默认出口 (全局公网出站已由 WARP 接管，隐藏本机 IP)"
-                fi
+            if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
+                rm -f "$jq_file" 2>/dev/null || true
+                merged_ok=1
             else
-                rm -f "$tmp_cfg" 2>/dev/null || true
-                xmg_error "处理外部配置失败，取消应用"
-                return 1
+                rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
             fi
+        else
+            _xmg_warp_patch_external_bash "enable" "$mode" "$xray_cfg" "$tmp_cfg" "$warp_json"
+            [ -s "$tmp_cfg" ] && merged_ok=1
         fi
+
+        if [ "$merged_ok" -eq 1 ]; then
+            local xray_bin=""
+            if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+                xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+            elif command -v xray >/dev/null 2>&1; then
+                xray_bin="$(command -v xray)"
+            elif [ -x /usr/local/bin/xray ]; then
+                xray_bin="/usr/local/bin/xray"
+            fi
+
+            if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+                local test_out=""
+                if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
+                    xmg_error "Xray 内核校验新配置失败，取消应用，详细错误信息如下:"
+                    printf '%s\n' "$test_out" >&2
+                    rm -f "$tmp_cfg" 2>/dev/null || true
+                    return 1
+                fi
+            fi
+
+            mv -f "$tmp_cfg" "$xray_cfg"
+            local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
+            if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
+                cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
+            fi
+            if [ "$mode" = "routing" ]; then
+                xmg_info "Xray 配置增量注入完成: 原有所有入站节点/证书/端口 100% 毫发无损，已追加 warp-out 流媒体/AI 智能分流"
+            else
+                xmg_info "Xray 配置增量注入完成: 原有所有入站节点/证书/端口 100% 毫发无损，warp-out 已设为默认清洁出站接管"
+            fi
+        else
+            rm -f "$tmp_cfg" 2>/dev/null || true
+            xmg_error "增量注入 WARP 出站失败，取消应用"
+            return 1
+        fi
+
+        # 仅同步状态草稿记录，绝对不调用全量重新渲染覆写的 xmg_state_commit
         if [ -f "${XMG_STATE_FILE:-}" ] && declare -F xmg_state_commit_draft >/dev/null 2>&1; then
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
     else
-        # ===== 标准 state 管辖模式分支 =====
+        # 仅当宿主机完全不存在任何 Xray 配置文件时，才通过模板生成初始骨架配置
         if declare -F xmg_state_commit >/dev/null 2>&1; then
             local _tc_set=0
             if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -z "${XMG_XRAY_CONFIG_TESTCMD:-}" ]; then
@@ -1352,13 +1346,13 @@ EOF_GLOBAL_JQ
             fi
             if ! xmg_state_commit; then
                 [ "$_tc_set" -eq 1 ] && unset XMG_XRAY_CONFIG_TESTCMD XMG_XRAY_RELOAD_TESTCMD
-                xmg_error "WARP 出站配置渲染与两阶段提交失败"
+                xmg_error "WARP 出站初始配置渲染失败"
                 return 1
             fi
             [ "$_tc_set" -eq 1 ] && unset XMG_XRAY_CONFIG_TESTCMD XMG_XRAY_RELOAD_TESTCMD
         fi
     fi
-    fi
+
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
         systemctl stop xmg-warp >/dev/null 2>&1 || true
@@ -1368,21 +1362,19 @@ EOF_GLOBAL_JQ
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
-    # 7. 若 Xray 运行中，重载/重启服务（外部配置分支需要显式重启，state 模式已在 xmg_state_commit 内重启）
-    if _xmg_warp_is_external_config "$xray_cfg"; then
-        if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
-            local s_name="${XMG_XRAY_SERVICE:-xray}"
-            if systemctl is-active --quiet "$s_name" 2>/dev/null; then
-                if ! systemctl restart "$s_name" >/dev/null 2>&1; then
-                    xmg_error "重启 $s_name 服务失败，正在自动回滚..."
-                    if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
-                        cp -f "$bak" "$xray_cfg" 2>/dev/null || true
-                        systemctl restart "$s_name" >/dev/null 2>&1 || true
-                    fi
-                    return 1
+    # 7. 若 Xray 运行中，重载/重启服务
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+        local s_name="${XMG_XRAY_SERVICE:-xray}"
+        if systemctl is-active --quiet "$s_name" 2>/dev/null; then
+            if ! systemctl restart "$s_name" >/dev/null 2>&1; then
+                xmg_error "重启 $s_name 服务失败，正在自动回滚..."
+                if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
+                    cp -f "$bak" "$xray_cfg" 2>/dev/null || true
+                    systemctl restart "$s_name" >/dev/null 2>&1 || true
                 fi
-                xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
+                return 1
             fi
+            xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
         fi
     fi
 
@@ -1412,86 +1404,71 @@ xmg_warp_disable() {
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
 
-    if [ -f "$xray_cfg" ] || [ -f "${XMG_STATE_FILE:-}" ]; then
-        if _xmg_warp_is_external_config "$xray_cfg"; then
-            # 外部已有配置增量剔除分支
-            local bak=""
-            bak="$(_xmg_warp_backup_config "$xray_cfg")"
-            [ -n "$bak" ] && xmg_info "已备份原始 Xray 配置至: $bak"
+    if [ -f "$xray_cfg" ]; then
+        local bak=""
+        bak="$(_xmg_warp_backup_config "$xray_cfg")"
+        [ -n "$bak" ] && xmg_info "已安全备份当前原始 Xray 配置至: $bak"
 
-            local tmp_cfg="${xray_cfg}.tmp.$$.json"
-            local removed_ok=0
+        local tmp_cfg="${xray_cfg}.tmp.$.json"
+        local removed_ok=0
 
-            if command -v jq >/dev/null 2>&1; then
-                local jq_file="${xray_cfg}.tmp.$$.jq"
-                cat > "$jq_file" << 'EOF_DISABLE_JQ'
+        if command -v jq >/dev/null 2>&1; then
+            local jq_file="${xray_cfg}.tmp.$.jq"
+            cat > "$jq_file" << 'EOF_DISABLE_JQ'
 (.outbounds = [ (.outbounds // [])[] | select(.tag != "warp-out") ]) |
 (if (.routing and .routing.rules) then
    .routing.rules = [ .routing.rules[] | select((.outboundTag // "") != "warp-out") ]
  else . end)
 EOF_DISABLE_JQ
-                if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
-                    rm -f "$jq_file" 2>/dev/null || true
-                    removed_ok=1
-                else
-                    rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
-                fi
+            if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
+                rm -f "$jq_file" 2>/dev/null || true
+                removed_ok=1
             else
-                _xmg_warp_patch_external_bash "disable" "" "$xray_cfg" "$tmp_cfg" ""
-                [ -s "$tmp_cfg" ] && removed_ok=1
-            fi
-
-            if [ "$removed_ok" -eq 1 ]; then
-                local xray_bin=""
-                if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
-                    xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
-                elif command -v xray >/dev/null 2>&1; then
-                    xray_bin="$(command -v xray)"
-                elif [ -x /usr/local/bin/xray ]; then
-                    xray_bin="/usr/local/bin/xray"
-                fi
-
-                if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
-                    local test_out=""
-                    if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
-                        xmg_error "Xray 内核校验新配置失败，取消停用 WARP:"
-                        printf '%s\n' "$test_out" >&2
-                        rm -f "$tmp_cfg" 2>/dev/null || true
-                        return 1
-                    fi
-                fi
-
-                mv -f "$tmp_cfg" "$xray_cfg"
-                xmg_info "已从 Xray 配置中无损移除 warp-out 出站与相关分流规则 (原有其余配置毫发无损)"
-            else
-                rm -f "$tmp_cfg" 2>/dev/null || true
-            fi
-
-            if [ -f "${XMG_STATE_FILE:-}" ] && declare -F xmg_state_commit_draft >/dev/null 2>&1; then
-                xmg_state_commit_draft >/dev/null 2>&1 || true
-            fi
-
-            if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
-                local s_name="${XMG_XRAY_SERVICE:-xray}"
-                if systemctl is-active --quiet "$s_name" 2>/dev/null; then
-                    systemctl restart "$s_name" >/dev/null 2>&1 && xmg_info "已重启 $s_name 服务应用变更"
-                fi
+                rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
             fi
         else
-            # 标准 state 管辖模式分支
-            if declare -F xmg_state_commit >/dev/null 2>&1; then
-                local _tc_set=0
-                if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -z "${XMG_XRAY_CONFIG_TESTCMD:-}" ]; then
-                    export XMG_XRAY_CONFIG_TESTCMD="true"
-                    export XMG_XRAY_RELOAD_TESTCMD="true"
-                    _tc_set=1
-                fi
-                if ! xmg_state_commit; then
-                    [ "$_tc_set" -eq 1 ] && unset XMG_XRAY_CONFIG_TESTCMD XMG_XRAY_RELOAD_TESTCMD
-                    xmg_error "停用 WARP 重新生成配置失败"
+            _xmg_warp_patch_external_bash "disable" "" "$xray_cfg" "$tmp_cfg" ""
+            [ -s "$tmp_cfg" ] && removed_ok=1
+        fi
+
+        if [ "$removed_ok" -eq 1 ]; then
+            local xray_bin=""
+            if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+                xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+            elif command -v xray >/dev/null 2>&1; then
+                xray_bin="$(command -v xray)"
+            elif [ -x /usr/local/bin/xray ]; then
+                xray_bin="/usr/local/bin/xray"
+            fi
+
+            if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+                local test_out=""
+                if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
+                    xmg_error "Xray 内核校验新配置失败，取消停用 WARP:"
+                    printf '%s\n' "$test_out" >&2
+                    rm -f "$tmp_cfg" 2>/dev/null || true
                     return 1
                 fi
-                [ "$_tc_set" -eq 1 ] && unset XMG_XRAY_CONFIG_TESTCMD XMG_XRAY_RELOAD_TESTCMD
+            fi
+
+            mv -f "$tmp_cfg" "$xray_cfg"
+            local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
+            if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
+                cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
+            fi
+            xmg_info "已从 Xray 配置中无损移除 warp-out 出站与相关分流规则 (原有所有节点与配置毫发无损)"
+        else
+            rm -f "$tmp_cfg" 2>/dev/null || true
+        fi
+
+        if [ -f "${XMG_STATE_FILE:-}" ] && declare -F xmg_state_commit_draft >/dev/null 2>&1; then
+            xmg_state_commit_draft >/dev/null 2>&1 || true
+        fi
+
+        if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+            local s_name="${XMG_XRAY_SERVICE:-xray}"
+            if systemctl is-active --quiet "$s_name" 2>/dev/null; then
+                systemctl restart "$s_name" >/dev/null 2>&1 && xmg_info "已成功重启 $s_name 服务应用变更"
             fi
         fi
     fi

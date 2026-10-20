@@ -417,3 +417,50 @@ t_equals "标准化 Base64 长度严格为 44" "${#B64_RES}" "44"
 B64_TEST_US="OJHH0HN5r2dpqDx7dSimK2_iNQVGVlfCyyO1NeY68mQ"
 B64_RES2="$(_xmg_warp_std_b64 "$B64_TEST_US")"
 t_equals "带下划线 URL Base64 转换为标准斜杠" "$B64_RES2" "OJHH0HN5r2dpqDx7dSimK2/iNQVGVlfCyyO1NeY68mQ="
+
+# 25. 关键回归测试: 存在 state.env 且为标准 inbound-vless 节点时，WARP 绝不覆盖原节点配置
+STAGED_CFG="$XMG_TMP/staged_vless_node.json"
+cat > "$STAGED_CFG" << 'EOF_VLESS_CUSTOM'
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "inbound-vless",
+      "port": 54321,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "user-custom-uuid-1111-2222-333344445555",
+            "flow": "xtls-rprx-vision"
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ]
+}
+EOF_VLESS_CUSTOM
+
+# 模拟存在 state.env
+touch "$XMG_STATE_FILE"
+export XMG_XRAY_CONFIG="$STAGED_CFG"
+
+xmg_warp_enable "global"
+PRESERVED_CONTENT="$(cat "$STAGED_CFG")"
+t_contains "增量注入后用户自定义端口 54321 毫发无损" "$PRESERVED_CONTENT" "54321"
+t_contains "增量注入后用户自定义 UUID 毫发无损" "$PRESERVED_CONTENT" "user-custom-uuid-1111-2222-333344445555"
+t_contains "增量注入后用户 Reality 流控设置毫发无损" "$PRESERVED_CONTENT" "xtls-rprx-vision"
+t_contains "增量注入后包含首选 warp-out 出站" "$PRESERVED_CONTENT" '"tag": "warp-out"'
