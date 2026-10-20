@@ -113,6 +113,11 @@ _XMG_DEFAULT_CONFIG_TEMPLATE='{
           "domainStrategy": "UseIP"
         }
       }
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked",
+      "settings": {}
     }
   ]
 }'
@@ -397,15 +402,21 @@ _xmg_render_config_bash() {
     }'
     fi
 
+    local blocked_outbound='    {
+      "protocol": "blackhole",
+      "tag": "blocked",
+      "settings": {}
+    }'
+
     printf '  "outbounds": [\n'
     if [ "$warp_on" = "1" ]; then
         if [ "$warp_mode" = "routing" ]; then
-            printf '%s,\n%s\n' "$direct_outbound" "$warp_outbound"
+            printf '%s,\n%s,\n%s\n' "$direct_outbound" "$warp_outbound" "$blocked_outbound"
         else
-            printf '%s,\n%s\n' "$warp_outbound" "$direct_outbound"
+            printf '%s,\n%s,\n%s\n' "$warp_outbound" "$direct_outbound" "$blocked_outbound"
         fi
     else
-        printf '%s\n' "$direct_outbound"
+        printf '%s,\n%s\n' "$direct_outbound" "$blocked_outbound"
     fi
     printf '  ]'
 
@@ -668,7 +679,12 @@ xmg_render_config() {
             }
           }
         },
-        $warp_out
+        $warp_out,
+        {
+          "protocol": "blackhole",
+          "tag": "blocked",
+          "settings": {}
+        }
       ] |
       .routing = {
         "domainStrategy": "IPIfNonMatch",
@@ -741,6 +757,11 @@ xmg_render_config() {
               "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
             }
           }
+        },
+        {
+          "protocol": "blackhole",
+          "tag": "blocked",
+          "settings": {}
         }
       ] |
       .routing = {
@@ -773,6 +794,11 @@ xmg_render_config() {
             "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
           }
         }
+      },
+      {
+        "protocol": "blackhole",
+        "tag": "blocked",
+        "settings": {}
       }
     ] |
     (if .routing and .routing.rules then
@@ -876,7 +902,7 @@ xmg_render_config() {
             if MSYS_NO_PATHCONV=1 jq "${jq_args[@]}" "$jq_filter" < "$tpl_file"; then
                 rendered=1
             fi
-        elif [ -n "${XMG_CONFIG_TEMPLATE:-}" ]; then
+        else
             if printf '%s\n' "$_XMG_DEFAULT_CONFIG_TEMPLATE" | MSYS_NO_PATHCONV=1 jq "${jq_args[@]}" "$jq_filter"; then
                 rendered=1
             fi

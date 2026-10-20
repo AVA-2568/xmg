@@ -347,6 +347,16 @@ t_equals "负例：尾逗号应被判非法" "$_json_rc" "1"
 # ============================================================================
 # 恢复环境 + 清理
 # ============================================================================
+
+# 6.8 Task 2 回归：黑洞出站一致性与模板缺失回退
+t_contains "默认渲染结果包含 blocked 黑洞出站" "$C1" '"tag": "blocked"'
+t_contains "默认渲染结果 blocked 协议为 blackhole" "$C1" '"protocol": "blackhole"'
+
+C_FALLBACK_TEST="$(XMG_CONFIG_TEMPLATE="/nonexistent/missing_template.json" xmg_render_config 0 0)"
+t_json_valid "模板文件缺失时回退默认骨架生成合法 JSON" "$C_FALLBACK_TEST"
+t_contains "回退骨架生成的配置包含 direct 出站" "$C_FALLBACK_TEST" '"tag": "direct"'
+t_contains "回退骨架生成的配置包含 blocked 出站" "$C_FALLBACK_TEST" '"tag": "blocked"'
+
 eval "XMG_ETC_DIR=\"\$_TC_SAVED_ETC\""
 eval "XMG_XRAY_STATE_DIR=\"\$_TC_SAVED_STATE_DIR\""
 eval "XMG_STATE_FILE=\"\$_TC_SAVED_STATE_FILE\""
