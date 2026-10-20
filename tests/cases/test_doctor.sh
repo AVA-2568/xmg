@@ -99,11 +99,13 @@ t_contains "诊断输出包含运行状态" "$_OUT" "running"
 t_contains "诊断输出包含配置校验 OK" "$_OUT" "配置校验: OK"
 t_contains "诊断输出包含 GOMEMLIMIT 内存抑制" "$_OUT" "100MiB"
 t_contains "诊断输出包含监听端口" "$_OUT" "监听端口"
+t_contains "诊断输出包含证书状态" "$_OUT" "证书:"
 
 # 3.6 [DNS]
 t_contains "诊断输出包含 [DNS] 标识" "$_OUT" "[DNS]"
 t_contains "诊断输出包含内置 DoH" "$_OUT" "DoH"
 t_contains "诊断输出包含出站解析模式" "$_OUT" "UseIP"
+t_contains "诊断输出包含 DoH 延迟评级" "$_OUT" "延迟:"
 
 # --- 4. 纯 IPv6 环境自适应测试 ---
 _OUT_V6="$(MOCK_VIRT="lxc" \
@@ -149,3 +151,11 @@ t_assert "严重故障显式模拟时返回码为 1" bash -c '
 
 # --- 6. CLI 端到端调用验证 ---
 t_assert "xmg doctor --dry-run CLI 返回 0" env XMG_HOME="$SRC" XMG_LIB_DIR="$SRC/lib" MOCK_XRAY_CONFIG_VALID=1 bash "$MAIN" doctor --dry-run
+
+# --- 7. Task 4 回归：证书检测与 DoH 延迟接口单元测试 ---
+t_assert "定义 _xmg_doctor_get_cert_status 函数" declare -F _xmg_doctor_get_cert_status
+t_assert "定义 _xmg_doctor_get_doh_latency 函数" declare -F _xmg_doctor_get_doh_latency
+
+t_equals "MOCK_CERT_STATUS 正常生效" "$(MOCK_CERT_STATUS="有效 (剩余 85 天)" _xmg_doctor_get_cert_status)" "有效 (剩余 85 天)"
+t_equals "MOCK_DOH_LATENCY 正常生效" "$(MOCK_DOH_LATENCY="42ms (优秀)" _xmg_doctor_get_doh_latency)" "42ms (优秀)"
+t_equals "测试模式下 DoH 延迟默认短路返回" "$(XMG_TEST_MODE=1 _xmg_doctor_get_doh_latency)" "35ms (优秀)"

@@ -404,6 +404,91 @@ _xmg_doctor_get_dns_info() {
     printf '%s|%s\n' "$doh" "$out_strat"
 }
 
+# 5.1 检查 TLS 证书剩余有效天数
+_xmg_doctor_get_cert_status() {
+    if [ -n "${MOCK_CERT_STATUS:-}" ]; then
+        printf '%s' "$MOCK_CERT_STATUS"
+        return 0
+    fi
+    local cert_file=""
+    if declare -F xmg_state_get >/dev/null 2>&1; then
+        cert_file="$(xmg_state_get PROXY_VLESS_CERT_FILE "" 2>/dev/null || true)"
+    fi
+    if [ -z "$cert_file" ] || [ ! -f "$cert_file" ]; then
+        local def_cert="${XMG_HOME:-/opt/xmg}/etc/xray/certs/fullchain.crt"
+        if [ -f "$def_cert" ]; then
+            cert_file="$def_cert"
+        fi
+    fi
+
+    if [ -z "$cert_file" ] || [ ! -f "$cert_file" ]; then
+        printf '未配置'
+        return 0
+    fi
+
+    if command -v openssl >/dev/null 2>&1; then
+        local end_date=""
+        end_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || true)"
+        if [ -n "$end_date" ]; then
+            local end_ts now_ts diff_s days
+            end_ts="$(date -d "$end_date" +%s 2>/dev/null || echo 0)"
+            now_ts="$(date +%s)"
+            diff_s=$((end_ts - now_ts))
+            days=$((diff_s / 86400))
+            if [ "$diff_s" -le 0 ]; then
+                printf '已过期'
+            elif [ "$days" -le 15 ]; then
+                printf '即将过期 (剩余 %d 天)' "$days"
+            else
+                printf '有效 (剩余 %d 天)' "$days"
+            fi
+            return 0
+        fi
+    fi
+    printf '已就绪'
+}
+
+# 5.2 探测当前 DoH 解析连通性与网络延迟
+_xmg_doctor_get_doh_latency() {
+    if [ -n "${MOCK_DOH_LATENCY:-}" ]; then
+        printf '%s' "$MOCK_DOH_LATENCY"
+        return 0
+    fi
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        printf '35ms (优秀)'
+        return 0
+    fi
+
+    local doh_addr="${1:-}"
+    if [ -z "$doh_addr" ]; then
+        doh_addr="$(_xmg_doctor_xray_dns)"
+    fi
+    local doh_url=""
+    case "$doh_addr" in
+        https+local://*) doh_url="https://${doh_addr#https+local://}" ;;
+        https://*)        doh_url="$doh_addr" ;;
+        *)               doh_url="https://1.1.1.1/dns-query" ;;
+    esac
+
+    if command -v curl >/dev/null 2>&1; then
+        local rtt=""
+        rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 2 "$doh_url" 2>/dev/null || true)"
+        if [ -n "$rtt" ] && [ "$rtt" != "0.000" ] && [ "$rtt" != "0.000000" ]; then
+            local ms
+            ms="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t * 1000 }' 2>/dev/null || echo 0)"
+            if [ "$ms" -lt 80 ]; then
+                printf '%dms (优秀)' "$ms"
+            elif [ "$ms" -lt 200 ]; then
+                printf '%dms (良好)' "$ms"
+            else
+                printf '%dms (较高)' "$ms"
+            fi
+            return 0
+        fi
+    fi
+    printf '超时/不可达'
+}
+
 # 6. 采集防火墙状态
 _xmg_doctor_get_firewall_status() {
     if [ -n "${MOCK_FIREWALL_STATUS:-}" ]; then
@@ -672,18 +757,24 @@ xmg_doctor_run() {
     # [Xray]
     local cfg_color="$c_green"
     [ "$cfg_valid_str" = "FAIL" ] && cfg_color="$c_red"
-    printf '%s[Xray]%s 版本: %s%s%s | 状态: %s%s%s | 配置校验: %s%s%s | 内存抑制: %s%s%s | 监听端口: %s%s%s\n' \
+    local cert_st=""
+    cert_st="$(_xmg_doctor_get_cert_status)"
+    printf '%s[Xray]%s 版本: %s%s%s | 状态: %s%s%s | 配置校验: %s%s%s | 证书: %s%s%s | 内存抑制: %s%s%s | 监听端口: %s%s%s\n' \
         "$c_bold" "$c_reset" \
         "$c_cyan" "$xray_ver" "$c_reset" \
         "$c_cyan" "$xray_st" "$c_reset" \
         "$cfg_color" "$cfg_valid_str" "$c_reset" \
+        "$c_cyan" "$cert_st" "$c_reset" \
         "$c_cyan" "$gomemlimit" "$c_reset" \
         "$c_cyan" "$listen_ports" "$c_reset"
 
     # [DNS]
-    printf '%s[DNS]%s  内置 DoH: %s%s%s | 出站解析模式: %s%s%s\n' \
+    local doh_lat=""
+    doh_lat="$(_xmg_doctor_get_doh_latency "$doh_addr")"
+    printf '%s[DNS]%s  内置 DoH: %s%s%s | 延迟: %s%s%s | 出站解析模式: %s%s%s\n' \
         "$c_bold" "$c_reset" \
         "$c_cyan" "$doh_addr" "$c_reset" \
+        "$c_cyan" "$doh_lat" "$c_reset" \
         "$c_cyan" "$out_resolve" "$c_reset"
 
     # [安全]
