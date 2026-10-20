@@ -407,3 +407,13 @@ t_equals "拒绝缺失 private_key 的非法文件" "$INV_RC" "1"
 NOT_FOUND_RC=0
 xmg_warp_import "$XMG_TMP/non_existent_file.json" >/dev/null 2>&1 || NOT_FOUND_RC=$?
 t_equals "拒绝不存在的文件" "$NOT_FOUND_RC" "1"
+
+# 24. Base64 规范化专项测试 (_xmg_warp_std_b64 防 400 错误)
+B64_TEST_URL="fuIwSl4SEgvtabGo4gNS-YGQ0zxZOgAGpPrpxtgvhC4"
+B64_RES="$(_xmg_warp_std_b64 "$B64_TEST_URL")"
+t_equals "43 字符 RawURL Base64 正确补齐为 44 字符标准 Base64" "$B64_RES" "fuIwSl4SEgvtabGo4gNS+YGQ0zxZOgAGpPrpxtgvhC4="
+t_equals "标准化 Base64 长度严格为 44" "${#B64_RES}" "44"
+
+B64_TEST_US="OJHH0HN5r2dpqDx7dSimK2_iNQVGVlfCyyO1NeY68mQ"
+B64_RES2="$(_xmg_warp_std_b64 "$B64_TEST_US")"
+t_equals "带下划线 URL Base64 转换为标准斜杠" "$B64_RES2" "OJHH0HN5r2dpqDx7dSimK2/iNQVGVlfCyyO1NeY68mQ="

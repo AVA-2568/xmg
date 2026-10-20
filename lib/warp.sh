@@ -481,6 +481,19 @@ except Exception:
     echo "0 0 0"
 }
 
+# ===== 标准化 Base64 编码 (解决 Xray RawURLEncoding 导致 CF 接口报 400 Invalid public key) =====
+
+_xmg_warp_std_b64() {
+    local val="$1"
+    [ -n "$val" ] || return 0
+    val="${val//-/+}"
+    val="${val//_//}"
+    while [ $(( ${#val} % 4 )) -ne 0 ]; do
+        val="${val}="
+    done
+    echo "$val"
+}
+
 # ===== 生成合法配对的 Curve25519 密钥对 =====
 
 _xmg_warp_gen_keys() {
@@ -491,7 +504,7 @@ _xmg_warp_gen_keys() {
 
     local priv="" pub=""
 
-    # 1. 优先通过 Xray 内核生成真实配对的 Curve25519 密钥对 (xray x25519 / xray wg)
+    # 1. 优先通过 Xray 内核生成真实配对的 Curve25519 密钥对 (xray x25519)
     local xray_bin=""
     if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
         xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
@@ -507,24 +520,48 @@ _xmg_warp_gen_keys() {
         priv="$(echo "$k_out" | grep -iE 'Private[[:space:]]*Key' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
         pub="$(echo "$k_out" | grep -iE '(Public[[:space:]]*Key|Password)' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
         if [ -n "$priv" ] && [ -n "$pub" ]; then
-            echo "$priv $pub"
-            return 0
-        fi
-    fi
-
-    # 2. 次选系统 wg 工具 (wireguard-tools)
-    if command -v wg >/dev/null 2>&1; then
-        priv="$(wg genkey 2>/dev/null || true)"
-        if [ -n "$priv" ]; then
-            pub="$(echo "$priv" | wg pubkey 2>/dev/null || true)"
-            if [ -n "$pub" ]; then
+            priv="$(_xmg_warp_std_b64 "$priv")"
+            pub="$(_xmg_warp_std_b64 "$pub")"
+            if [ "${#priv}" -eq 44 ] && [ "${#pub}" -eq 44 ]; then
                 echo "$priv $pub"
                 return 0
             fi
         fi
     fi
 
-    # 3. 次选 python3 cryptography 生成合法的 X25519 密钥对
+    # 2. 次选系统 openssl 原生命令生成 (所有主流 Linux 发行版均标配)
+    if command -v openssl >/dev/null 2>&1; then
+        local tmp_der=""
+        tmp_der="$(mktemp 2>/dev/null || echo "/tmp/xmg_ossl_$.der")"
+        if openssl genpkey -algorithm x25519 -outform DER -out "$tmp_der" 2>/dev/null; then
+            priv="$(tail -c 32 "$tmp_der" 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
+            pub="$(openssl pkey -inform DER -in "$tmp_der" -pubout -outform DER 2>/dev/null | tail -c 32 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
+            rm -f "$tmp_der" 2>/dev/null || true
+            priv="$(_xmg_warp_std_b64 "$priv")"
+            pub="$(_xmg_warp_std_b64 "$pub")"
+            if [ "${#priv}" -eq 44 ] && [ "${#pub}" -eq 44 ]; then
+                echo "$priv $pub"
+                return 0
+            fi
+        fi
+        rm -f "$tmp_der" 2>/dev/null || true
+    fi
+
+    # 3. 次选系统 wg 工具 (wireguard-tools)
+    if command -v wg >/dev/null 2>&1; then
+        priv="$(wg genkey 2>/dev/null || true)"
+        if [ -n "$priv" ]; then
+            pub="$(echo "$priv" | wg pubkey 2>/dev/null || true)"
+            priv="$(_xmg_warp_std_b64 "$priv")"
+            pub="$(_xmg_warp_std_b64 "$pub")"
+            if [ "${#priv}" -eq 44 ] && [ "${#pub}" -eq 44 ]; then
+                echo "$priv $pub"
+                return 0
+            fi
+        fi
+    fi
+
+    # 4. 次选 python3 cryptography 生成合法的 X25519 密钥对
     if command -v python3 >/dev/null 2>&1; then
         local py_keys=""
         py_keys="$(python3 -c '
@@ -537,12 +574,18 @@ except Exception:
     pass
 ' 2>/dev/null || true)"
         if [ -n "$py_keys" ]; then
-            echo "$py_keys"
-            return 0
+            priv="$(echo "$py_keys" | awk '{print $1}')"
+            pub="$(echo "$py_keys" | awk '{print $2}')"
+            priv="$(_xmg_warp_std_b64 "$priv")"
+            pub="$(_xmg_warp_std_b64 "$pub")"
+            if [ "${#priv}" -eq 44 ] && [ "${#pub}" -eq 44 ]; then
+                echo "$priv $pub"
+                return 0
+            fi
         fi
     fi
 
-    xmg_error "生成合法的 WireGuard Curve25519 密钥对失败 (请确保已安装 xray 或 wg)"
+    xmg_error "生成合法的 WireGuard Curve25519 密钥对失败 (请确保已安装 xray, openssl 或 wg)"
     return 1
 }
 
@@ -593,7 +636,8 @@ _xmg_warp_register() {
     else
         xmg_info "正在向 Cloudflare 官方 API 注册免费 WARP 设备..."
         local cur_time=""
-        cur_time="$(date -u +%Y-%m-%dT%H:%M:%S.000Z 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
+        cur_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+        [ -n "$cur_time" ] || cur_time="2026-01-01T00:00:00Z"
         local req_body="{\"key\":\"$pubkey\",\"install_id\":\"\",\"fcm_token\":\"\",\"tos\":\"$cur_time\",\"model\":\"Linux\",\"type\":\"Android\",\"locale\":\"zh_CN\"}"
 
         local endpoints=(
@@ -646,12 +690,23 @@ _xmg_warp_register() {
     fi
 
     if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
+        local cf_err_msg=""
+        if [ -s "$tmp_body" ]; then
+            cf_err_msg="$(grep -oE '"message"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_body" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
+            if [ -z "$cf_err_msg" ]; then
+                cf_err_msg="$(grep -oE '"errors"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$tmp_body" 2>/dev/null | head -1 || true)"
+            fi
+        fi
+
         if [ "$last_http" = "429" ]; then
             xmg_error "向 Cloudflare 注册账号失败: HTTP 429 请求频次超限 (Rate Limited)"
             xmg_warn "说明: 当前 IP 近期申请 Cloudflare WARP 设备数量已达官方上限"
         elif [ "$last_http" = "403" ]; then
             xmg_error "向 Cloudflare 注册账号失败: HTTP 403 访问被拦截 (Forbidden / Cloudflare 边缘安全防护)"
             xmg_warn "说明: 当前 VPS 机房 IP 被 Cloudflare 判定为数据中心风险流量"
+        elif [ "$last_http" = "400" ]; then
+            xmg_error "向 Cloudflare 注册账号失败: HTTP 400 请求被拒绝 (Bad Request)"
+            [ -n "$cf_err_msg" ] && xmg_warn "Cloudflare 错误提示: $cf_err_msg"
         elif [ "$last_http" = "000" ]; then
             xmg_error "向 Cloudflare 注册账号失败: 网络连接超时或不可达 (HTTP 000)"
             [ -n "$last_err" ] && xmg_warn "底层报错: $last_err"
@@ -660,6 +715,7 @@ _xmg_warp_register() {
             fi
         else
             xmg_error "向 Cloudflare 注册账号失败: 响应异常 (HTTP $last_http)"
+            [ -n "$cf_err_msg" ] && xmg_warn "提示: $cf_err_msg"
             [ -n "$last_err" ] && xmg_warn "详情: $last_err"
         fi
 
