@@ -188,7 +188,7 @@ _xmg_render_config_bash() {
     [ -n "$socks_listen" ] || socks_listen="$default_listen"
     [ -n "$vless_listen" ] || vless_listen="$default_listen"
     [ -n "$vless_path" ] || vless_path="/"
-    [ -n "$vless_mode" ] || vless_mode="stream-one"
+    [ -n "$vless_mode" ] || vless_mode="auto"
     [ -n "$socks_udp_bool" ] || socks_udp_bool=false
 
     # WARP 参数清洗与兜底
@@ -513,7 +513,7 @@ xmg_render_config() {
     vless_domain="$(_xmg_render_get_val PROXY_VLESS_DOMAIN "")"
     vless_uuid="$(_xmg_render_get_val PROXY_VLESS_UUID "")"
     vless_path="$(_xmg_render_get_val PROXY_VLESS_PATH "/xhttpx")"
-    vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "stream-one")"
+    vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "auto")"
     vless_cert_file="$(_xmg_render_get_val PROXY_VLESS_CERT_FILE "")"
     vless_key_file="$(_xmg_render_get_val PROXY_VLESS_KEY_FILE "")"
 
