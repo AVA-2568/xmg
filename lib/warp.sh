@@ -370,8 +370,8 @@ xmg_warp_optimize_endpoint() {
         local rtt=""
 
         if command -v ping >/dev/null 2>&1; then
-            local ping_cmd="ping -c 2 -W 1"
-            [ "$is_v6" -eq 1 ] && ping_cmd="ping -6 -c 2 -W 1"
+            local ping_cmd="ping -c 1 -W 1"
+            [ "$is_v6" -eq 1 ] && ping_cmd="ping -6 -c 1 -W 1"
             local ping_out=""
             ping_out="$($ping_cmd "$host" 2>/dev/null || true)"
             rtt="$(echo "$ping_out" | grep -o 'min/avg/max[^=]*=[^/]*' | cut -d= -f2 | tr -d ' ' || true)"
@@ -385,7 +385,7 @@ xmg_warp_optimize_endpoint() {
             if [ "$is_v6" -eq 1 ]; then
                 test_url="http://[$host]:80"
             fi
-            rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 2 "$test_url" 2>/dev/null || true)"
+            rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 1 "$test_url" 2>/dev/null || true)"
             if [ -n "$rtt" ] && [ "$rtt" != "0.000" ] && [ "$rtt" != "0.000000" ]; then
                 rtt="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t * 1000 }' 2>/dev/null || echo "999")"
             else

@@ -298,7 +298,11 @@ xmg_proxy_vless_link() {
     local cdn_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h3%2Ch2&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}#XMG-VLESS-CDN"
 
     # 2. 直连模式（直连当前主机端口，若用自签证书需在客户端开启跳过证书验证）
-    local direct_link="vless://${uuid}@${domain}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}&allowInsecure=1#XMG-VLESS-Direct"
+    local direct_host="$domain"
+    if [[ "$direct_host" =~ : ]] && [[ ! "$direct_host" =~ ^\[.*\]$ ]]; then
+        direct_host="[${direct_host}]"
+    fi
+    local direct_link="vless://${uuid}@${direct_host}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}&allowInsecure=1#XMG-VLESS-Direct"
 
     echo "==================== 客户端节点分享链接 ===================="
     echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口，默认已启用 HTTP/3 QUIC 加速):"

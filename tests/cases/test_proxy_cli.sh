@@ -156,6 +156,21 @@ OUT_ACME="$(xmg_proxy_status 2>&1)"
 t_contains "status 正确展示 acme 证书来源" "$OUT_ACME" "证书: acme"
 
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# link：VLESS 分享链接生成测试（含 IPv6 方括号规范化）
+# ------------------------------------------------------------------
+xmg_state_set PROXY_VLESS_UUID "test-uuid-1111-2222"
+xmg_state_set PROXY_VLESS_DOMAIN "example.com"
+xmg_state_set PROXY_VLESS_PORT "443"
+LINK_DOMAIN="$(xmg_proxy_vless_link 2>&1)"
+t_contains "普通域名直连链接正确生成" "$LINK_DOMAIN" "vless://test-uuid-1111-2222@example.com:443"
+
+xmg_state_set PROXY_VLESS_DOMAIN "2001:db8::1"
+xmg_state_set PROXY_VLESS_PORT "8443"
+LINK_IPV6="$(xmg_proxy_vless_link 2>&1)"
+t_contains "IPv6 字面量地址直连自动包裹方括号" "$LINK_IPV6" "vless://test-uuid-1111-2222@[2001:db8::1]:8443"
+t_contains "IPv6 字面量 sni 保持原始地址" "$LINK_IPV6" "sni=2001:db8::1"
+
 # 恢复环境
 # ------------------------------------------------------------------
 XMG_ETC_DIR="$_TP_SAVED_ETC"
