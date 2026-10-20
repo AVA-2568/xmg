@@ -455,7 +455,8 @@ cat > "$STAGED_CFG" << 'EOF_VLESS_CUSTOM'
 EOF_VLESS_CUSTOM
 
 # 模拟存在 state.env
-touch "$XMG_STATE_FILE"
+mkdir -p "$(dirname "$XMG_STATE_FILE")" 2>/dev/null || true
+touch "$XMG_STATE_FILE" 
 export XMG_XRAY_CONFIG="$STAGED_CFG"
 
 xmg_warp_enable "global"
@@ -464,3 +465,12 @@ t_contains "增量注入后用户自定义端口 54321 毫发无损" "$PRESERVED
 t_contains "增量注入后用户自定义 UUID 毫发无损" "$PRESERVED_CONTENT" "user-custom-uuid-1111-2222-333344445555"
 t_contains "增量注入后用户 Reality 流控设置毫发无损" "$PRESERVED_CONTENT" "xtls-rprx-vision"
 t_contains "增量注入后包含首选 warp-out 出站" "$PRESERVED_CONTENT" '"tag": "warp-out"'
+# --- Task 1 回归：纯 Bash 字符串规整与保留字段解析能力 ---
+CLEAN_V4_SPACE="$(_xmg_warp_clean_ipv4 "  172.16.0.2   ")"
+CLEAN_V6_SPACE="$(_xmg_warp_clean_ipv6 "  2606:4700:110::1   ")"
+t_equals "纯 Bash clean_ipv4 正确去除两端及内部空白" "$CLEAN_V4_SPACE" "172.16.0.2"
+t_equals "纯 Bash clean_ipv6 正确去除两端及内部空白" "$CLEAN_V6_SPACE" "2606:4700:110::1"
+
+# 测试 JSON 纯 Bash 提取接口与 account.json 异常保留字段提取
+T_JSON_STR='{"private_key": "MOCK_KEY", "reserved": [ 12 ,  34 , 56 ]}'
+t_equals "纯 Bash _xmg_warp_json_val 提取私钥" "$(_xmg_warp_json_val "$T_JSON_STR" "private_key")" "MOCK_KEY"

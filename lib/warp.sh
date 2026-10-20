@@ -122,11 +122,18 @@ _xmg_warp_json_val() {
     local path="$2"
 
     if command -v jq >/dev/null 2>&1; then
-        echo "$json" | jq -r "$path // empty" 2>/dev/null || true
+        local jq_path="$path"
+        [[ "$jq_path" =~ ^\. ]] || jq_path=".$jq_path"
+        echo "$json" | jq -r "$jq_path // empty" 2>/dev/null || true
         return 0
     fi
 
     local key="${path##*.}"
+    local regex="\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
+    if [[ "$json" =~ $regex ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
     echo "$json" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4 || true
 }
 
@@ -146,7 +153,7 @@ _xmg_warp_clean_ipv6() {
     val="${val#\[}"
     val="${val%\]}"
     val="${val%%:0}"
-    val="$(echo "$val" | tr -d '[:space:]')"
+    val="${val//[[:space:]]/}"
     if [[ "$val" =~ : ]] && [[ ! "$val" =~ [^0-9a-fA-F:] ]]; then
         echo "$val"
     else
@@ -166,7 +173,7 @@ _xmg_warp_clean_ipv4() {
     if [[ "$val" =~ :[0-9]+$ ]]; then
         val="${val%:[0-9]*}"
     fi
-    val="$(echo "$val" | tr -d '[:space:]')"
+    val="${val//[[:space:]]/}"
     echo "$val"
 }
 
@@ -223,8 +230,13 @@ xmg_warp_detect_native_geo() {
         trace="$(curl -6 -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
     fi
     if [ -n "$trace" ]; then
-        XMG_WARP_NATIVE_LOC="$(echo "$trace" | grep -E '^loc=' | head -1 | cut -d= -f2 | tr -d '[:space:]')"
-        XMG_WARP_NATIVE_COLO="$(echo "$trace" | grep -E '^colo=' | head -1 | cut -d= -f2 | tr -d '[:space:]')"
+        local _tline="" _tk="" _tv=""
+        while IFS='=' read -r _tk _tv; do
+            case "$_tk" in
+                loc) XMG_WARP_NATIVE_LOC="${_tv//[[:space:]]/}" ;;
+                colo) XMG_WARP_NATIVE_COLO="${_tv//[[:space:]]/}" ;;
+            esac
+        done <<< "$trace"
     fi
 
     if [ -z "$XMG_WARP_NATIVE_LOC" ]; then
@@ -890,11 +902,11 @@ xmg_warp_export_xray_outbound() {
     local raw_res=""
     raw_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d: -f2- || true)"
     if [ -n "$raw_res" ]; then
-        local nums=""
-        nums="$(echo "$raw_res" | tr -d '[]' | tr ',' ' ')"
+        local nums="${raw_res//[\[\]]/}"
+        nums="${nums//,/ }"
         local r0="0" r1="0" r2="0"
         read -r r0 r1 r2 _ <<< "$nums"
-        reserved_json="[$r0, $r1, $r2]"
+        reserved_json="[${r0:-0}, ${r1:-0}, ${r2:-0}]"
     else
         local c_id=""
         c_id="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4 || true)"

@@ -179,6 +179,19 @@ xmg_timestamp() {
 
 # ===== 包管理器与 apt 锁等待与自动修复机制 =====
 
+# 纯 Bash 去重辅助，替代 echo | tr | sort -u 外部子进程
+_xmg_uniq_pids() {
+    local -A _seen=()
+    local _w="" _uniq=()
+    for _w in $1; do
+        if [ -n "$_w" ] && [ -z "${_seen[$_w]:-}" ]; then
+            _seen["$_w"]=1
+            _uniq+=("$_w")
+        fi
+    done
+    printf '%s ' "${_uniq[@]}"
+}
+
 # 获取持有 dpkg / apt 锁的进程 PID 列表
 xmg_apt_find_lock_pids() {
     local pids=""
@@ -187,7 +200,7 @@ xmg_apt_find_lock_pids() {
     if command -v fuser >/dev/null 2>&1; then
         pids="$(fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null || true)"
         if [ -n "$pids" ]; then
-            echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+            _xmg_uniq_pids "$pids"
             return 0
         fi
     fi
@@ -196,7 +209,7 @@ xmg_apt_find_lock_pids() {
     if command -v lsof >/dev/null 2>&1; then
         pids="$(lsof -t /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null || true)"
         if [ -n "$pids" ]; then
-            echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+            _xmg_uniq_pids "$pids"
             return 0
         fi
     fi
@@ -232,7 +245,7 @@ xmg_apt_find_lock_pids() {
         done
     fi
 
-    echo "$pids" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '
+    _xmg_uniq_pids "$pids"
 }
 
 # 安全解除僵死 apt 锁并自动修复 dpkg 数据库状态

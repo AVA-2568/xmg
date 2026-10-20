@@ -210,7 +210,11 @@ _xmg_render_config_bash() {
     if [ -z "$warp_reserved" ] || [ "$warp_reserved" = "null" ]; then
         warp_reserved="[0, 0, 0]"
     elif [[ ! "$warp_reserved" =~ ^\[.*\]$ ]]; then
-        warp_reserved="[$(echo "$warp_reserved" | tr ' ' ',')]"
+        local _clean_res="${warp_reserved//[[:space:]]/,}"
+        while [[ "$_clean_res" =~ ,, ]]; do _clean_res="${_clean_res//,,/,}"; done
+        _clean_res="${_clean_res#,}"
+        _clean_res="${_clean_res%,}"
+        warp_reserved="[$_clean_res]"
     fi
 
     local esc_error_log esc_socks_listen esc_socks_user esc_socks_pass
@@ -577,7 +581,11 @@ xmg_render_config() {
     if [ -z "$warp_reserved" ] || [ "$warp_reserved" = "null" ]; then
         warp_reserved="[0, 0, 0]"
     elif [[ ! "$warp_reserved" =~ ^\[.*\]$ ]]; then
-        warp_reserved="[$(echo "$warp_reserved" | tr ' ' ',')]"
+        local _clean_res="${warp_reserved//[[:space:]]/,}"
+        while [[ "$_clean_res" =~ ,, ]]; do _clean_res="${_clean_res//,,/,}"; done
+        _clean_res="${_clean_res#,}"
+        _clean_res="${_clean_res%,}"
+        warp_reserved="[$_clean_res]"
     fi
 
     local warp_addr_json

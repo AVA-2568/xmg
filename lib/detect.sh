@@ -396,7 +396,7 @@ xmg_detect_container_restricted() {
                     return 1
                 fi
             fi
-        done <<< "$(cat "$mounts_file" 2>/dev/null || true)"
+        done < "$mounts_file"
     fi
 
     # 2. 检查 /proc/self/status 中有效能力 CapEff
