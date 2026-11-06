@@ -367,12 +367,13 @@ xmg_tune_bbr_enable() {
     fi
 
     # 模块开机自动加载（内建时此文件无害）
+    local modules_file="${XMG_MODULES_FILE:-/etc/modules}"
     if [ -d /etc/modules-load.d ]; then
         printf 'tcp_bbr\n' > "$XMG_TUNE_MODULES_LOAD_CONF"
-    elif [ -f /etc/modules ] || xmg_init_is_openrc; then
+    elif [ -f "$modules_file" ] || xmg_init_is_openrc; then
         # Alpine/OpenRC 使用 /etc/modules 逐行列模块
-        if ! grep -qx 'tcp_bbr' /etc/modules 2>/dev/null; then
-            printf 'tcp_bbr\n' >> /etc/modules 2>/dev/null || true
+        if ! grep -qx 'tcp_bbr' "$modules_file" 2>/dev/null; then
+            printf 'tcp_bbr\n' >> "$modules_file" 2>/dev/null || true
         fi
     fi
 

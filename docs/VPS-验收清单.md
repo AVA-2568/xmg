@@ -169,9 +169,47 @@ curl --socks5-user testuser --socks5 testpass123 --socks5-hostname <公网IP>:<�
 
 ---
 
-## Alpine / OpenRC 专项验收（需真实 Alpine 环境）
+## 安装类验收（Debian / Ubuntu / Alpine 通用）
 
-以下项**无法在 Debian 开发机验证**，需在 Alpine 3.16+（`lxc`/KVM 均可）上逐条确认。建议用官方镜像跑一次：`docker run -it --rm --privileged alpine:3.20 sh`（`--privileged` 才能测 iptables/sysctl）。
+`tests/acceptance.sh` 启动时自行探测**发行版家族 / init 系统 / 包管理器 / 防火墙后端**，同一份脚本覆盖 Debian 11/12、Ubuntu 20.04+、Alpine 3.16+ 以及任意 systemd 或 OpenRC 系统，不为单一发行版写专用断言。
+
+```bash
+# 常规验收（跳过防火墙启用，避免影响 SSH）
+bash tests/acceptance.sh
+
+# 追加防火墙启用验证：会真实启停 ufw / iptables，请只在一次性 VPS 或快照上跑
+bash tests/acceptance.sh --with-firewall
+
+# 离线环境 / 只想看现状
+bash tests/acceptance.sh --skip-core --keep
+```
+
+覆盖链路：安装落盘 → `xmg os` 与脚本独立探测结果**一致性比对** → 内核安装与服务注册（systemd unit+drop-in / OpenRC init 脚本，按 init 自动切换）→ 代理配置闭环（含端口实际监听）→ 防火墙（ufw 状态与规则 / iptables `XMG-IN` 链与 IPv6 NDP、DHCPv6 放通）→ 调优持久化（systemd 只认 sysctl.d，OpenRC 额外校验 `/etc/sysctl.conf` 标记块）→ 卸载残留（含 sysctl/limits/unbound 等系统目录产物）。
+
+输出示例（数值随环境与实际安装状态变化）：
+
+```
+PASS=41  FAIL=0  SKIP=2   (debian / systemd / ufw)
+PASS=44  FAIL=0  SKIP=1   (alpine / openrc / iptables)
+```
+
+容器内跑 Alpine（任意装了 Docker 的机器）：
+
+```bash
+docker run --rm -it --privileged -v "$PWD":/xmg alpine:3.20 \
+  sh -c "apk add --no-cache bash curl && bash /xmg/tests/acceptance.sh --with-firewall"
+```
+
+容器内跑 Debian / Ubuntu：
+
+```bash
+docker run --rm -it --privileged -v "$PWD":/xmg debian:12 \
+  sh -c "apt-get update -qq && apt-get install -y -qq curl && bash /xmg/tests/acceptance.sh --with-firewall"
+```
+
+> 容器内 `init` 不是 PID 1，`systemd` 会被识别为 `none`，此时服务注册相关断言自动 SKIP；要验证 systemd 路径请用真实 VPS 或 `--privileged` + systemd 镜像。
+
+以下 A1–A7 为 Alpine 上的**手工**核查命令（一键脚本已覆盖同样内容，保留用于逐项定位）。Debian/Ubuntu 对照执行时：`apk` → `apt-get`、`rc-service`/`rc-update` → `systemctl`、`/etc/init.d/xray` → `/etc/systemd/system/xray.service`。
 
 **A1. 基础识别**
 

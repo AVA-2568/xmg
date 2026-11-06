@@ -162,6 +162,83 @@ xmg_uninstall_cleanup_systemd_artifacts() {
 }
 
 # OpenRC（Alpine）服务脚本清理：仅删除 XMG 生成的那几个
+# 清理 XMG 落在系统目录里的调优产物
+# 这些文件不在 /opt/xmg 下，如果不主动清理，卸载后会留下：
+#   - 残留的内核参数与 limits（静默改变系统行为）
+#   - unbound 接管 127.0.0.1 但解析器已被删（DNS 直接不可用）
+xmg_uninstall_cleanup_tune_artifacts() {
+    local f=""
+    local files=(
+        "${XMG_TUNE_SYSCTL_NET_CONF:-/etc/sysctl.d/99-xmg-tune.conf}"
+        "${XMG_TUNE_SYSCTL_BBR_CONF:-/etc/sysctl.d/99-xmg-bbr.conf}"
+        "${XMG_TUNE_SYSCTL_SWAP_CONF:-/etc/sysctl.d/99-xmg-swap.conf}"
+        "${XMG_TUNE_LIMITS_CONF:-/etc/security/limits.d/99-xmg-nofile.conf}"
+        "${XMG_TUNE_SYSTEMD_LIMITS_CONF:-/etc/systemd/system.conf.d/99-xmg-limits.conf}"
+        "${XMG_TUNE_MODULES_LOAD_CONF:-/etc/modules-load.d/xmg-bbr.conf}"
+        "${XMG_TUNE_RESOLVED_CONF:-/etc/systemd/resolved.conf.d/xmg-dns.conf}"
+        "${XMG_MAINT_JOURNALD_CONF:-/etc/systemd/journald.conf.d/00-xmg.conf}"
+    )
+
+    for f in "${files[@]}"; do
+        if [ -f "$f" ]; then
+            rm -f "$f" 2>/dev/null && xmg_info "已清理调优文件: $f" || true
+        fi
+    done
+
+    # /etc/modules 里我们追加的 tcp_bbr（OpenRC 路径）
+    local modules_file="${XMG_MODULES_FILE:-/etc/modules}"
+    if [ -r "$modules_file" ] && grep -qx 'tcp_bbr' "$modules_file" 2>/dev/null; then
+        local tmp_mod=""
+        tmp_mod="$(mktemp)" || tmp_mod=""
+        if [ -n "$tmp_mod" ]; then
+            grep -vx 'tcp_bbr' "$modules_file" > "$tmp_mod" 2>/dev/null && cat "$tmp_mod" > "$modules_file"
+            rm -f "$tmp_mod" 2>/dev/null || true
+            xmg_info "已从 $modules_file 移除 tcp_bbr"
+        fi
+    fi
+
+    # /etc/sysctl.conf 里的 XMG 标记块（OpenRC 持久化用）
+    local main_conf="${XMG_TUNE_SYSCTL_MAIN_CONF:-/etc/sysctl.conf}"
+    if [ -r "$main_conf" ] && grep -q '# >>> xmg:' "$main_conf" 2>/dev/null; then
+        local tmp_main=""
+        tmp_main="$(mktemp)" || tmp_main=""
+        if [ -n "$tmp_main" ]; then
+            awk '
+                /^# >>> xmg:/ { skip = 1; next }
+                /^# <<< xmg:/ { skip = 0; next }
+                !skip { print }
+            ' "$main_conf" > "$tmp_main" 2>/dev/null && cat "$tmp_main" > "$main_conf"
+            rm -f "$tmp_main" 2>/dev/null || true
+            xmg_info "已从 $main_conf 移除 XMG 标记块"
+        fi
+    fi
+
+    # unbound：仅移除 XMG 生成的配置；若解析已指向 127.0.0.1，必须换回公共 DNS，
+    # 否则卸载后系统没有任何可用解析器
+    local unbound_conf="${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}"
+    local resolv_file="${XMG_RESOLV_CONF_FILE:-/etc/resolv.conf}"
+    if [ -f "$unbound_conf" ] && grep -q "由 xmg tune 生成" "$unbound_conf" 2>/dev/null; then
+        rm -f "$unbound_conf" 2>/dev/null || true
+        xmg_info "已移除 XMG 生成的 unbound 配置"
+        if [ -f "$resolv_file" ] && grep -q '^nameserver 127.0.0.1' "$resolv_file" 2>/dev/null; then
+            cat > "$resolv_file" <<EOF
+# XMG 卸载后恢复默认 DNS（unbound 已移除）
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:2
+EOF
+            chmod 644 "$resolv_file" 2>/dev/null || true
+            xmg_warn "unbound 已移除，$resolv_file 已恢复为 1.1.1.1 / 8.8.8.8，请按需调整"
+        fi
+    fi
+
+    # swap 属于用户数据，不自动删除，只提示
+    if [ -f "${XMG_TUNE_SWAPFILE:-/swapfile}" ]; then
+        xmg_warn "检测到 swap 文件 ${XMG_TUNE_SWAPFILE:-/swapfile}，已保留未删除（如需回收请手动 swapoff + 删除并清理 /etc/fstab）"
+    fi
+    return 0
+}
+
 # 清理 XMG iptables 残留链
 # 卸载后若仍把带 DROP 的 XMG-IN 链挂在 INPUT 上，会留下看不见的防火墙规则，
 # 所以这里不依赖 xmg-firewall 服务是否在运行，直接摘链并销毁。
@@ -268,6 +345,9 @@ xmg_uninstall_cli() {
     # 5. 清理 OpenRC（Alpine）侧由 XMG 生成的服务脚本与 iptables 残留链
     xmg_uninstall_cleanup_openrc_artifacts
     xmg_uninstall_cleanup_iptables
+
+    # 6. 清理落在系统目录的调优产物（sysctl / limits / resolved / journald / unbound）
+    xmg_uninstall_cleanup_tune_artifacts
 
     xmg_info "XMG 卸载完成"
     return 0

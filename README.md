@@ -76,6 +76,26 @@ xmg tune                         # 系统调优菜单 (BBR / 网络参数 / DNS 
 
 ---
 
+## 🧪 验收
+
+一份脚本覆盖所有受支持系统：启动时自动探测**发行版家族 / init 系统 / 包管理器 / 防火墙后端**，Debian、Ubuntu、Alpine 跑同一套断言，不为某个发行版写专用分支。
+
+```bash
+bash tests/acceptance.sh                  # 常规验收（不动防火墙，避免影响 SSH）
+bash tests/acceptance.sh --with-firewall  # 追加防火墙启用验证（会真实启停 ufw/iptables）
+bash tests/acceptance.sh --skip-core --keep  # 离线 / 只保留现场
+```
+
+覆盖链路：安装落盘 → `xmg os` 与脚本独立探测结果比对 → 内核安装与服务注册（systemd unit+drop-in / OpenRC init 脚本）→ 代理配置闭环（含端口实际监听）→ 防火墙（ufw 规则 / iptables `XMG-IN` 与 IPv6 NDP、DHCPv6）→ 调优持久化（systemd 走 sysctl.d，OpenRC 额外校验 `/etc/sysctl.conf` 标记块）→ 卸载残留（含 sysctl/limits/unbound 等系统目录产物）。
+
+```
+# 输出形如（数值随环境与实际安装状态变化）
+PASS=41  FAIL=0  SKIP=2   (debian / systemd / ufw)
+PASS=44  FAIL=0  SKIP=1   (alpine / openrc / iptables)
+```
+
+---
+
 ## 💻 适配环境
 
 - **操作系统**：Debian 11/12+、Ubuntu 20.04+、Alpine 3.16+（OpenRC）
