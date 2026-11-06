@@ -50,6 +50,7 @@ XMG $XMG_VERSION
   xmg uninstall [run|menu] [--yes|-y] 卸载 XMG
   xmg system          查看系统状态概况摘要
   xmg os              查看发行版 / init / 包管理器识别结果
+  xmg selftest        安装一致性自检（只读，FAIL 时退出码 1）
   xmg version         显示版本
   xmg help            显示帮助
 
@@ -356,6 +357,12 @@ xmg_main() {
             else
                 echo "防火墙 : 未检测到 ufw / iptables"
             fi
+            ;;
+        selftest)
+            xmg_require_core_file selftest.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/selftest.sh"
+            xmg_selftest_run "$@"
             ;;
         doctor)
             xmg_require_core_file doctor.sh

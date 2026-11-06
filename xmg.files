@@ -1,5 +1,6 @@
 xmg
 lib/os.sh
+lib/selftest.sh
 lib/common.sh
 lib/detect.sh
 lib/system.sh

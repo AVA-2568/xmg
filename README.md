@@ -78,15 +78,29 @@ xmg tune                         # 系统调优菜单 (BBR / 网络参数 / DNS 
 
 ## 🧪 验收
 
-一份脚本覆盖所有受支持系统：启动时自动探测**发行版家族 / init 系统 / 包管理器 / 防火墙后端**，Debian、Ubuntu、Alpine 跑同一套断言，不为某个发行版写专用分支。
+**装完即可用**，不依赖仓库（`xmg selftest` 随安装包落盘）：
+
+```bash
+xmg selftest          # 安装一致性自检，只读，FAIL 时退出码 1
+xmg selftest -q       # 只看 FAIL / WARN
+```
+
+它按发行版自动切换断言：Debian/Ubuntu 查 `systemd` unit + drop-in、Alpine 查 `/etc/init.d/xray` + 运行级，防火墙按 ufw / iptables 分流，不为某个发行版写专用分支。
+
+覆盖：发行版家族与 init 识别一致性 → 命令入口与模块完整性（含清单比对，能发现升级中断）→ 内核版本与配置语法 → 服务注册与运行态 → 入站端口实际监听 → 防火墙链与 IPv6 NDP → 调优持久化（systemd 走 sysctl.d，OpenRC 额外校验 `/etc/sysctl.conf` 标记块）→ DNS 可用性。
+
+```
+PASS=18  FAIL=0  WARN=1
+结论: 安装一致性检查通过
+```
+
+需要「从零安装 → 配置 → 启防火墙 → 卸载」的完整链路验收时，用仓库里的脚本（会真实改动系统，仅限一次性 VPS/快照）：
 
 ```bash
 bash tests/acceptance.sh                  # 常规验收（不动防火墙，避免影响 SSH）
 bash tests/acceptance.sh --with-firewall  # 追加防火墙启用验证（会真实启停 ufw/iptables）
 bash tests/acceptance.sh --skip-core --keep  # 离线 / 只保留现场
 ```
-
-覆盖链路：安装落盘 → `xmg os` 与脚本独立探测结果比对 → 内核安装与服务注册（systemd unit+drop-in / OpenRC init 脚本）→ 代理配置闭环（含端口实际监听）→ 防火墙（ufw 规则 / iptables `XMG-IN` 与 IPv6 NDP、DHCPv6）→ 调优持久化（systemd 走 sysctl.d，OpenRC 额外校验 `/etc/sysctl.conf` 标记块）→ 卸载残留（含 sysctl/limits/unbound 等系统目录产物）。
 
 ```
 # 输出形如（数值随环境与实际安装状态变化）
