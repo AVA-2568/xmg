@@ -166,6 +166,37 @@ _xmg_render_get_val() {
     fi
 }
 
+# ===== DNS 服务器列表（按宿主机可用协议族下发）=====
+#   双栈 / 探测失败（未知） -> IPv4 主 + IPv6 备，v4 被阻断时仍有退路
+#   纯 IPv6                -> 仅 IPv6
+#   纯 IPv4                -> 仅 IPv4
+# 注意：https+local:// 属于 DOHL 本地模式，按 Xray 官方文档不进入路由系统，
+#       即 DNS 查询永远走直连，不会经过 WARP 隧道。
+_xmg_render_dns_servers_json() {
+    local v4_ok=0 v6_ok=0
+    local out=""
+    local sep=""
+
+    [ "${XMG_NET_IPV4:-}" = "1" ] && v4_ok=1
+    [ "${XMG_NET_IPV6:-}" = "1" ] && v6_ok=1
+    if [ "$v4_ok" -eq 0 ] && [ "$v6_ok" -eq 0 ]; then
+        v4_ok=1
+        v6_ok=1
+    fi
+
+    if [ "$v4_ok" -eq 1 ]; then
+        out='"https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query"'
+        sep=', '
+    fi
+    if [ "$v6_ok" -eq 1 ]; then
+        out="${out}${sep}\"https+local://[2606:4700:4700::1111]/dns-query\", \"https+local://[2001:4860:4860::8888]/dns-query\""
+        sep=', '
+    fi
+    out="${out}${sep}\"localhost\""
+
+    printf '[%s]' "$out"
+}
+
 # ===== 纯 Bash 零依赖内建渲染引擎 =====
 _xmg_render_config_bash() {
     local socks_on="$1" vless_on="$2"
@@ -242,20 +273,11 @@ _xmg_render_config_bash() {
     _xmg_json_escape_into esc_warp_endpoint "$warp_endpoint"
 
     local dns_servers dns_query_strat out_strat
+    dns_servers="$(_xmg_render_dns_servers_json)"
     if [ "$is_ipv6_only" = "true" ]; then
-        dns_servers='[
-      "https+local://[2606:4700:4700::1111]/dns-query",
-      "https+local://[2001:4860:4860::8888]/dns-query",
-      "localhost"
-    ]'
         dns_query_strat="UseIPv6"
         out_strat="UseIPv6"
     else
-        dns_servers='[
-      "https+local://1.1.1.1/dns-query",
-      "https+local://8.8.8.8/dns-query",
-      "localhost"
-    ]'
         dns_query_strat="UseIP"
         out_strat="UseIP"
     fi
@@ -623,13 +645,7 @@ xmg_render_config() {
 .log.loglevel = "warning" |
 .policy.levels["0"].bufferSize = ($buffer_size | tonumber) |
 .policy.levels["0"].connIdle = 60 |
-.dns.servers = (
-  if $is_ipv6_only then
-    ["https+local://[2606:4700:4700::1111]/dns-query", "https+local://[2001:4860:4860::8888]/dns-query", "localhost"]
-  else
-    ["https+local://1.1.1.1/dns-query", "https+local://8.8.8.8/dns-query", "localhost"]
-  end
-) |
+.dns.servers = $dns_servers |
 .dns.queryStrategy = (if $is_ipv6_only then "UseIPv6" else "UseIP" end) |
 (
   if $warp_on then
@@ -873,6 +889,7 @@ xmg_render_config() {
         local jq_args=(
             --arg error_log "$error_log"
             --argjson buffer_size "$bufsz"
+            --argjson dns_servers "$(_xmg_render_dns_servers_json)"
             --argjson is_ipv6_only "$is_ipv6_only"
             --argjson socks_on "$socks_bool"
             --arg socks_listen "$socks_listen"

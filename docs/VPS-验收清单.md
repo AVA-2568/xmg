@@ -359,6 +359,20 @@ grep queryStrategy /opt/xmg/xray/config.json                        # 期望收�
 
 分流模式（`routing`）不改全局策略——未被 WARP 命中的流量仍需走宿主机原栈。
 
+**DNS 服务器地址按可用协议族下发**（`dns.servers`）：
+
+```bash
+xmg proxy export >/dev/null 2>&1; grep -A6 '"servers"' /opt/xmg/xray/config.json
+```
+
+| 宿主机 | DNS 列表 |
+| --- | --- |
+| 双栈 / 探测失败 | 1.1.1.1、8.8.8.8、`[2606:4700:4700::1111]`、`[2001:4860:4860::8888]`、localhost |
+| 纯 IPv6 | 仅两个 IPv6 DoH + localhost |
+| 纯 IPv4 | 仅两个 IPv4 DoH + localhost |
+
+注意：`https+local://` 属于 DOHL 本地模式，按 Xray 官方文档**不进入路由系统**，即 DNS 查询始终直连、不会走 WARP 隧道。若要让 DNS 跟随隧道，需要改成非 local 的 `https://` 并配 `dns.tag` + `routing.rules` 指向 `warp-out`（未默认开启）。
+
 **N6. 变更后必须换进程**
 
 Xray 的出站、WARP 隧道、DNS 策略都在进程启动时建立，`SIGHUP` 不支持重载。以下操作都必须触发「停 → 等进程退出 → 启 → 等 active」：
