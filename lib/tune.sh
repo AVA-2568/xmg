@@ -23,6 +23,18 @@ if [ "${XMG_TUNE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_TUNE_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # XMG_MENU_LABEL: 系统与网络调优
 
 # ===== 默认配置 =====
@@ -219,6 +231,53 @@ xmg_tune_backup_file() {
     xmg_info "已备份 $file -> $dir/"
 }
 
+# OpenRC（Alpine）持久化：部分 OpenRC 版本的 sysctl 服务只加载 /etc/sysctl.conf，
+# 这里把 XMG 配置以带标记的区块同步进去，保证重启后依然生效且可重复执行。
+xmg_tune_sysctl_persist() {
+    local conf="$1"
+    local main="${XMG_TUNE_SYSCTL_MAIN_CONF:-/etc/sysctl.conf}"
+
+    [ -r "$conf" ] || return 0
+
+    # systemd 的 systemd-sysctl 会自动加载 /etc/sysctl.d/*.conf
+    if xmg_init_use_systemd_units; then
+        return 0
+    fi
+
+    local tag="xmg:$(basename "$conf")"
+    local begin="# >>> $tag >>>"
+    local end="# <<< $tag <<<"
+    local base="" merged=""
+
+    base="$(mktemp)" || return 1
+    merged="$(mktemp)" || { rm -f "$base"; return 1; }
+
+    if [ -r "$main" ]; then
+        awk -v b="$begin" -v e="$end" '
+            $0 == b { skip = 1; next }
+            $0 == e { skip = 0; next }
+            !skip { print }
+        ' "$main" > "$base" || { rm -f "$base" "$merged"; return 1; }
+    fi
+
+    {
+        cat "$base"
+        printf '%s\n' "$begin"
+        grep -vE '^[[:space:]]*(#|$)' "$conf"
+        printf '%s\n' "$end"
+    } > "$merged" || { rm -f "$base" "$merged"; return 1; }
+
+    cat "$merged" > "$main" 2>/dev/null || {
+        rm -f "$base" "$merged"
+        xmg_warn "写入 $main 失败，重启后 sysctl 参数不会自动恢复"
+        return 1
+    }
+
+    rm -f "$base" "$merged"
+    xmg_info "已同步到 $main（OpenRC 开机自动加载）"
+    return 0
+}
+
 # 逐行应用 sysctl 配置文件，失败的 key 警告但不中断
 # 在受限容器环境下（如 OpenVZ/LXC/Docker 只读 sysctl），对不可写参数静默跳过并友情提示，平滑熔断返回 0
 xmg_tune_sysctl_apply() {
@@ -257,8 +316,12 @@ xmg_tune_sysctl_apply() {
         if [ "$failed" -gt 0 ]; then
             xmg_info "当前处于受限容器环境，已自动跳过不可写内核参数 ($failed 项)"
         fi
+        xmg_tune_sysctl_persist "$file" >/dev/null 2>&1 || true
         return 0
     fi
+
+    # 非 systemd 环境补一次 /etc/sysctl.conf 同步，保证重启后仍生效
+    xmg_tune_sysctl_persist "$file" || true
 
     if [ "$failed" -gt 0 ]; then
         return 1
@@ -306,6 +369,11 @@ xmg_tune_bbr_enable() {
     # 模块开机自动加载（内建时此文件无害）
     if [ -d /etc/modules-load.d ]; then
         printf 'tcp_bbr\n' > "$XMG_TUNE_MODULES_LOAD_CONF"
+    elif [ -f /etc/modules ] || xmg_init_is_openrc; then
+        # Alpine/OpenRC 使用 /etc/modules 逐行列模块
+        if ! grep -qx 'tcp_bbr' /etc/modules 2>/dev/null; then
+            printf 'tcp_bbr\n' >> /etc/modules 2>/dev/null || true
+        fi
     fi
 
     cat > "$XMG_TUNE_SYSCTL_BBR_CONF" <<'EOF'
@@ -344,7 +412,7 @@ EOF
     xmg_info "nofile limits 已写入: $XMG_TUNE_LIMITS_CONF（新登录会话生效）"
 
     # systemd 服务不受 limits.d 影响，需单独设置 DefaultLimitNOFILE
-    if xmg_cmd_exists systemctl; then
+    if xmg_init_use_systemd_units; then
         mkdir -p "$(dirname "$XMG_TUNE_SYSTEMD_LIMITS_CONF")" 2>/dev/null || true
         cat > "$XMG_TUNE_SYSTEMD_LIMITS_CONF" 2>/dev/null <<EOF || true
 # XMG: systemd DefaultLimitNOFILE（由 xmg tune 生成）
@@ -353,6 +421,10 @@ DefaultLimitNOFILE=$XMG_TUNE_NOFILE
 EOF
         systemctl daemon-reload >/dev/null 2>&1 || true
         xmg_info "systemd DefaultLimitNOFILE=$XMG_TUNE_NOFILE（服务重启后生效）"
+    elif xmg_init_is_openrc; then
+        # OpenRC 无全局 DefaultLimit*，服务级上限由各自 init 脚本 rc_ulimit 控制；
+        # XMG 生成的 xray / xmg-firewall 服务脚本已内建 rc_ulimit=-n 1048576
+        xmg_info "OpenRC 环境：XMG 生成的 Xray 服务脚本已内建 rc_ulimit（nofile=1048576）"
     fi
 }
 
@@ -715,6 +787,12 @@ EOF
     chmod 644 /etc/resolv.conf
 
     xmg_info "DNS 已写入 /etc/resolv.conf"
+
+    # Alpine 使用 udhcpc/dhcpcd 时，续租会重写 resolv.conf，需提示用户
+    if xmg_init_is_openrc && { command -v udhcpc >/dev/null 2>&1 || command -v dhcpcd >/dev/null 2>&1; }; then
+        xmg_warn "当前系统使用 DHCP 客户端，网络续租时可能覆盖 /etc/resolv.conf"
+        xmg_warn "如需长期稳定，建议改用「加密 DNS (DoT, unbound)」由本地解析器接管"
+    fi
 }
 
 xmg_tune_dns_optimize() {
@@ -891,23 +969,34 @@ xmg_tune_dot_pick() {
 }
 
 # 解析链路验证：失败返回非零
-xmg_tune_dns_verify() {
-    if command -v timeout >/dev/null 2>&1; then
-        if timeout 3 getent hosts deb.debian.org >/dev/null 2>&1; then
-            return 0
-        fi
-        if timeout 3 getent hosts cloudflare.com >/dev/null 2>&1; then
-            return 0
-        fi
-        return 1
-    fi
+# 单次域名解析探测：getent 优先，BusyBox 精简系统回退 nslookup / ping
+_xmg_dns_resolve_ok() {
+    local host="$1"
 
-    if getent hosts deb.debian.org >/dev/null 2>&1; then
-        return 0
+    if command -v getent >/dev/null 2>&1; then
+        getent hosts "$host" >/dev/null 2>&1 && return 0
     fi
-    if getent hosts cloudflare.com >/dev/null 2>&1; then
-        return 0
+    if command -v nslookup >/dev/null 2>&1; then
+        nslookup "$host" >/dev/null 2>&1 && return 0
     fi
+    if command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 2 "$host" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+xmg_tune_dns_verify() {
+    local host=""
+    for host in deb.debian.org cloudflare.com; do
+        if command -v timeout >/dev/null 2>&1; then
+            if timeout 3 sh -c "getent hosts $host" >/dev/null 2>&1; then
+                return 0
+            fi
+        fi
+        if _xmg_dns_resolve_ok "$host"; then
+            return 0
+        fi
+    done
     return 1
 }
 
@@ -1063,35 +1152,23 @@ EOF
     resolvectl status 2>/dev/null | sed -n '1,12p' || true
 }
 
-xmg_tune_dns_dot() {
-    xmg_require_root
-
-    if ! xmg_cmd_exists systemctl; then
-        xmg_die "需要 systemd 环境"
-    fi
-
-    if ! xmg_tune_dot_supported; then
-        xmg_error "systemd 版本过低（$(systemctl --version 2>/dev/null | head -1)），DoT 需要 >= 243"
-        return 1
-    fi
-
+# 交互选择 + 合法性校验 + 单双栈防呆 + 853 预检
+# 输出 "dns1 dns2"；取消或校验失败返回非零
+xmg_tune_dot_prepare() {
     local dns_pair=""
     local dns1=""
     local dns2=""
 
-    dns_pair="$(xmg_tune_dot_pick)" || {
-        xmg_info "已取消"
-        return 0
-    }
+    dns_pair="$(xmg_tune_dot_pick)" || return 1
 
     # shellcheck disable=SC2086
     set -- $dns_pair
-    dns1="$1"
-    dns2="$2"
+    dns1="${1:-}"
+    dns2="${2:-}"
 
     if ! xmg_tune_valid_ip "$dns1" || ! xmg_tune_valid_ip "$dns2"; then
         xmg_error "DoT 上游无效: '$dns1' / '$dns2'，未做任何变更"
-        return 0
+        return 1
     fi
 
     # 关键防呆拦截：纯单栈环境防止配置反向单栈 DoT
@@ -1114,12 +1191,225 @@ xmg_tune_dns_dot() {
     if ! xmg_tune_check_tcp_port "$dns1" 853 2; then
         xmg_warn "预检提示: 目标 DoT 上游 ($dns1) 端口 853 无法连通"
         xmg_warn "可能原因: VPS 所在云厂商安全组或运营商阻断了 TCP 853 端口"
-        xmg_warn "若强制开启，DNSOverTLS 可能会经历握手超时，导致网络查询卡顿"
+        xmg_warn "若强制开启，DoT 握手可能超时，导致网络查询卡顿"
         if ! xmg_confirm "是否仍要继续尝试开启 DoT? (建议改用普通 UDP 模式)"; then
-            xmg_info "已取消。可使用「一键 DNS 优化 (UDP)」模式"
-            return 0
+            return 1
         fi
     fi
+
+    printf '%s %s\n' "$dns1" "$dns2"
+    return 0
+}
+
+# DoT 上游 IP -> TLS 证书主机名（unbound 严格校验证书，必须给出对应域名）
+xmg_tune_dot_tls_name() {
+    case "$1" in
+        1.1.1.1|1.0.0.1|2606:4700:4700::1111|2606:4700:4700::1001)
+            printf 'cloudflare-dns.com\n' ;;
+        8.8.8.8|8.8.4.4|2001:4860:4860::8888|2001:4860:4860::8844)
+            printf 'dns.google\n' ;;
+        9.9.9.9|149.112.112.112|2620:fe::fe|2620:fe::9)
+            printf 'dns.quad9.net\n' ;;
+        223.5.5.5|223.6.6.6|2400:3200::1|2400:3200:baba::1)
+            printf 'dns.alidns.com\n' ;;
+        94.140.14.14|94.140.15.15|2a10:50c0::ad1:ff|2a10:50c0::ad2:ff)
+            printf 'dns.adguard-dns.com\n' ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+# OpenRC + unbound 后端的 DoT 实现
+# 依靠 unbound 的 forward-tls-upstream 提供 853 加密转发，本机 53 端口由 unbound 接管
+# 本机是否具备 IPv6 栈
+# 优先信任 /proc/net/if_inet6（内核未启用 IPv6 时该文件不存在），XMG_HAS_IPV6=0|1 可强制
+xmg_tune_has_ipv6() {
+    case "${XMG_HAS_IPV6:-}" in
+        1) return 0 ;;
+        0) return 1 ;;
+    esac
+    [ -e /proc/net/if_inet6 ]
+}
+
+# 生成 unbound DoT 配置
+# 单栈自适应：纯 IPv4 主机不写 interface: ::1，否则 unbound 会因地址不可用启动失败
+xmg_tune_unbound_write_conf() {
+    local conf="$1"
+    local dns1="$2"
+    local dns2="$3"
+    local name1="$4"
+    local name2="$5"
+
+    [ -n "$conf" ] && [ -n "$dns1" ] && [ -n "$dns2" ] || return 1
+    [ -n "$name1" ] && [ -n "$name2" ] || return 1
+
+    local v6_lines=""
+    if xmg_tune_has_ipv6; then
+        v6_lines="    interface: ::1
+    access-control: ::1 allow"
+    fi
+
+    mkdir -p "$(dirname "$conf")" || return 1
+    cat > "$conf" <<EOF
+# XMG: 加密 DNS DoT（由 xmg tune 生成，unbound 后端）
+server:
+    interface: 127.0.0.1
+${v6_lines}
+    port: 53
+    access-control: 127.0.0.0/8 allow
+    do-udp: yes
+    do-tcp: yes
+    prefetch: yes
+    qname-minimisation: yes
+    hide-identity: yes
+    hide-version: yes
+    tls-cert-bundle: /etc/ssl/certs/ca-certificates.crt
+
+forward-zone:
+    name: "."
+    forward-tls-upstream: yes
+    forward-addr: ${dns1}@853#${name1}
+    forward-addr: ${dns2}@853#${name2}
+EOF
+    return 0
+}
+
+xmg_tune_dns_dot_openrc() {
+    local pair=""
+    local dns1=""
+    local dns2=""
+
+    pair="$(xmg_tune_dot_prepare)" || {
+        xmg_info "已取消"
+        return 0
+    }
+
+    # shellcheck disable=SC2086
+    set -- $pair
+    dns1="$1"
+    dns2="$2"
+
+    local name1=""
+    local name2=""
+    name1="$(xmg_tune_dot_tls_name "$dns1" 2>/dev/null || true)"
+    name2="$(xmg_tune_dot_tls_name "$dns2" 2>/dev/null || true)"
+
+    if [ -z "$name1" ] || [ -z "$name2" ]; then
+        xmg_error "无法为自定义 DoT 上游确定 TLS 证书域名，unbound 严格校验下会握手失败"
+        xmg_info "可改用内置上游 (Cloudflare/Google/Quad9/阿里)，或使用「一键 DNS 优化 (UDP)」"
+        return 1
+    fi
+
+    echo
+    echo "将使用 unbound 启用 DoT: $dns1 (#$name1) / $dns2 (#$name2)"
+
+    if ! xmg_confirm "确认应用? (失败会自动回滚)"; then
+        xmg_info "已取消"
+        return 0
+    fi
+
+    if ! xmg_cmd_exists unbound; then
+        xmg_info "安装 unbound: $(xmg_pkg_hint unbound)"
+        if ! xmg_pkg_install unbound; then
+            xmg_error "unbound 安装失败，可先更新软件源后重试"
+            return 1
+        fi
+    fi
+
+    local conf="${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}"
+    local snapshot_conf="/tmp/xmg-unbound-snap.$$.bak"
+    local snapshot_resolv="/tmp/xmg-resolv-snap.$$.bak"
+    local had_conf=0
+
+    if [ -f "$conf" ]; then
+        cp -a "$conf" "$snapshot_conf" 2>/dev/null && had_conf=1
+    fi
+    [ -e /etc/resolv.conf ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null || true
+
+    # 单栈自适应：纯 IPv4 主机不写 ::1 上游，避免解析器指向不可用地址
+    local resolv_v6=""
+    if xmg_tune_has_ipv6; then
+        resolv_v6="nameserver ::1"
+    fi
+
+    mkdir -p "$(dirname "$conf")"
+    xmg_tune_unbound_write_conf "$conf" "$dns1" "$dns2" "$name1" "$name2" || return 1
+
+    # 指向本机 unbound
+    if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+    fi
+    cat > /etc/resolv.conf <<EOF
+# XMG: 由 unbound 接管（127.0.0.1）
+nameserver 127.0.0.1
+${resolv_v6}
+options timeout:2 attempts:2
+EOF
+    chmod 644 /etc/resolv.conf 2>/dev/null || true
+
+    xmg_svc_enable unbound >/dev/null 2>&1 || true
+    if ! xmg_svc_restart unbound >/dev/null 2>&1; then
+        xmg_error "unbound 启动失败，最近日志:"
+        xmg_svc_logs unbound 15 2>/dev/null || true
+    fi
+
+    # 等 unbound 绑定 53 端口
+    local i=0
+    for ((i=1; i<=10; i++)); do
+        if xmg_tune_dns_verify; then
+            rm -f "$snapshot_conf" "$snapshot_resolv"
+            xmg_info "DoT 已通过 unbound 启用（forward-tls-upstream，853 加密转发）"
+            xmg_info "配置文件: $conf"
+            return 0
+        fi
+        sleep 1
+    done
+
+    xmg_error "DoT 应用后解析验证失败（853 受阻或证书校验失败）！"
+    xmg_warn "正在自动回滚以恢复网络..."
+    if [ "$had_conf" -eq 1 ]; then
+        cp -a "$snapshot_conf" "$conf" 2>/dev/null || true
+    else
+        rm -f "$conf" 2>/dev/null || true
+    fi
+    if [ -e "$snapshot_resolv" ]; then
+        rm -f /etc/resolv.conf
+        cp -a "$snapshot_resolv" /etc/resolv.conf 2>/dev/null || true
+    fi
+    xmg_svc_stop unbound >/dev/null 2>&1 || true
+    xmg_svc_disable unbound >/dev/null 2>&1 || true
+    rm -f "$snapshot_conf" "$snapshot_resolv"
+    xmg_info "已自动撤销 DoT 配置，DNS 已恢复原状"
+    return 1
+}
+
+xmg_tune_dns_dot() {
+    xmg_require_root
+
+    # 非 systemd（Alpine/OpenRC）走 unbound 后端，语义同样是「DoT 优先，失败回退明文」
+    if ! xmg_init_is_systemd; then
+        xmg_tune_dns_dot_openrc "$@"
+        return $?
+    fi
+
+    if ! xmg_tune_dot_supported; then
+        xmg_error "systemd 版本过低（$(systemctl --version 2>/dev/null | head -1)），DoT 需要 >= 243"
+        return 1
+    fi
+
+    local pair=""
+    local dns1=""
+    local dns2=""
+
+    pair="$(xmg_tune_dot_prepare)" || {
+        xmg_info "已取消"
+        return 0
+    }
+
+    # shellcheck disable=SC2086
+    set -- $pair
+    dns1="$1"
+    dns2="$2"
 
     echo
     echo "将启用 DoT (opportunistic): $dns1 / $dns2"
@@ -1130,7 +1420,7 @@ xmg_tune_dns_dot() {
     fi
 
     # resolved 未运行时先迁移启用（内置回滚）
-    if ! systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    if ! xmg_svc_is_active systemd-resolved; then
         if ! xmg_tune_dns_enable_resolved "$dns1" "$dns2"; then
             return 1
         fi
@@ -1157,11 +1447,91 @@ xmg_tune_detect_ip_timezone() {
     echo ""
 }
 
+# OpenRC（Alpine）时区与时间同步：无 timedatectl，直接用 /etc/timezone + /etc/localtime
+xmg_tune_time_sync_openrc() {
+    local current_tz="unknown"
+    if [ -r /etc/timezone ]; then
+        current_tz="$(tr -d '\r\n' < /etc/timezone 2>/dev/null || echo unknown)"
+    fi
+    echo "当前系统时区: $current_tz"
+
+    xmg_info "正在探测 VPS 所在公网 IP 的地理时区..."
+    local detected_tz=""
+    detected_tz="$(xmg_tune_detect_ip_timezone)"
+    [ -n "$detected_tz" ] && xmg_info "探测到 VPS 出口 IP 所在地时区: $detected_tz"
+
+    echo
+    echo "请选择时区配置方式:"
+    if [ -n "$detected_tz" ]; then
+        echo "  1. 设置为 VPS 所在地时区 ($detected_tz) [推荐]"
+    else
+        echo "  1. 设置为 UTC 协调世界时 (国际标准)"
+    fi
+    echo "  2. 设置为 UTC 协调世界时 (国际标准)"
+    echo "  3. 设置为北京时间 (Asia/Shanghai, UTC+8)"
+    echo "  4. 自定义时区 (如 America/New_York, Asia/Tokyo 等)"
+    echo "  0. 保持当前时区不变"
+    printf "请选择 [1]: "
+
+    local choice=""
+    read -r choice || return 0
+    [ -z "$choice" ] && choice="1"
+
+    local new_tz=""
+    case "$choice" in
+        1) [ -n "$detected_tz" ] && new_tz="$detected_tz" || new_tz="UTC" ;;
+        2) new_tz="UTC" ;;
+        3) new_tz="Asia/Shanghai" ;;
+        4)
+            printf "请输入目标时区名称: "
+            read -r new_tz || return 0
+            ;;
+        0) xmg_info "保持时区不变" ;;
+        *)
+            xmg_warn "无效选择"
+            return 1
+            ;;
+    esac
+
+    if [ -n "$new_tz" ]; then
+        if [ ! -f "/usr/share/zoneinfo/$new_tz" ]; then
+            xmg_error "无效时区: $new_tz（/usr/share/zoneinfo 下不存在）"
+            return 1
+        fi
+        printf '%s\n' "$new_tz" > /etc/timezone
+        ln -sf "/usr/share/zoneinfo/$new_tz" /etc/localtime
+        xmg_info "时区已更新为: $new_tz"
+    fi
+
+    # 时间同步：chrony 优先，其次 busybox ntpd
+    if xmg_cmd_exists chronyc || xmg_cmd_exists chronyd; then
+        xmg_svc_enable chronyd >/dev/null 2>&1 || true
+        xmg_svc_restart chronyd >/dev/null 2>&1 && xmg_info "chronyd 已启动" || xmg_warn "chronyd 启动失败"
+    else
+        xmg_info "未检测到 chrony，尝试安装: $(xmg_pkg_hint chrony)"
+        if xmg_pkg_install chrony >/dev/null 2>&1; then
+            xmg_svc_enable chronyd >/dev/null 2>&1 || true
+            xmg_svc_restart chronyd >/dev/null 2>&1 && xmg_info "chronyd 已安装并启动" || \
+                xmg_warn "chronyd 启动失败，可手动: rc-service chronyd start"
+        elif [ -x /etc/init.d/ntpd ]; then
+            xmg_svc_enable ntpd >/dev/null 2>&1 || true
+            xmg_svc_restart ntpd >/dev/null 2>&1 && xmg_info "已回退到 busybox ntpd" || \
+                xmg_warn "ntpd 启动失败"
+        else
+            xmg_warn "未找到可用的时间同步服务，请手动安装 chrony"
+        fi
+    fi
+
+    echo
+    date 2>/dev/null || true
+}
+
 xmg_tune_time_sync() {
     xmg_require_root
 
     if ! xmg_cmd_exists timedatectl; then
-        xmg_die "未检测到 timedatectl，需要 systemd 环境"
+        xmg_tune_time_sync_openrc
+        return $?
     fi
 
     local current_tz=""
@@ -1415,12 +1785,15 @@ xmg_tune_swap_create() {
     fi
 
     # dd 而非 fallocate：fallocate 产生的文件可能含 hole，swapon 会拒绝
-    dd if=/dev/zero of="$XMG_TUNE_SWAPFILE" bs=1M count="$mb" status=none \
-        || {
+    # BusyBox dd（Alpine）老版本不支持 status=none，失败后静默重试一次
+    if ! dd if=/dev/zero of="$XMG_TUNE_SWAPFILE" bs=1M count="$mb" status=none 2>/dev/null; then
+        rm -f "$XMG_TUNE_SWAPFILE"
+        if ! dd if=/dev/zero of="$XMG_TUNE_SWAPFILE" bs=1M count="$mb" >/dev/null 2>&1; then
             rm -f "$XMG_TUNE_SWAPFILE"
             xmg_warn "写入 swapfile 失败（磁盘空间不足）"
             return 1
-        }
+        fi
+    fi
 
     chmod 600 "$XMG_TUNE_SWAPFILE"
     mkswap "$XMG_TUNE_SWAPFILE" >/dev/null || {
@@ -1521,6 +1894,7 @@ xmg_tune_status() {
     profile="$(xmg_tune_mem_profile "$mem_mb")"
 
     echo "===== 主机档位 ====="
+    printf '系统       : %s\n' "$(xmg_os_summary 2>/dev/null || echo unknown)"
     printf '内存       : %sMB（调优档位: %s）\n' "$mem_mb" "$profile"
     echo
 
@@ -1554,6 +1928,10 @@ xmg_tune_status() {
             echo "XMG drop-in: $XMG_TUNE_RESOLVED_CONF"
             grep -E 'DNSOverTLS|^DNS=' "$XMG_TUNE_RESOLVED_CONF" || true
         fi
+    elif [ -f "${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}" ] && xmg_cmd_exists unbound && xmg_svc_is_active unbound; then
+        echo "管理模式: unbound (DoT 本地转发, 127.0.0.1:53)"
+        echo "配置文件: ${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}"
+        grep -E 'forward-addr|forward-tls-upstream' "${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}" 2>/dev/null || true
     else
         echo "管理模式: /etc/resolv.conf"
     fi
@@ -1563,6 +1941,10 @@ xmg_tune_status() {
     echo "===== 时间同步 ====="
     if xmg_cmd_exists timedatectl; then
         timedatectl 2>/dev/null | sed -n '1,6p' || true
+    elif xmg_init_is_openrc; then
+        printf '时区 : %s\n' "$( [ -r /etc/timezone ] && tr -d '\r\n' < /etc/timezone || echo unknown )"
+        printf 'chronyd : %s\n' "$( xmg_svc_is_active chronyd && echo running || echo stopped )"
+        printf 'ntpd    : %s\n' "$( xmg_svc_is_active ntpd && echo running || echo stopped )"
     else
         echo "timedatectl 不可用"
     fi

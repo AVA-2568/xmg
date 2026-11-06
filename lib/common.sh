@@ -27,6 +27,7 @@ XMG_COMMON_SH_LOADED=1
 # XMG_HOME 是 XMG 的统一根目录。
 # 所有 XMG 管理的文件默认集中放在 /opt/xmg。
 XMG_HOME="${XMG_HOME:-/opt/xmg}"
+
 # 主程序与模块目录
 XMG_BIN_DIR="${XMG_BIN_DIR:-$XMG_HOME/bin}"
 XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
@@ -44,6 +45,28 @@ export XMG_BIN_DIR XMG_LIB_DIR
 export XMG_ETC_DIR XMG_RUN_DIR XMG_LOG_DIR XMG_BACKUP_DIR
 export XMG_XRAY_DIR
 export XMG_XRAY_CONFIG
+
+# ===== 发行版 / init / 包管理器抽象层 =====
+# os.sh 是 common.sh 的强依赖：所有包与服务操作都应经由它转发，
+# 以保证 Debian 系 (systemd+apt) 与 Alpine (OpenRC+apk) 行为一致。
+if [ "${XMG_OS_SH_LOADED:-0}" != "1" ]; then
+    for _xmg_os_cand in \
+        "$XMG_LIB_DIR/os.sh" \
+        "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"
+    do
+        if [ -r "$_xmg_os_cand" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_cand"
+            break
+        fi
+    done
+    unset _xmg_os_cand
+fi
+
+if [ "${XMG_OS_SH_LOADED:-0}" != "1" ]; then
+    echo "[ERROR] 缺少核心模块 os.sh（$XMG_LIB_DIR/os.sh），请重新执行 install.sh 完成升级" >&2
+    return 1 2>/dev/null || exit 1
+fi
 
 # 颜色策略：
 #   auto   - 仅在 TTY 中启用颜色
@@ -196,6 +219,11 @@ _xmg_uniq_pids() {
 xmg_apt_find_lock_pids() {
     local pids=""
 
+    # 非 apt 系（Alpine 等）不存在 dpkg 锁，直接返回空，避免无意义的 /proc 全表扫描
+    if ! command -v dpkg >/dev/null 2>&1 && ! command -v apt-get >/dev/null 2>&1; then
+        return 0
+    fi
+
     # 方法 1: fuser
     if command -v fuser >/dev/null 2>&1; then
         pids="$(fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>/dev/null || true)"
@@ -251,6 +279,11 @@ xmg_apt_find_lock_pids() {
 # 安全解除僵死 apt 锁并自动修复 dpkg 数据库状态
 xmg_apt_unlock_and_repair() {
     xmg_require_root
+
+    if ! command -v dpkg >/dev/null 2>&1; then
+        xmg_warn "当前系统未使用 dpkg/apt（$(xmg_os_summary 2>/dev/null || echo unknown)），无需解除 apt 锁"
+        return 0
+    fi
 
     xmg_info "正在排查并解除 apt / dpkg 锁占用..."
     local pids=""
@@ -336,21 +369,79 @@ xmg_apt_wait_lock() {
     xmg_apt_unlock_and_repair
 }
 
-# 包装安全的 apt-get 安装，自动带锁等待、配置合并保护和锁超时
+# 包装安全的包安装，自动带锁等待、配置合并保护和锁超时
+# 统一走 xmg_pkg_install，非 Debian 系自动切换到 apk/dnf/pacman
 xmg_apt_install() {
     xmg_require_root
     xmg_apt_wait_lock 15 || true
 
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get -o DPkg::Lock::Timeout=60 \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold" \
-            install -y "$@"
+    xmg_pkg_install "$@"
 }
 
+# ==================================================================
+# 服务控制兼容层
+# ==================================================================
+# 历史代码大量调用 xmg_systemctl，此处保留函数名不变，
+# 内部按实际 init 系统（systemd / OpenRC / SysV）转发：
+#   - systemd 环境行为与改造前完全一致
+#   - OpenRC 环境映射到 rc-service / rc-update
 xmg_systemctl() {
-    local action="$1"
-    local service="$2"
+    local action="${1:-}"
+    local service="${2:-}"
+
+    if [ -z "$action" ]; then
+        xmg_error "xmg_systemctl 缺少操作参数"
+        return 2
+    fi
+
+    # daemon-reload 不针对具体服务
+    if [ "$action" = "daemon-reload" ]; then
+        xmg_svc_reload_manager
+        return 0
+    fi
+
+    if [ -z "$service" ]; then
+        xmg_error "xmg_systemctl 缺少服务名"
+        return 2
+    fi
+
+    xmg_os_detect
+
+    # 非 systemd：交给服务抽象层
+    if ! xmg_init_use_systemd_units; then
+        case "$action" in
+            start|stop|restart|reload)
+                xmg_require_root
+                if ! xmg_svc_do "$action" "$service"; then
+                    xmg_error "服务操作失败: $action $service (init=$XMG_INIT_SYSTEM)"
+                    xmg_svc_logs "$service" 15 2>/dev/null | sed 's/^/  /' >&2 || true
+                    return 1
+                fi
+                return 0
+                ;;
+            enable|disable)
+                xmg_require_root
+                xmg_svc_do "$action" "$service" || return 1
+                return 0
+                ;;
+            status)
+                xmg_svc_status "$service" || return $?
+                return 0
+                ;;
+            is-active)
+                xmg_svc_is_active "$service"
+                return $?
+                ;;
+            is-enabled)
+                xmg_svc_is_enabled "$service"
+                return $?
+                ;;
+            *)
+                xmg_error "当前 init 系统 ($XMG_INIT_SYSTEM) 不支持 systemctl 操作: $action"
+                return 2
+                ;;
+        esac
+    fi
 
     if ! xmg_cmd_exists systemctl; then
         xmg_die "当前系统未发现 systemctl，可能不是 systemd 系统"
@@ -370,6 +461,9 @@ xmg_systemctl() {
             ;;
         status|is-active|is-enabled)
             systemctl "$action" "$service" || return $?
+            ;;
+        daemon-reload)
+            systemctl daemon-reload >/dev/null 2>&1 || true
             ;;
         *)
             xmg_die "不支持的 systemctl 操作: $action"

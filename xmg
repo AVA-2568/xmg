@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-2.0.2}"
+XMG_VERSION="${XMG_VERSION:-2.1.0}"
 
 xmg_usage() {
     cat <<EOF
@@ -42,13 +42,14 @@ XMG $XMG_VERSION
   xmg core menu            内核管理菜单
   xmg warp [apply|auto|enable|disable|status|optimize|test|export|import|menu] WARP 原生出站管理
   xmg tune [bbr|net|dns|dot|swap|status|menu] 系统与内核网络调优
-  xmg firewall [status|allow|enable|disable|menu] UFW 防火墙端口管理
+  xmg firewall [status|allow|enable|disable|reload|flush|menu] 防火墙端口管理
   xmg ssh [status|port|disable-pwd|enable-pwd|fail2ban|menu] SSH 安全与防爆破
   xmg xray [start|stop|restart|reload|status|validate|menu] Xray 服务生命周期与配置校验
-  xmg detect [virt|mem|net|status] 环境能力与容器自省探测
+  xmg detect [virt|mem|net|os|status] 环境能力与容器自省探测
   xmg update [check|run|rollback|menu] XMG 系统更新与回滚
   xmg uninstall [run|menu] [--yes|-y] 卸载 XMG
   xmg system          查看系统状态概况摘要
+  xmg os              查看发行版 / init / 包管理器识别结果
   xmg version         显示版本
   xmg help            显示帮助
 
@@ -119,6 +120,7 @@ xmg_require_core_file() {
 }
 
 # 入口层只检查自己直接依赖的核心模块
+# （os.sh 由 common.sh 内部按需加载，属于其依赖，不在入口层校验）
 xmg_require_core_file common.sh
 xmg_require_core_file system.sh
 xmg_require_core_file menu.sh
@@ -238,6 +240,8 @@ xmg_main() {
                     ;;
                 enable)  shift; xmg_firewall_enable "$@" ;;
                 disable) shift; xmg_firewall_disable "$@" ;;
+                reload)  shift; xmg_firewall_reload "$@" ;;
+                flush)   shift; xmg_firewall_flush "$@" ;;
                 menu)    shift || true; ( set +e; xmg_firewall_menu "$@" ) ;;
                 *)       xmg_error "未知的 firewall 子命令: $1"; exit 2 ;;
             esac
@@ -283,6 +287,14 @@ xmg_main() {
                     xmg_detect_network "$@"
                     echo "IPv4=$XMG_NET_IPV4 IPv6=$XMG_NET_IPV6 NAT=$XMG_NET_NAT NAT64=$XMG_NET_NAT64"
                     ;;
+                os)
+                    shift
+                    xmg_os_detect force
+                    echo "发行版: $XMG_OS_PRETTY"
+                    echo "家族: $XMG_OS_FAMILY (id=$XMG_OS_ID ver=${XMG_OS_VER:-unknown})"
+                    echo "init: $XMG_INIT_SYSTEM"
+                    echo "包管理器: $(xmg_pkg_mgr)"
+                    ;;
                 status)
                     shift
                     if declare -F xmg_detect_status >/dev/null 2>&1; then
@@ -295,6 +307,7 @@ xmg_main() {
                             _r="restricted"
                         fi
                         xmg_detect_network
+                        echo "系统: $(xmg_os_summary)"
                         echo "虚拟化: $_v"
                         echo "内存分档: $_m"
                         echo "容器特权: $_r"
@@ -329,6 +342,20 @@ xmg_main() {
             ;;
         system)
             xmg_system_refresh_all force && xmg_system_print_summary
+            ;;
+        os)
+            xmg_os_detect force
+            echo "发行版 : $XMG_OS_PRETTY"
+            echo "ID     : $XMG_OS_ID (family=$XMG_OS_FAMILY, ver=${XMG_OS_VER:-unknown})"
+            echo "Init   : $XMG_INIT_SYSTEM"
+            echo "包管理 : $(xmg_pkg_mgr)"
+            if command -v ufw >/dev/null 2>&1; then
+                echo "防火墙 : ufw"
+            elif command -v iptables >/dev/null 2>&1; then
+                echo "防火墙 : iptables"
+            else
+                echo "防火墙 : 未检测到 ufw / iptables"
+            fi
             ;;
         doctor)
             xmg_require_core_file doctor.sh

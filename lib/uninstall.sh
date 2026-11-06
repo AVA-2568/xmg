@@ -19,6 +19,18 @@ if [ "${XMG_UNINSTALL_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_UNINSTALL_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # ===== 默认配置 =====
 XMG_UNINSTALL_KEEP_BACKUPS="${XMG_UNINSTALL_KEEP_BACKUPS:-0}"
 
@@ -77,17 +89,20 @@ xmg_uninstall_kill_residues() {
 xmg_uninstall_stop_services() {
     xmg_info "停止 XMG 托管的服务..."
 
-    if command -v systemctl &>/dev/null; then
-        if systemctl is-active --quiet xmg-warp 2>/dev/null || systemctl is-active --quiet xmg-warp.service 2>/dev/null; then
-            systemctl stop xmg-warp.service 2>/dev/null || true
+    if xmg_svc_supported; then
+        if xmg_svc_is_active xmg-warp; then
+            xmg_svc_stop xmg-warp >/dev/null 2>&1 || true
         fi
-        if systemctl is-enabled --quiet xmg-warp 2>/dev/null || systemctl is-enabled --quiet xmg-warp.service 2>/dev/null; then
-            systemctl disable xmg-warp.service 2>/dev/null || true
+        xmg_svc_disable xmg-warp >/dev/null 2>&1 || true
+
+        if xmg_svc_is_active "$XMG_XRAY_SERVICE"; then
+            xmg_info "正在停止 Xray 服务..."
+            xmg_svc_stop "$XMG_XRAY_SERVICE" 2>/dev/null || true
         fi
 
-        if systemctl is-active --quiet "$XMG_XRAY_SERVICE" 2>/dev/null; then
-            xmg_info "正在停止 Xray 服务..."
-            systemctl stop "$XMG_XRAY_SERVICE" 2>/dev/null || true
+        if xmg_svc_is_active xmg-firewall; then
+            xmg_svc_stop xmg-firewall >/dev/null 2>&1 || true
+            xmg_svc_disable xmg-firewall >/dev/null 2>&1 || true
         fi
     fi
 
@@ -146,6 +161,55 @@ xmg_uninstall_cleanup_systemd_artifacts() {
     fi
 }
 
+# OpenRC（Alpine）服务脚本清理：仅删除 XMG 生成的那几个
+# 清理 XMG iptables 残留链
+# 卸载后若仍把带 DROP 的 XMG-IN 链挂在 INPUT 上，会留下看不见的防火墙规则，
+# 所以这里不依赖 xmg-firewall 服务是否在运行，直接摘链并销毁。
+xmg_uninstall_cleanup_iptables() {
+    local fam="" bin=""
+    local cleaned=0
+
+    for fam in 4 6; do
+        if [ "$fam" = "6" ]; then
+            bin="ip6tables"
+        else
+            bin="iptables"
+        fi
+        command -v "$bin" >/dev/null 2>&1 || continue
+
+        # 链存在才清理，避免无谓的报错与误导性提示
+        if "$bin" -S XMG-IN >/dev/null 2>&1; then
+            cleaned=1
+        fi
+
+        "$bin" -D INPUT -j XMG-IN 2>/dev/null || true
+        "$bin" -F XMG-IN 2>/dev/null || true
+        "$bin" -X XMG-IN 2>/dev/null || true
+    done
+
+    [ "$cleaned" -eq 1 ] && xmg_info "已清理 iptables 残留链 XMG-IN"
+    return 0
+}
+
+xmg_uninstall_cleanup_openrc_artifacts() {
+    local initd="${XMG_INITD_DIR:-/etc/init.d}"
+    local f=""
+
+    for f in "$initd/xmg-firewall" "$initd/xmg-warp"; do
+        if [ -e "$f" ]; then
+            rm -f "$f" 2>/dev/null && xmg_info "已清理 OpenRC 服务脚本: $f" || true
+        fi
+    done
+
+    # xray 的 init 脚本仅在确认为 XMG 生成时才删除（含 XMG 标记）
+    if [ -f "$initd/xray" ] && grep -q "XMG 管理的 Xray OpenRC 服务脚本" "$initd/xray" 2>/dev/null; then
+        xmg_svc_disable xray >/dev/null 2>&1 || true
+        rm -f "$initd/xray" 2>/dev/null && xmg_info "已清理 OpenRC 服务脚本: $initd/xray" || true
+    fi
+
+    rm -f /run/xray.pid 2>/dev/null || true
+}
+
 # ===== CLI 入口与卸载主流程 =====
 xmg_uninstall_cli() {
     local auto_yes=0
@@ -200,6 +264,10 @@ xmg_uninstall_cli() {
 
     # 4. 清理 drop-in 与 warp 专属服务单元
     xmg_uninstall_cleanup_systemd_artifacts
+
+    # 5. 清理 OpenRC（Alpine）侧由 XMG 生成的服务脚本与 iptables 残留链
+    xmg_uninstall_cleanup_openrc_artifacts
+    xmg_uninstall_cleanup_iptables
 
     xmg_info "XMG 卸载完成"
     return 0

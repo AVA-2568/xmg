@@ -23,6 +23,18 @@ if [ "${XMG_DOCTOR_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_DOCTOR_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # XMG_MENU_LABEL: 系统健康体检
 
 # ===== 依赖安全引入 =====
@@ -300,6 +312,19 @@ _xmg_doctor_get_gomemlimit() {
             fi
         done < "$dropin"
     fi
+
+    # OpenRC（Alpine）：内存抑制写在 XMG 生成的 init 脚本里
+    local openrc_script="${XMG_INITD_DIR:-/etc/init.d}/${XMG_XRAY_SERVICE:-xray}"
+    if [ -r "$openrc_script" ]; then
+        local oline=""
+        while IFS= read -r oline || [ -n "$oline" ]; do
+            if [[ "$oline" =~ ^export[[:space:]]+GOMEMLIMIT=([^[:space:]]+) ]]; then
+                printf '%s' "${BASH_REMATCH[1]}"
+                return 0
+            fi
+        done < "$openrc_script"
+    fi
+
     printf '未配置'
 }
 
@@ -500,6 +525,13 @@ _xmg_doctor_get_firewall_status() {
         ufw_out="$(ufw status 2>/dev/null || true)"
         if [[ "$ufw_out" == *"Status: active"* ]]; then
             printf 'ufw (active)'
+            return 0
+        fi
+    fi
+    # XMG iptables 后端（Alpine）：XMG-IN 链挂到 INPUT 才算真正生效
+    if command -v iptables >/dev/null 2>&1; then
+        if iptables -S INPUT 2>/dev/null | grep -q -- '-j XMG-IN'; then
+            printf 'xmg-iptables (active)'
             return 0
         fi
     fi
@@ -731,6 +763,14 @@ xmg_doctor_run() {
         "$c_cyan" "$mem_prof" "$c_reset" \
         "$c_cyan" "$container_status" "$c_reset" \
         "$c_cyan" "$render_mode" "$c_reset"
+
+    # [系统] 发行版 / init / 包管理器（Alpine 与 Debian 系的差异在此一览）
+    xmg_os_detect
+    printf '%s[系统]%s 发行版: %s%s%s | Init: %s%s%s | 包管理: %s%s%s\n' \
+        "$c_bold" "$c_reset" \
+        "$c_cyan" "${XMG_OS_PRETTY:-unknown}" "$c_reset" \
+        "$c_cyan" "${XMG_INIT_SYSTEM:-unknown}" "$c_reset" \
+        "$c_cyan" "$(xmg_pkg_mgr)" "$c_reset"
 
     # [网络]
     printf '%s[网络]%s IPv4: %s%s%s | IPv6: %s%s%s | NAT: %s%s%s | NAT64: %s%s%s\n' \

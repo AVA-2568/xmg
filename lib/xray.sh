@@ -23,6 +23,23 @@ XMG_XRAY_SH_LOADED=1
 XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
 XMG_XRAY_INSTALL_URL="${XMG_XRAY_INSTALL_URL:-https://github.com/XTLS/Xray-install/raw/main/install-release.sh}"
 
+# OpenRC（Alpine）服务脚本路径
+XMG_INITD_DIR="${XMG_INITD_DIR:-/etc/init.d}"
+XMG_XRAY_OPENRC_SCRIPT="${XMG_XRAY_OPENRC_SCRIPT:-$XMG_INITD_DIR/xray}"
+
+# 依赖 os.sh（发行版 / init 抽象）。独立加载本模块时自动补齐。
+if [ "${XMG_OS_SH_LOADED:-0}" != "1" ]; then
+    _XMG_XRAY_OSDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _xmg_xray_os in "$_XMG_XRAY_OSDIR/os.sh" "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh"; do
+        if [ -r "$_xmg_xray_os" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_xray_os"
+            break
+        fi
+    done
+    unset _XMG_XRAY_OSDIR _xmg_xray_os
+fi
+
 # ===== 依赖 common.sh 的路径变量 =====
 if [ -z "${XMG_HOME:-}" ]; then
     XMG_HOME="${XMG_HOME:-/opt/xmg}"
@@ -66,7 +83,13 @@ xmg_xray_get_bin() {
 }
 
 xmg_xray_is_systemd_available() {
-    xmg_cmd_exists systemctl
+    xmg_init_is_systemd
+}
+
+# 当前 init 后端：systemd | openrc | sysvinit | none
+xmg_xray_init_backend() {
+    xmg_os_detect
+    printf '%s\n' "$XMG_INIT_SYSTEM"
 }
 
 xmg_xray_print_version() {
@@ -104,9 +127,123 @@ ExecStart=$xray_bin run -config $cfg
 EOF
 }
 
+# ===== OpenRC (Alpine) 服务脚本 =====
+# 与 systemd drop-in 等价：同样的 GOMEMLIMIT/GODEBUG/GOMAXPROCS 内存抑制，
+# 同样的 nofile 上限，同样的崩溃自动拉起。
+xmg_xray_generate_openrc_content() {
+    local cfg="${1:-${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}}"
+    local xray_bin="${2:-}"
+
+    [ -n "$xray_bin" ] || xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+    [ -n "$xray_bin" ] || xray_bin="/usr/local/bin/xray"
+
+    # 新版 OpenRC 才有 supervise-daemon；缺失时退回 start-stop-daemon 后台模式
+    local supervisor_block=""
+    if [ -x /sbin/supervise-daemon ] || command -v supervise-daemon >/dev/null 2>&1; then
+        supervisor_block='supervisor=supervise-daemon
+respawn_delay=5
+respawn_max=0'
+    else
+        supervisor_block='command_background=true'
+    fi
+
+    cat <<'OPENRC_EOF'
+#!/sbin/openrc-run
+# XMG 管理的 Xray OpenRC 服务脚本
+# 由 xmg 自动生成，请勿手工编辑；重新执行 xmg xray 相关操作会覆盖本文件
+description="Xray Service"
+
+# Go 运行时内存抑制：与 systemd 环境下的 drop-in 保持一致
+export GOMEMLIMIT=100MiB
+export GODEBUG=madvdontneed=1
+export GOMAXPROCS=1
+
+OPENRC_EOF
+
+    printf 'command="%s"\n' "$xray_bin"
+    printf 'command_args="run -config %s"\n' "$cfg"
+    printf '%s\n' 'command_user="root"'
+    printf '%s\n' 'pidfile="/run/xray.pid"'
+    printf '%s\n' 'rc_ulimit="-n 1048576"'
+    printf '%s\n\n' "$supervisor_block"
+
+    cat <<'OPENRC_EOF'
+depend() {
+    need net
+    after firewall
+}
+OPENRC_EOF
+
+    # 日志目录权限（Xray 自身写 /opt/xmg/log/xray，目录必须存在且可写）
+    local log_dir="${XMG_XRAY_LOG_DIR:-/opt/xmg/log/xray}"
+    printf '\nstart_pre() {\n    if [ -d "%s" ]; then\n        chmod 0750 "%s" 2>/dev/null || true\n    fi\n}\n' \
+        "$log_dir" "$log_dir"
+}
+
+# 安装（或覆盖）OpenRC 服务脚本并设为开机自启
+xmg_xray_install_openrc_service() {
+    local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    local xray_bin=""
+    xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+
+    if [ -z "$xray_bin" ] && [ ! -x /usr/local/bin/xray ]; then
+        xmg_warn "未找到 Xray 可执行程序，跳过 OpenRC 服务安装"
+        return 1
+    fi
+
+    mkdir -p "$XMG_INITD_DIR" || return 1
+
+    # 非 XMG 生成的同名脚本先备份，避免覆盖发行版/用户自己的服务定义
+    if [ -f "$XMG_XRAY_OPENRC_SCRIPT" ] && \
+       ! grep -q "XMG 管理的 Xray OpenRC 服务脚本" "$XMG_XRAY_OPENRC_SCRIPT" 2>/dev/null; then
+        local bak="${XMG_XRAY_OPENRC_SCRIPT}.xmg-backup.$(date +%Y%m%d_%H%M%S)"
+        cp -a "$XMG_XRAY_OPENRC_SCRIPT" "$bak" 2>/dev/null && \
+            xmg_info "已备份现有 OpenRC 脚本: $bak" || true
+    fi
+
+    xmg_xray_generate_openrc_content "$cfg" "$xray_bin" > "$XMG_XRAY_OPENRC_SCRIPT" || return 1
+    chmod 0755 "$XMG_XRAY_OPENRC_SCRIPT" || return 1
+
+    xmg_info "已生成 OpenRC 服务脚本: $XMG_XRAY_OPENRC_SCRIPT"
+    xmg_svc_enable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 \
+        && xmg_info "Xray 已加入 default 运行级（开机自启）" \
+        || xmg_warn "rc-update add $XMG_XRAY_SERVICE 失败，请手动检查"
+    return 0
+}
+
+# 移除 XMG 管理的 OpenRC 服务脚本
+xmg_xray_remove_openrc_service() {
+    if [ -f "$XMG_XRAY_OPENRC_SCRIPT" ]; then
+        xmg_svc_disable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
+        xmg_svc_stop "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
+        rm -f "$XMG_XRAY_OPENRC_SCRIPT" 2>/dev/null || true
+        xmg_info "已移除 OpenRC 服务脚本: $XMG_XRAY_OPENRC_SCRIPT"
+    fi
+}
+
+# ===== 服务注册统一入口 =====
+# systemd -> drop-in 覆盖；OpenRC -> /etc/init.d/xray
+xmg_xray_patch_systemd_unit() {
+    if ! xmg_init_use_systemd_units; then
+        if xmg_init_is_openrc; then
+            xmg_xray_install_openrc_service
+            return $?
+        fi
+        if xmg_init_is_sysvinit; then
+            xmg_warn "检测到 SysV init 环境，XMG 仅自动生成 systemd 与 OpenRC 服务"
+            xmg_warn "请手动将启动命令写入 /etc/init.d: $(xmg_xray_get_bin 2>/dev/null || echo xray) run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+            return 1
+        fi
+        xmg_warn "未检测到可用的服务管理器，已跳过开机自启配置"
+        return 1
+    fi
+
+    _xmg_xray_patch_systemd_unit_impl
+}
+
 # ===== 自动修改 systemd unit 的 ExecStart =====
 # 确保 Xray 服务启动时读取的是 XMG 统一配置路径，并注入 Go 内存压制与并发限制
-xmg_xray_patch_systemd_unit() {
+_xmg_xray_patch_systemd_unit_impl() {
     local xray_unit=""
     local unit_found=0
     local sys_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
@@ -206,8 +343,17 @@ EOF_UNIT
     return 0
 }
 
-# ===== 移除 XMG drop-in 覆盖（恢复官方 unit 行为）=====
+# ===== 移除 XMG 覆盖（恢复官方行为）=====
 xmg_xray_restore_systemd_unit() {
+    if ! xmg_init_use_systemd_units; then
+        if [ -f "$XMG_XRAY_OPENRC_SCRIPT" ]; then
+            xmg_xray_remove_openrc_service
+            return 0
+        fi
+        xmg_warn "未找到 XMG 管理的服务脚本: $XMG_XRAY_OPENRC_SCRIPT"
+        return 1
+    fi
+
     local sys_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
     local dropin_dir="${sys_dir}/xray.service.d"
     local dropin_file="${dropin_dir}/20-xmg.conf"
@@ -239,9 +385,9 @@ xmg_xray_install_update() {
 
     xmg_xray_patch_systemd_unit
 
-    if xmg_xray_is_systemd_available; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl enable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 && \
+    if xmg_svc_supported; then
+        xmg_svc_reload_manager
+        xmg_svc_enable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 && \
             xmg_info "Xray 已设置为开机自启" || xmg_warn "设置开机自启失败"
     fi
     return 0
@@ -265,9 +411,9 @@ xmg_xray_uninstall() {
     fi
 
     # 停止并禁用服务
-    if xmg_xray_is_systemd_available; then
-        systemctl stop "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
-        systemctl disable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
+    if xmg_svc_supported; then
+        xmg_svc_stop "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
+        xmg_svc_disable "$XMG_XRAY_SERVICE" >/dev/null 2>&1 || true
     fi
 
     # 尝试使用官方卸载脚本（带镜像加速 fallback）
@@ -307,12 +453,18 @@ xmg_xray_uninstall() {
     fi
 
     # 清理 systemd unit 残留
-    if xmg_xray_is_systemd_available; then
+    # 用 use_systemd_units 而非 is_systemd：容器/chroot 里 systemd 未运行，
+    # 但 unit 文件仍然存在，必须一并清掉
+    if xmg_init_use_systemd_units; then
         for path in "/etc/systemd/system/xray.service" "/etc/systemd/system/xray@.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
             rm -f "$path" 2>/dev/null || true
         done
         rm -rf /etc/systemd/system/xray.service.d 2>/dev/null || true
         systemctl daemon-reload >/dev/null 2>&1 || true
+    else
+        # OpenRC 残留清理
+        xmg_xray_remove_openrc_service >/dev/null 2>&1 || true
+        rm -f /run/xray.pid 2>/dev/null || true
     fi
 
     xmg_info "Xray 卸载流程完成 (已彻底清理二进制、服务与配置)"
@@ -373,11 +525,11 @@ xmg_xray_reload() {
 }
 
 xmg_xray_status() {
-    if ! xmg_xray_is_systemd_available; then
-        xmg_warn "systemctl 不存在，无法查看 Xray 状态"
+    if ! xmg_svc_supported; then
+        xmg_warn "未检测到可用的服务管理器（systemd / OpenRC），无法查看 Xray 状态"
         return 1
     fi
-    systemctl status "$XMG_XRAY_SERVICE" --no-pager || true
+    xmg_svc_status "$XMG_XRAY_SERVICE" || true
 }
 
 # ===== 诊断 =====
@@ -392,6 +544,7 @@ xmg_xray_diag() {
     else
         uname -a
     fi
+    echo "xmg 视角: $(xmg_os_summary 2>/dev/null || echo unknown)"
 
     echo
     echo "[当前用户]"
@@ -406,7 +559,7 @@ xmg_xray_diag() {
 
     echo
     echo "[命令检测]"
-    for cmd in xray curl wget systemctl; do
+    for cmd in xray curl wget systemctl rc-service rc-update unzip; do
         if xmg_cmd_exists "$cmd"; then
             echo "$cmd: $(command -v "$cmd")"
         else
@@ -449,30 +602,43 @@ xmg_xray_diag() {
     fi
 
     echo
-    echo "[systemd unit 路径检测]"
-    local unit_found=0
-    for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
-        if [ -f "$path" ]; then
-            echo "存在: $path"
-            echo "  ExecStart: $(grep 'ExecStart=' "$path" | head -1)"
-            unit_found=1
+    echo "[服务注册检测]"
+    if xmg_init_use_systemd_units; then
+        local unit_found=0
+        for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
+            if [ -f "$path" ]; then
+                echo "存在: $path"
+                echo "  ExecStart: $(grep 'ExecStart=' "$path" | head -1)"
+                unit_found=1
+            fi
+        done
+        [ "$unit_found" -eq 0 ] && echo "未找到 systemd unit"
+        if [ -f "${XMG_SYSTEMD_DIR:-/etc/systemd/system}/xray.service.d/20-xmg.conf" ]; then
+            echo "存在 XMG drop-in: ${XMG_SYSTEMD_DIR:-/etc/systemd/system}/xray.service.d/20-xmg.conf"
         fi
-    done
-    [ "$unit_found" -eq 0 ] && echo "未找到 systemd unit"
+    elif xmg_init_is_openrc; then
+        if [ -f "$XMG_XRAY_OPENRC_SCRIPT" ]; then
+            echo "存在: $XMG_XRAY_OPENRC_SCRIPT"
+            grep -E '^(command|command_args|supervisor|rc_ulimit)=' "$XMG_XRAY_OPENRC_SCRIPT" | sed 's/^/  /'
+        else
+            echo "未找到 OpenRC 服务脚本: $XMG_XRAY_OPENRC_SCRIPT"
+        fi
+        echo "运行级: $(rc-update show 2>/dev/null | grep -w "$XMG_XRAY_SERVICE" | head -1 || echo 未注册)"
+    else
+        echo "init 后端: $(xmg_xray_init_backend)"
+    fi
 
     echo
-    echo "[systemd 服务状态]"
-    if xmg_xray_is_systemd_available; then
-        systemctl status "$XMG_XRAY_SERVICE" --no-pager || true
+    echo "[服务状态]"
+    if xmg_svc_supported; then
+        xmg_svc_status "$XMG_XRAY_SERVICE" || true
     else
-        echo "systemctl 不存在"
+        echo "无可用的服务管理器"
     fi
 
     echo
     echo "[最近日志]"
-    if xmg_xray_is_systemd_available; then
-        journalctl -u "$XMG_XRAY_SERVICE" -n 50 --no-pager 2>/dev/null || true
-    fi
+    xmg_svc_logs "$XMG_XRAY_SERVICE" 50 || true
 }
 
 # ===== 菜单 =====

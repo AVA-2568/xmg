@@ -21,6 +21,18 @@ if [ "${XMG_STATE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_STATE_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "state.sh: requires bash" >&2
     return 1 2>/dev/null || exit 1
@@ -836,37 +848,43 @@ xmg_backup_prune() {
 }
 
 # ===== 服务重启生效 =====
-# 测试可注入 XMG_XRAY_RELOAD_TESTCMD 桩替换真实 systemctl（仅 XMG_TEST_MODE=1 时生效，
+# 测试可注入 XMG_XRAY_RELOAD_TESTCMD 桩替换真实服务重启（仅 XMG_TEST_MODE=1 时生效，
 # 与校验桩同理：生产环境即使存在同名变量也不执行任意命令）；
-# 生产无 systemctl 时视为无需重启（返回 0）。
-# 注意：Xray 官方不支持 SIGHUP 平滑重载配置，必须使用 systemctl restart。
+# 生产无可用的服务管理器时视为无需重启（返回 0）。
+# 注意：Xray 官方不支持 SIGHUP 平滑重载配置，必须整进程重启（systemctl / rc-service restart）。
 _xmg_xray_reload() {
     if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -n "${XMG_XRAY_RELOAD_TESTCMD:-}" ]; then
         local -a _reload_cmd=($XMG_XRAY_RELOAD_TESTCMD)
         "${_reload_cmd[@]}" >/dev/null 2>&1
         return $?
     fi
-    if command -v systemctl >/dev/null 2>&1; then
+    if xmg_svc_supported || xmg_init_use_systemd_units; then
         local svc="${XMG_XRAY_SERVICE:-xray}"
-        # 重启前自愈检查：若缺少 unit 文件立即自动生成补齐
+
+        # 非 root 时重启必然失败：直接按失败返回，交由上层执行双回滚，
+        # 不能走 xmg_systemctl 的 require_root 分支（那会 exit 中断事务）
+        if ! xmg_is_root; then
+            xmg_error "重启 $svc 服务需要 root 权限，当前配置未生效"
+            return 1
+        fi
+
+        # 重启前自愈检查：若缺少服务注册文件立即自动生成补齐
         if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
             xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
         fi
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        xmg_svc_reload_manager
 
         local s_err=""
-        if ! s_err="$(systemctl restart "$svc" 2>&1)"; then
+        if ! s_err="$(xmg_systemctl restart "$svc" 2>&1)"; then
             # 若 restart 失败，尝试 start 启动激活
-            if ! systemctl is-active "$svc" >/dev/null 2>&1; then
-                s_err="$(systemctl start "$svc" 2>&1 || echo "$s_err")"
+            if ! xmg_systemctl is-active "$svc" >/dev/null 2>&1; then
+                s_err="$(xmg_systemctl start "$svc" 2>&1 || echo "$s_err")"
             fi
-            if ! systemctl is-active "$svc" >/dev/null 2>&1; then
-                xmg_error "重启 $svc 服务失败 (systemctl restart $svc):"
+            if ! xmg_systemctl is-active "$svc" >/dev/null 2>&1; then
+                xmg_error "重启 $svc 服务失败 (init=$XMG_INIT_SYSTEM):"
                 [ -n "$s_err" ] && printf '%s\n' "$s_err" >&2
-                if command -v journalctl >/dev/null 2>&1; then
-                    xmg_warn "--- $svc 最近 15 行系统日志 ---"
-                    journalctl -u "$svc" -n 15 --no-pager 2>&1 | sed 's/^/  /' >&2 || true
-                fi
+                xmg_warn "--- $svc 最近 15 行系统日志 ---"
+                xmg_svc_logs "$svc" 15 2>&1 | sed 's/^/  /' >&2 || true
                 return 1
             fi
         fi
@@ -1053,8 +1071,8 @@ xmg_state_commit() {
 
     [ "$need_clean_cfg" -eq 1 ] && rm -rf "$(dirname "$new_cfg")"
 
-    # 5.1 自动同步 systemd 配置路径与双重兜底
-    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+    # 5.1 自动同步服务配置路径与双重兜底
+    if xmg_svc_supported; then
         if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
             xmg_core_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
         fi

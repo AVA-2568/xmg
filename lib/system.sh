@@ -22,6 +22,18 @@ if [ "${XMG_SYSTEM_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_SYSTEM_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 XMG_CACHE_TTL="${XMG_CACHE_TTL:-3}"
 XMG_SERVICE_TTL="${XMG_SERVICE_TTL:-5}"
 
@@ -281,12 +293,12 @@ xmg_read_disk_root() {
 xmg_service_active_read() {
     local service="$1"
 
-    if ! xmg_cmd_exists systemctl; then
-        echo "no-systemd"
+    if ! xmg_svc_supported; then
+        echo "no-init"
         return 0
     fi
 
-    if systemctl is-active --quiet "$service" 2>/dev/null; then
+    if xmg_svc_is_active "$service"; then
         echo "running"
     else
         echo "stopped"
@@ -434,6 +446,7 @@ XMG System Summary
 
 Time       : $XMG_STATUS_TIME
 Hostname   : $XMG_STATUS_HOSTNAME
+OS         : $(xmg_os_summary 2>/dev/null || echo unknown)
 Kernel     : $XMG_STATUS_KERNEL
 Uptime     : $XMG_STATUS_UPTIME
 Load       : $XMG_STATUS_LOAD

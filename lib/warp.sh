@@ -25,6 +25,18 @@ if [ "${XMG_WARP_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_WARP_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # XMG_MENU_LABEL: WARP 网络增强
 
 # ===== 默认配置与路径 =====
@@ -1422,23 +1434,24 @@ EOF_GLOBAL_JQ
     fi
 
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
-    if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
-        systemctl stop xmg-warp >/dev/null 2>&1 || true
-        systemctl disable xmg-warp >/dev/null 2>&1 || true
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
+        xmg_svc_stop xmg-warp >/dev/null 2>&1 || true
+        xmg_svc_disable xmg-warp >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xmg-warp.service 2>/dev/null || true
+        rm -f /etc/init.d/xmg-warp 2>/dev/null || true
         rm -f "$XMG_WARP_DIR/wireproxy.conf" "$XMG_WARP_DIR/bin/wireproxy" 2>/dev/null || true
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        xmg_svc_reload_manager
     fi
 
     # 7. 若 Xray 运行中，重载/重启服务
-    if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
-        if systemctl is-active --quiet "$s_name" 2>/dev/null; then
-            if ! systemctl restart "$s_name" >/dev/null 2>&1; then
+        if xmg_svc_is_active "$s_name"; then
+            if ! xmg_svc_restart "$s_name" >/dev/null 2>&1; then
                 xmg_error "重启 $s_name 服务失败，正在自动回滚..."
                 if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
                     cp -f "$bak" "$xray_cfg" 2>/dev/null || true
-                    systemctl restart "$s_name" >/dev/null 2>&1 || true
+                    xmg_svc_restart "$s_name" >/dev/null 2>&1 || true
                 fi
                 return 1
             fi
@@ -1533,10 +1546,10 @@ EOF_DISABLE_JQ
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
 
-        if [ "${XMG_TEST_MODE:-0}" != "1" ] && command -v systemctl >/dev/null 2>&1; then
+        if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
             local s_name="${XMG_XRAY_SERVICE:-xray}"
-            if systemctl is-active --quiet "$s_name" 2>/dev/null; then
-                systemctl restart "$s_name" >/dev/null 2>&1 && xmg_info "已成功重启 $s_name 服务应用变更"
+            if xmg_svc_is_active "$s_name"; then
+                xmg_svc_restart "$s_name" >/dev/null 2>&1 && xmg_info "已成功重启 $s_name 服务应用变更"
             fi
         fi
     fi
@@ -1591,14 +1604,20 @@ xmg_warp_uninstall() {
     fi
 
     # 3. 清理历史遗留 wireproxy 与 wg-quick 服务
-    if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop xmg-warp >/dev/null 2>&1 || true
-        systemctl disable xmg-warp >/dev/null 2>&1 || true
+    if xmg_svc_supported || xmg_init_use_systemd_units; then
+        xmg_svc_stop xmg-warp >/dev/null 2>&1 || true
+        xmg_svc_disable xmg-warp >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xmg-warp.service 2>/dev/null || true
-        systemctl stop wg-quick@warp >/dev/null 2>&1 || true
-        systemctl disable wg-quick@warp >/dev/null 2>&1 || true
+        rm -f /etc/init.d/xmg-warp 2>/dev/null || true
+        if xmg_init_is_systemd; then
+            systemctl stop wg-quick@warp >/dev/null 2>&1 || true
+            systemctl disable wg-quick@warp >/dev/null 2>&1 || true
+        else
+            xmg_svc_stop wg-quick@warp >/dev/null 2>&1 || true
+            xmg_svc_disable wg-quick@warp >/dev/null 2>&1 || true
+        fi
         rm -f /etc/wireguard/warp.conf 2>/dev/null || true
-        systemctl daemon-reload >/dev/null 2>&1 || true
+        xmg_svc_reload_manager
     fi
 
     if [ -n "${XMG_WARP_CONF:-}" ] && [ -f "$XMG_WARP_CONF" ]; then

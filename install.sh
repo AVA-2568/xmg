@@ -25,6 +25,13 @@
 # 必须在 set -o pipefail 前检查是否为 Bash
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "错误: 需要使用 bash 运行 install.sh" >&2
+    if command -v apk >/dev/null 2>&1; then
+        echo "Alpine 环境请先安装 bash 与 curl:" >&2
+        echo "  apk add --no-cache bash curl" >&2
+        echo "  bash install.sh" >&2
+    else
+        echo "示例: sudo bash install.sh" >&2
+    fi
     exit 1
 fi
 
@@ -86,18 +93,16 @@ cmd_exists() {
 ensure_dependencies() {
     local missing=()
     local dep=""
-    for dep in curl jq openssl ca-certificates; do
-        if ! cmd_exists "$dep"; then
-            if [ "$dep" = "ca-certificates" ]; then
-                [ -d /etc/ssl/certs ] || missing+=("$dep")
-            else
-                missing+=("$dep")
-            fi
+    for dep in bash curl jq openssl ca-certificates; do
+        if [ "$dep" = "ca-certificates" ]; then
+            [ -d /etc/ssl/certs ] || missing+=("$dep")
+        elif ! cmd_exists "$dep"; then
+            missing+=("$dep")
         fi
     done
 
     if [ "${#missing[@]}" -eq 0 ]; then
-        green "✓ 系统运行环境已就绪 (curl, jq, openssl, ca-certificates)"
+        green "✓ 系统运行环境已就绪 (bash, curl, jq, openssl, ca-certificates)"
         return 0
     fi
 
@@ -108,7 +113,9 @@ ensure_dependencies() {
         export UCF_FORCE_CONFFOLD=1
         (apt-get update -y -q && apt-get install -y -q "${missing[@]}") >/dev/null 2>&1 || true
     elif cmd_exists apk; then
-        apk add --no-cache "${missing[@]}" >/dev/null 2>&1 || true
+        # Alpine：ca-certificates 由 ca-certificates-bundle 提供，jq 非必需
+        (apk update -q && apk add --no-cache "${missing[@]}") >/dev/null 2>&1 || \
+            apk add --no-cache "${missing[@]}" >/dev/null 2>&1 || true
     elif cmd_exists dnf; then
         dnf install -y -q "${missing[@]}" >/dev/null 2>&1 || true
     elif cmd_exists yum; then
@@ -307,7 +314,21 @@ install_one_file() {
     local dst="$2"
     local mode="$3"
 
-    install -m "$mode" -o root -g root "$src" "$dst" || die "安装失败: $dst"
+    # BusyBox 环境的 install 参数支持不完整，优先用 coreutils 语义，
+    # 失败则退化为 cp + chmod（Alpine 最小系统常见）
+    if command -v install >/dev/null 2>&1; then
+        if install -m "$mode" -o root -g root "$src" "$dst" 2>/dev/null; then
+            return 0
+        fi
+        if install -m "$mode" "$src" "$dst" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    cp -f "$src" "$dst" || die "安装失败: $dst"
+    chmod "$mode" "$dst" 2>/dev/null || die "设置权限失败: $dst"
+    chown root:root "$dst" 2>/dev/null || true
+    return 0
 }
 
 install_command_link() {

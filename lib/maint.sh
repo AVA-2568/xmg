@@ -22,6 +22,18 @@ if [ "${XMG_MAINT_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_MAINT_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # XMG_MENU_LABEL: 系统维护
 
 # ===== 默认配置 =====
@@ -155,6 +167,7 @@ xmg_maint_update() {
 
 # journal 持久化限容，避免小盘被日志吃满
 xmg_maint_journal_limit() {
+    # OpenRC / Alpine 使用 busybox syslogd，不存在 journald 与限容机制
     if ! xmg_cmd_exists journalctl; then
         return 0
     fi
@@ -166,7 +179,7 @@ xmg_maint_journal_limit() {
 SystemMaxUse=$XMG_MAINT_JOURNAL_MAX
 EOF
 
-    systemctl restart systemd-journald >/dev/null 2>&1 || true
+    xmg_svc_restart systemd-journald >/dev/null 2>&1 || true
     xmg_info "journald 已限容 $XMG_MAINT_JOURNAL_MAX: $XMG_MAINT_JOURNALD_CONF"
 }
 
@@ -182,11 +195,13 @@ xmg_maint_clean() {
     echo
 
     if xmg_confirm "确认执行深度磁盘清理? (journal 限容 + 包缓存 + 残留配置 + 旧日志)"; then
-        # 1. journal 限容与压缩
+        # 1. journal 限容与压缩（仅 systemd 有 journald）
         if xmg_cmd_exists journalctl; then
             xmg_info "journal 压缩到 $XMG_MAINT_JOURNAL_MAX..."
             journalctl --vacuum-size="$XMG_MAINT_JOURNAL_MAX" 2>/dev/null | tail -1 || true
             xmg_maint_journal_limit
+        else
+            xmg_info "当前 init 为 $XMG_INIT_SYSTEM，无 journald，跳过日志限容（syslog 建议配合 logrotate）"
         fi
 
         # 2. 包管理器缓存与旧包清理
@@ -249,32 +264,23 @@ xmg_maint_vnstat() {
     xmg_require_root
 
     if ! xmg_cmd_exists vnstat; then
-        xmg_info "尝试安装 vnstat 流量统计工具..."
-        if xmg_cmd_exists apt-get; then
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get -o DPkg::Lock::Timeout=60 install -y vnstat || { xmg_error "vnstat 安装失败，可先执行 apt-get update 后重试"; return 1; }
-        elif xmg_cmd_exists dnf; then
-            dnf install -y epel-release 2>/dev/null || true
-            dnf install -y vnstat || { xmg_error "vnstat 安装失败"; return 1; }
-        elif xmg_cmd_exists yum; then
-            yum install -y epel-release 2>/dev/null || true
-            yum install -y vnstat || { xmg_error "vnstat 安装失败"; return 1; }
-        elif xmg_cmd_exists pacman; then
-            pacman -Sy --noconfirm vnstat || { xmg_error "vnstat 安装失败"; return 1; }
-        elif xmg_cmd_exists apk; then
-            apk add vnstat || { xmg_error "vnstat 安装失败"; return 1; }
-        else
-            xmg_warn "未能识别当前包管理器，请手动安装 vnstat"
+        xmg_info "尝试安装 vnstat 流量统计工具: $(xmg_pkg_hint vnstat)"
+        if [ "$(xmg_pkg_mgr)" = "dnf" ] || [ "$(xmg_pkg_mgr)" = "yum" ]; then
+            xmg_pkg_install epel-release >/dev/null 2>&1 || true
+        fi
+        if ! xmg_pkg_install vnstat; then
+            xmg_error "vnstat 安装失败，可先更新软件源后重试"
             return 1
         fi
         xmg_info "vnstat 安装成功，守护进程已初始化"
     fi
 
-    if xmg_cmd_exists systemctl; then
-        systemctl enable --now vnstat >/dev/null 2>&1 || true
-        if ! systemctl is-active --quiet vnstat 2>/dev/null; then
+    if xmg_svc_supported; then
+        xmg_svc_enable vnstat >/dev/null 2>&1 || true
+        xmg_svc_restart vnstat >/dev/null 2>&1 || true
+        if ! xmg_svc_is_active vnstat; then
             xmg_warn "vnstat 服务未运行，尝试启动..."
-            systemctl start vnstat 2>/dev/null || true
+            xmg_svc_start vnstat >/dev/null 2>&1 || true
         fi
     fi
 
@@ -306,16 +312,29 @@ xmg_maint_process_inspect() {
     echo
 
     echo "== CPU 占用最高 TOP 5 进程 =="
-    ps -eo pid,ppid,user,%cpu,%mem,comm --sort=-%cpu 2>/dev/null | head -n 6 || true
+    if ps -eo pid,ppid,user,%cpu,%mem,comm --sort=-%cpu >/dev/null 2>&1; then
+        ps -eo pid,ppid,user,%cpu,%mem,comm --sort=-%cpu 2>/dev/null | head -n 6 || true
+    else
+        # BusyBox ps（Alpine）不支持 --sort，改用 top 快照
+        top -b -n 1 2>/dev/null | sed -n '1,10p' || true
+    fi
     echo
 
     echo "== 内存占用最高 TOP 5 进程 =="
-    ps -eo pid,ppid,user,%mem,%cpu,comm --sort=-%mem 2>/dev/null | head -n 6 || true
+    if ps -eo pid,ppid,user,%mem,%cpu,comm --sort=-%mem >/dev/null 2>&1; then
+        ps -eo pid,ppid,user,%mem,%cpu,comm --sort=-%mem 2>/dev/null | head -n 6 || true
+    else
+        top -b -n 1 2>/dev/null | sed -n '1,10p' || true
+    fi
     echo
 
     echo "== 僵尸进程 (Zombie) 排查 =="
     local zombies=""
     zombies="$(ps -eo stat,pid,ppid,comm 2>/dev/null | grep -E '^[Zz]' || true)"
+    if [ -z "$zombies" ]; then
+        # BusyBox ps 不支持 -e，默认即全量
+        zombies="$(ps -o stat,pid,ppid,comm 2>/dev/null | grep -E '^[Zz]' || true)"
+    fi
     if [ -n "$zombies" ]; then
         xmg_warn "检测到系统存在僵尸进程:"
         echo "$zombies"
@@ -396,7 +415,7 @@ xmg_maint_menu() {
         echo "4. 磁盘占用概览"
         echo "5. 进程与资源异常排查 (TOP 5 负载 / 僵尸进程)"
         echo "6. 一键释放内存缓存 (drop_caches)"
-        echo "7. 一键解除 apt/dpkg 锁并修复状态 (处理 lock-frontend 死锁卡死)"
+        echo "7. 一键解除 apt/dpkg 锁并修复状态 (Debian 系；Alpine 自动跳过)"
         echo "0. 返回"
         echo
         echo "说明:"

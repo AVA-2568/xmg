@@ -1,4 +1,5 @@
 xmg
+lib/os.sh
 lib/common.sh
 lib/detect.sh
 lib/system.sh

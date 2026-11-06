@@ -166,3 +166,131 @@ curl --socks5-user testuser --socks5 testpass123 --socks5-hostname <公网IP>:<�
 | 内存压制与解耦 | drop-in 注入 `GOMEMLIMIT=100MiB`，防 tmpfs 爆破，保留全部 10 个兼容接口 |
 | 专属调优 (`tune.sh`) | extreme_low 网络缓冲（4MB）、8192 conntrack、容器安全熔断与 Swap 预检 |
 | 自检诊断工具 (`doctor.sh`) | `xmg doctor` 结构化输出终端自检卡片，支持 CLI 与菜单 |
+
+---
+
+## Alpine / OpenRC 专项验收（需真实 Alpine 环境）
+
+以下项**无法在 Debian 开发机验证**，需在 Alpine 3.16+（`lxc`/KVM 均可）上逐条确认。建议用官方镜像跑一次：`docker run -it --rm --privileged alpine:3.20 sh`（`--privileged` 才能测 iptables/sysctl）。
+
+**A1. 基础识别**
+
+```bash
+apk add --no-cache bash curl
+bash install.sh
+xmg os
+```
+
+期望：`family=alpine`、`Init: openrc`、`包管理: apk`；`xmg doctor` 的 `[系统]` 行同样体现这三点。
+
+**A2. 内核安装与服务注册**
+
+```bash
+xmg core install
+rc-service xray status
+rc-update show | grep xray
+grep -E 'GOMEMLIMIT|rc_ulimit|command=' /etc/init.d/xray
+```
+
+期望：二进制落 `/usr/local/bin/xray`；`/etc/init.d/xray` 存在且含 `GOMEMLIMIT=100MiB`、`rc_ulimit`；`xray` 已进 `default` 运行级；`xmg xray restart` 走 `rc-service`。
+
+**A3. 代理配置闭环**
+
+```bash
+xmg proxy apply --socks on --socks-port 1080 --socks-user u --socks-pass p
+xmg proxy status
+xmg xray validate
+```
+
+期望：配置校验通过、服务自动重启成功（失败会双回滚并返回 4）。
+
+**A4. 防火墙 iptables 后端**
+
+```bash
+xmg firewall status          # 后端应显示 iptables
+xmg firewall allow
+xmg firewall enable
+iptables -S XMG-IN
+iptables -S INPUT | grep XMG-IN
+rc-service xmg-firewall status
+```
+
+期望：`XMG-IN` 链含 22/80/443 RETURN + 末尾 DROP，且挂在 `INPUT` 首部；重启后 `rc-service xmg-firewall` 能重放规则（`xmg firewall reload`）。
+
+**A5. 调优持久化**
+
+```bash
+xmg tune bbr
+xmg tune net
+sysctl net.ipv4.tcp_congestion_control
+grep -A3 'xmg:99-xmg' /etc/sysctl.conf
+grep tcp_bbr /etc/modules
+```
+
+期望：BBR 生效；`/etc/sysctl.conf` 出现 XMG 标记块；重启后参数仍生效。
+
+**A6. 加密 DNS（unbound 后端）**
+
+```bash
+xmg tune dot          # 选 Cloudflare
+rc-service unbound status
+grep forward-addr /etc/unbound/unbound.conf
+nslookup cloudflare.com
+```
+
+期望：`127.0.0.1:53` 由 unbound 接管，`forward-tls-upstream: yes`；若 853 受阻会自动回滚并提示。
+
+**A7. 卸载残留**
+
+```bash
+xmg uninstall run --yes
+ls /etc/init.d/ | grep -E 'xray|xmg'
+rc-update show | grep -E 'xray|xmg'
+```
+
+期望：XMG 生成的 `xray` / `xmg-firewall` 脚本与运行级注册全部清除，非 XMG 服务不受影响。
+
+---
+
+## 单栈 / 双栈（Debian / Ubuntu / Alpine 通用）
+
+**N1. 纯 IPv4 主机**
+
+```bash
+xmg detect net                    # 期望 IPv4=1 IPv6=0
+xmg firewall status               # UFW 路径：IPV6=yes 纠偏不报错
+xmg firewall enable               # iptables 路径：只出现 iptables，不出现 ip6tables
+iptables -S XMG-IN
+ip6tables -S XMG-IN 2>&1          # 期望不存在该链（或提示链不存在）
+```
+
+期望：IPv4 侧规则完整；`/etc/resolv.conf` 或 unbound 配置中不出现 `::1`（`xmg tune dot` 走 unbound 时）。
+
+**N2. 纯 IPv6 主机**
+
+```bash
+xmg detect net                    # 期望 IPv4=0 IPv6=1 NAT64=0
+xmg doctor                        # [网络] 行应为 IPv4 无 / IPv6 正常
+grep -E 'queryStrategy|https\+local' /opt/xmg/xray/config.json   # 应为 IPv6 DoH / UseIPv6
+xmg tune dot                      # 选择 IPv6 上游；IPv4 上游应被安全拦截
+```
+
+**N3. 双栈主机**
+
+```bash
+xmg detect net                    # 期望 IPv4=1 IPv6=1
+xmg firewall enable
+iptables -S XMG-IN
+ip6tables -S XMG-IN
+```
+
+期望 IPv6 链必须包含：`-p ipv6-icmp --icmpv6-type 133..136`、`-p udp --dport 546`，否则重启后 IPv6 邻居发现/地址续租会被默认 DROP 打断。
+
+**N4. NAT64 主机**
+
+```bash
+xmg detect net                    # 期望 NAT64=1
+getent ahosts ipv4only.arpa       # 应能解析出 64:ff9b::/96 前缀地址
+```
+
+期望：NAT64=1 时 `xmg tune dns` 不按纯 IPv6 拦截 IPv4 DNS，配置类 DoH 仍可用。

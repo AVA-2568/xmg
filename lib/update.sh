@@ -20,6 +20,18 @@ if [ "${XMG_UPDATE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_UPDATE_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # ===== 默认配置 =====
 XMG_UPDATE_BRANCH="${XMG_UPDATE_BRANCH:-main}"
 XMG_UPDATE_REPO="${XMG_UPDATE_REPO:-AVA-2568/xmg}"
@@ -295,12 +307,8 @@ xmg_update_pull_impl() {
 
         if ! command -v git &>/dev/null; then
             xmg_warn "git 不存在，尝试安装"
-            if command -v apt-get &>/dev/null; then
-                apt-get install -y git || xmg_die "安装 git 失败"
-            elif command -v dnf &>/dev/null; then
-                dnf install -y git || xmg_die "安装 git 失败"
-            elif command -v yum &>/dev/null; then
-                yum install -y git || xmg_die "安装 git 失败"
+            if [ "$(xmg_pkg_mgr)" != "none" ]; then
+                xmg_pkg_install git || xmg_die "安装 git 失败"
             else
                 xmg_die "无法安装 git，请手动安装"
             fi

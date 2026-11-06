@@ -24,6 +24,18 @@ if [ "${XMG_SSH_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_SSH_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 # XMG_MENU_LABEL: SSH 安全加固
 
 # ===== 默认配置 =====
@@ -90,13 +102,9 @@ xmg_sshd_bin() {
     return 1
 }
 
-# sshd 服务名：Debian 为 ssh.service（sshd 别名），Ubuntu 为 ssh.service
+# sshd 服务名：Debian/Ubuntu 为 ssh.service，Alpine/RHEL 为 sshd
 xmg_ssh_service_name() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^sshd\.service'; then
-        printf 'sshd'
-    else
-        printf 'ssh'
-    fi
+    xmg_svc_name ssh
 }
 
 # OpenSSH >= 8.2 支持 Include 指令（sshd_config.d 生效的前提）
@@ -287,12 +295,12 @@ xmg_ssh_apply() {
         xmg_ssh_configure_socket_port "$target_port"
     fi
 
-    if ! xmg_cmd_exists systemctl; then
-        xmg_warn "非 systemd 环境，请手动重启 sshd 生效"
+    if ! xmg_init_use_systemd_units && ! xmg_svc_supported; then
+        xmg_warn "非 systemd / OpenRC 环境，请手动重启 sshd 生效"
         return 0
     fi
 
-    if xmg_ssh_has_socket; then
+    if xmg_ssh_has_socket && xmg_init_use_systemd_units; then
         systemctl daemon-reload 2>/dev/null || true
         if systemctl restart ssh.socket 2>/dev/null; then
             xmg_info "ssh.socket 已重启"
@@ -302,12 +310,12 @@ xmg_ssh_apply() {
     fi
 
     svc="$(xmg_ssh_service_name)"
-    if systemctl restart "$svc" 2>/dev/null; then
+    if xmg_systemctl restart "$svc" 2>/dev/null; then
         xmg_info "sshd 已重启 ($svc)"
         return 0
     fi
 
-    xmg_error "sshd 重启失败，请立即检查: systemctl status $svc"
+    xmg_error "sshd 重启失败，请立即检查: $( [ "$XMG_INIT_SYSTEM" = "openrc" ] && echo "rc-service $svc status" || echo "systemctl status $svc" )"
     return 1
 }
 
@@ -391,11 +399,18 @@ xmg_ssh_change_port() {
         return 0
     fi
 
-    # 先放行新端口（UFW 启用时），防锁死
+    # 先放行新端口（防火墙启用时），防锁死
     if xmg_cmd_exists ufw && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow "$port/tcp" comment 'XMG SSH new' \
             && xmg_info "已放行 $port/tcp" \
             || xmg_warn "放行 $port/tcp 失败，请检查云安全组后再继续"
+    elif [ -r "${XMG_LIB_DIR:-/opt/xmg/lib}/firewall.sh" ]; then
+        # iptables 后端（Alpine）：把新端口写入放行列表并立即生效
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-/opt/xmg/lib}/firewall.sh"
+        xmg_firewall_allow_custom_port "$port" tcp >/dev/null 2>&1 \
+            && xmg_info "已在新端口 $port/tcp 上放行（iptables 后端）" \
+            || true
     fi
 
     xmg_ssh_set_conf Port "$port"
@@ -461,6 +476,8 @@ xmg_ssh_enable_password() {
 # ===== fail2ban =====
 
 # 生成 fail2ban sshd jail 配置
+# backend=auto 时按实际存在的日志文件补 logpath：
+#   Debian/Ubuntu -> /var/log/auth.log，Alpine busybox syslog -> /var/log/messages
 _xmg_ssh_write_f2b_conf() {
     local backend="$1"
     local port="${2:-22}"
@@ -478,16 +495,22 @@ bantime = 1h
 bantime.increment = true
 bantime.maxtime = 1w
 EOF
-    if [ "$backend" = "auto" ] && [ -f /var/log/auth.log ]; then
-        echo "logpath = /var/log/auth.log" >> "$XMG_SSH_F2B_JAIL_CONF"
+    if [ "$backend" = "auto" ]; then
+        local lg=""
+        for lg in /var/log/auth.log /var/log/messages; do
+            if [ -f "$lg" ]; then
+                echo "logpath = $lg" >> "$XMG_SSH_F2B_JAIL_CONF"
+                break
+            fi
+        done
     fi
 }
 
 # 重启 fail2ban 并轮询等待就绪
 _xmg_ssh_restart_and_wait_f2b() {
-    if xmg_cmd_exists systemctl && [ -d /run/systemd/system ]; then
-        systemctl enable fail2ban >/dev/null 2>&1 || true
-        systemctl restart fail2ban >/dev/null 2>&1 || true
+    if xmg_svc_supported; then
+        xmg_svc_enable fail2ban >/dev/null 2>&1 || true
+        xmg_svc_restart fail2ban >/dev/null 2>&1 || true
     elif xmg_cmd_exists service; then
         service fail2ban restart >/dev/null 2>&1 || true
     fi
@@ -506,27 +529,33 @@ _xmg_ssh_restart_and_wait_f2b() {
 xmg_ssh_fail2ban_install() {
     xmg_require_root
 
-    if ! xmg_cmd_exists apt-get; then
-        xmg_die "本模块仅支持 apt 系 (Debian/Ubuntu)"
-    fi
-
     if xmg_cmd_exists fail2ban-client; then
         xmg_info "fail2ban 已安装"
     else
-        xmg_info "安装 fail2ban（Debian 12 需 python3-systemd 支持 journal 后端）"
-        export DEBIAN_FRONTEND=noninteractive
-        if ! apt-get install -y fail2ban python3-systemd; then
-            xmg_error "fail2ban 安装失败，可先执行 apt-get update 后重试"
-            return 1
+        xmg_info "安装 fail2ban: $(xmg_pkg_hint fail2ban)"
+        if [ "$(xmg_pkg_mgr)" = "apt" ]; then
+            # Debian 12 需 python3-systemd 支持 journal 后端
+            xmg_pkg_install fail2ban python3-systemd || {
+                xmg_error "fail2ban 安装失败，可先执行 xmg maint 更新源后重试"
+                return 1
+            }
+        else
+            xmg_pkg_install fail2ban || {
+                xmg_error "fail2ban 安装失败，可先执行 xmg maint 更新源后重试"
+                return 1
+            }
         fi
     fi
 
     local current_port="22"
     current_port="$(xmg_ssh_get_port)"
 
-    # 选择初始后端：若存在 /var/log/auth.log 则优先 auto，否则 systemd
+    # 选择初始后端：systemd 环境优先 journal，否则用文件后端（auto）
     local primary_backend="systemd"
-    if [ -f /var/log/auth.log ]; then
+    if [ -f /var/log/auth.log ] || [ -f /var/log/messages ]; then
+        primary_backend="auto"
+    fi
+    if ! xmg_init_is_systemd; then
         primary_backend="auto"
     fi
 
@@ -535,19 +564,29 @@ xmg_ssh_fail2ban_install() {
     if ! _xmg_ssh_restart_and_wait_f2b; then
         # 首次启动未就绪，尝试自动 fallback 切换后端
         local fallback_backend="auto"
-        [ "$primary_backend" = "auto" ] && fallback_backend="systemd"
+        if [ "$primary_backend" = "auto" ]; then
+            if xmg_init_is_systemd; then
+                fallback_backend="systemd"
+            else
+                fallback_backend="auto"
+            fi
+        fi
         xmg_warn "sshd jail ($primary_backend 后端) 启动超时，尝试切换为 $fallback_backend 后端自适应修复..."
         _xmg_ssh_write_f2b_conf "$fallback_backend" "$current_port"
 
         if ! _xmg_ssh_restart_and_wait_f2b; then
             xmg_error "sshd jail 未正常运行，排查诊断信息如下:"
-            if xmg_cmd_exists systemctl; then
-                systemctl status fail2ban --no-pager 2>/dev/null | head -n 15 || true
+            if xmg_svc_supported; then
+                xmg_svc_status fail2ban 2>/dev/null | head -n 15 || true
             fi
             fail2ban-client status 2>/dev/null || true
             if [ -r /var/log/fail2ban.log ]; then
                 xmg_error "fail2ban.log 最新日志:"
                 tail -n 10 /var/log/fail2ban.log 2>/dev/null || true
+            fi
+            if ! xmg_init_is_systemd; then
+                xmg_warn "当前 init=$XMG_INIT_SYSTEM：fail2ban 依赖 syslog 日志文件"
+                xmg_warn "请确认 syslog 服务已启动: rc-service syslog start && rc-update add syslog default"
             fi
             return 1
         fi

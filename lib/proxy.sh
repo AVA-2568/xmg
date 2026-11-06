@@ -21,6 +21,18 @@ if [ "${XMG_PROXY_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_PROXY_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "proxy.sh: requires bash" >&2
     return 1 2>/dev/null || exit 1

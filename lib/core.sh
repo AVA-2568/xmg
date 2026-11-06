@@ -22,6 +22,18 @@ if [ "${XMG_CORE_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_CORE_SH_LOADED=1
 
+# 依赖 os.sh（发行版 / init / 包管理器抽象）
+if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
+    for _xmg_os_f in "${XMG_LIB_DIR:-/opt/xmg/lib}/os.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/os.sh"; do
+        if [ -r "$_xmg_os_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_os_f"
+            break
+        fi
+    done
+    unset _xmg_os_f
+fi
+
 if [ -z "${BASH_VERSION:-}" ]; then
     echo "core.sh: requires bash" >&2
     return 1 2>/dev/null || exit 1
@@ -150,26 +162,245 @@ xmg_core_channel_set() {
 # ===== 安装 =====
 xmg_core_install() {
     local args=""
-    args="$(xmg_core_install_args)" || return $?
     xmg_require_root
 
     # 内存体检：不足时仅告警，不阻断（用户可自行配置 swap 后重试）
     xmg_core_memcheck || true
 
-    local -a extra=()
-    [ "$XMG_CORE_GEODATA" = "1" ] || extra+=("--without-geodata")
+    if xmg_init_is_systemd; then
+        args="$(xmg_core_install_args)" || return $?
 
-    xmg_info "安装 Xray 内核 ${args:-(stable)}..."
-    if ! xmg_core_install_official "$args" "${extra[@]}"; then
-        xmg_error "官方安装脚本执行失败"
-        return 4
+        local -a extra=()
+        [ "$XMG_CORE_GEODATA" = "1" ] || extra+=("--without-geodata")
+
+        xmg_info "安装 Xray 内核 ${args:-(stable)}..."
+        if ! xmg_core_install_official "$args" "${extra[@]}"; then
+            xmg_error "官方安装脚本执行失败"
+            return 4
+        fi
+    else
+        # 官方 install-release.sh 硬校验 systemd（非 systemd 直接 exit），
+        # 且包管理器识别不含 apk，因此 Alpine / OpenRC 走内置原生安装流程。
+        local channel=""
+        channel="$(xmg_state_get XRAY_CHANNEL 2>/dev/null || true)"
+        [ -n "$channel" ] || channel="stable"
+
+        if ! xmg_core_install_native "$channel"; then
+            xmg_error "内置安装流程失败"
+            return 4
+        fi
     fi
 
-    # 关键收尾：无论官方脚本是新装还是同版本跳过，立即确保 systemd unit 存在并生效
+    # 关键收尾：无论装的是新内核还是同版本跳过，立即确保服务注册存在并生效
     xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+
+    # 非 systemd 路径没有官方脚本帮忙启动，这里主动拉起一次（失败不阻断安装）
+    if ! xmg_init_use_systemd_units && xmg_svc_supported; then
+        if [ -f "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && ! xmg_svc_is_active "$XMG_XRAY_SERVICE"; then
+            if xmg_svc_start "$XMG_XRAY_SERVICE" >/dev/null 2>&1; then
+                xmg_info "Xray 服务已启动（$XMG_INIT_SYSTEM）"
+            else
+                xmg_warn "Xray 服务启动失败（配置可能尚未生成，可先执行 xmg proxy apply 再启动）"
+            fi
+        fi
+    fi
 
     xmg_info "内核安装完成"
     xmg_core_version
+    return 0
+}
+
+# ===== 内置原生安装（非 systemd / Alpine 专用）=====
+
+# CPU 架构 -> Xray 官方发布包命名后缀
+xmg_core_arch_slug() {
+    case "$(uname -m 2>/dev/null || echo unknown)" in
+        x86_64|amd64)  printf '64' ;;
+        aarch64|arm64) printf 'arm64-v8a' ;;
+        armv7l|armv7)  printf 'arm32-v7a' ;;
+        armv6l)        printf 'arm32-v6' ;;
+        i386|i486|i586|i686) printf '32' ;;
+        s390x)         printf 's390x' ;;
+        *) return 1 ;;
+    esac
+}
+
+# 统一下载器（带 GitHub 加速镜像回退）
+_xmg_core_download() {
+    local url="$1"
+    local out="$2"
+    local u=""
+
+    for u in "$url" "https://ghfast.top/$url" "https://mirror.ghproxy.com/$url"; do
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fsSL --connect-timeout 8 --max-time 180 "$u" -o "$out" 2>/dev/null && [ -s "$out" ]; then
+                return 0
+            fi
+        elif command -v wget >/dev/null 2>&1; then
+            if wget -q -T 30 -O "$out" "$u" 2>/dev/null && [ -s "$out" ]; then
+                return 0
+            fi
+        else
+            return 1
+        fi
+    done
+    return 1
+}
+
+# 解析目标版本 tag：pinned 直取记录值；stable/preview 走 GitHub API
+xmg_core_resolve_tag() {
+    local channel="$1"
+
+    if [ "$channel" = "pinned" ]; then
+        local pinned=""
+        pinned="$(xmg_state_get XRAY_PINNED_VERSION 2>/dev/null || true)"
+        if [ -z "$pinned" ]; then
+            xmg_error "通道为 pinned 但未记录版本号"
+            return 3
+        fi
+        printf '%s' "$pinned"
+        return 0
+    fi
+
+    local api=""
+    if [ "$channel" = "preview" ]; then
+        api="https://api.github.com/repos/XTLS/Xray-core/releases?per_page=5"
+    else
+        api="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+    fi
+
+    local tmp=""
+    tmp="$(mktemp)" || return 1
+    if _xmg_core_download "$api" "$tmp"; then
+        local tag=""
+        tag="$(sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp" | head -n 1)"
+        rm -f "$tmp" 2>/dev/null || true
+        if [ -n "$tag" ]; then
+            printf '%s' "$tag"
+            return 0
+        fi
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+
+    # API 被限流/阻断时，跟随 releases/latest 的重定向地址反推 tag
+    if command -v curl >/dev/null 2>&1; then
+        local eff=""
+        eff="$(curl -fsSIL --connect-timeout 8 --max-time 25 -o /dev/null \
+            -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null || true)"
+        case "$eff" in
+            */tag/*)
+                printf '%s' "${eff##*/tag/}"
+                return 0
+                ;;
+        esac
+    fi
+
+    xmg_error "无法解析 Xray 最新版本号（GitHub API 不可达）"
+    xmg_warn "可改用固定版本: xmg core menu 选择「安装指定版本」"
+    return 1
+}
+
+# 解压 zip（Alpine 最小化系统可能只有 busybox unzip）
+_xmg_core_unzip() {
+    local zip="$1"
+    local dest="$2"
+
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -o -q "$zip" -d "$dest" && return 0
+    fi
+    if busybox unzip -o -q "$zip" -d "$dest" >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$(xmg_pkg_mgr)" = "apk" ]; then
+        xmg_info "安装 unzip 以解压内核压缩包..."
+        if xmg_pkg_install unzip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+            unzip -o -q "$zip" -d "$dest" && return 0
+        fi
+    fi
+    return 1
+}
+
+# 原生安装主流程：下载官方 zip -> 落盘 /usr/local/bin/xray -> 服务注册交给上层
+xmg_core_install_native() {
+    local channel="${1:-stable}"
+
+    local slug=""
+    if ! slug="$(xmg_core_arch_slug)"; then
+        xmg_error "当前架构不受支持: $(uname -m 2>/dev/null || echo unknown)"
+        return 1
+    fi
+
+    local tag=""
+    if ! tag="$(xmg_core_resolve_tag "$channel")"; then
+        return 1
+    fi
+
+    xmg_info "目标版本: $tag ($channel) / 架构: linux-$slug"
+
+    local workdir=""
+    workdir="$(xmg_core_resolve_tmpdir)"
+    local run_tmp="${workdir%/}/xmg-core-$-$RANDOM"
+    mkdir -p "$run_tmp" 2>/dev/null || run_tmp="$workdir"
+    if [ "$workdir" != "/tmp" ]; then
+        xmg_info "使用物理临时目录防 tmpfs OOM: $run_tmp"
+    fi
+
+    local zip="${run_tmp}/xray.zip"
+    local url="https://github.com/XTLS/Xray-core/releases/download/${tag}/Xray-linux-${slug}.zip"
+
+    xmg_info "下载内核: $url"
+    if ! _xmg_core_download "$url" "$zip"; then
+        rm -rf "$run_tmp" 2>/dev/null || true
+        xmg_error "内核下载失败（若为纯 IPv6 主机请检查 DNS64 或开启 WARP IPv4 出口）"
+        return 1
+    fi
+
+    local unpack="${run_tmp}/unpack"
+    mkdir -p "$unpack"
+    if ! _xmg_core_unzip "$zip" "$unpack" || [ ! -f "$unpack/xray" ]; then
+        rm -rf "$run_tmp" 2>/dev/null || true
+        xmg_error "内核压缩包解压失败或内容异常"
+        return 1
+    fi
+
+    # 落盘：先放同目录临时名再原子 mv，避免升级中途二进制被截断
+    local target="/usr/local/bin/xray"
+    mkdir -p "$(dirname "$target")"
+    if ! cp -f "$unpack/xray" "${target}.xmg-new" 2>/dev/null; then
+        rm -rf "$run_tmp" 2>/dev/null || true
+        xmg_error "写入 $target 失败（磁盘空间不足或权限不足）"
+        return 1
+    fi
+    chmod 0755 "${target}.xmg-new" || true
+    mv -f "${target}.xmg-new" "$target" || {
+        rm -f "${target}.xmg-new" 2>/dev/null || true
+        rm -rf "$run_tmp" 2>/dev/null || true
+        xmg_error "替换 $target 失败"
+        return 1
+    }
+
+    # 地理数据默认不装（低配机型省磁盘），需要时再开
+    if [ "$XMG_CORE_GEODATA" = "1" ]; then
+        local dat_dir="/usr/local/share/xray"
+        mkdir -p "$dat_dir"
+        local f=""
+        for f in geoip.dat geosite.dat; do
+            if [ -f "$unpack/$f" ]; then
+                cp -f "$unpack/$f" "$dat_dir/$f" 2>/dev/null || true
+            fi
+        done
+        xmg_info "地理数据已安装到 $dat_dir"
+    fi
+
+    rm -rf "$run_tmp" 2>/dev/null || true
+
+    if [ ! -x "$target" ]; then
+        xmg_error "安装后未找到可执行文件: $target"
+        return 1
+    fi
+
+    xmg_info "内核已安装: $target ($("$target" version 2>/dev/null | head -n 1 || echo "$tag"))"
     return 0
 }
 
