@@ -858,39 +858,39 @@ _xmg_xray_reload() {
         "${_reload_cmd[@]}" >/dev/null 2>&1
         return $?
     fi
-    if xmg_svc_supported || xmg_init_use_systemd_units; then
-        local svc="${XMG_XRAY_SERVICE:-xray}"
 
-        # 非 root 时重启必然失败：直接按失败返回，交由上层执行双回滚，
-        # 不能走 xmg_systemctl 的 require_root 分支（那会 exit 中断事务）
-        if ! xmg_is_root; then
-            xmg_error "重启 $svc 服务需要 root 权限，当前配置未生效"
-            return 1
-        fi
-
-        # 重启前自愈检查：若缺少服务注册文件立即自动生成补齐
-        if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
-            xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
-        fi
-        xmg_svc_reload_manager
-
-        local s_err=""
-        if ! s_err="$(xmg_systemctl restart "$svc" 2>&1)"; then
-            # 若 restart 失败，尝试 start 启动激活
-            if ! xmg_systemctl is-active "$svc" >/dev/null 2>&1; then
-                s_err="$(xmg_systemctl start "$svc" 2>&1 || echo "$s_err")"
-            fi
-            if ! xmg_systemctl is-active "$svc" >/dev/null 2>&1; then
-                xmg_error "重启 $svc 服务失败 (init=$XMG_INIT_SYSTEM):"
-                [ -n "$s_err" ] && printf '%s\n' "$s_err" >&2
-                xmg_warn "--- $svc 最近 15 行系统日志 ---"
-                xmg_svc_logs "$svc" 15 2>&1 | sed 's/^/  /' >&2 || true
-                return 1
-            fi
-        fi
+    if ! xmg_svc_supported && ! xmg_init_use_systemd_units; then
         return 0
     fi
-    return 0
+
+    local svc="${XMG_XRAY_SERVICE:-xray}"
+
+    # 非 root 时重启必然失败：直接按失败返回，交由上层执行双回滚，
+    # 不能走 xmg_systemctl 的 require_root 分支（那会 exit 中断事务）
+    if ! xmg_is_root; then
+        xmg_error "重启 $svc 服务需要 root 权限，当前配置未生效"
+        return 1
+    fi
+
+    # 重启前自愈：注册文件缺失时补齐（重装/升级后常见）
+    if declare -F xmg_xray_patch_systemd_unit >/dev/null 2>&1; then
+        xmg_xray_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+    elif declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+        xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+    fi
+    xmg_svc_reload_manager
+
+    # 统一走「停 → 等进程退出 → 启 → 等 active」，避免端口未释放导致新进程 bind 失败
+    if declare -F xmg_xray_restart_hard >/dev/null 2>&1; then
+        xmg_xray_restart_hard && return 0
+        return 1
+    fi
+
+    xmg_svc_restart_verified "$svc" 8 && return 0
+
+    xmg_error "重启 $svc 服务失败 (init=$XMG_INIT_SYSTEM)，最近日志:"
+    xmg_svc_logs "$svc" 15 2>&1 | sed 's/^/  /' >&2 || true
+    return 1
 }
 
 # ===== 原子提交 (两阶段联合事务) =====

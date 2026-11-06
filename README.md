@@ -119,6 +119,7 @@ PASS=44  FAIL=0  SKIP=1   (alpine / openrc / iptables)
   - 单栈自适应：纯 IPv4 不写 `::1` 上游、不下发 `ip6tables` 规则；纯 IPv6 自动切 IPv6 DoH 与 `queryStrategy: UseIPv6`
   - 双栈：防火墙按协议族分别建链，IPv6 侧强制放通 NDP（133-136）与 DHCPv6（546），避免默认 DROP 打断邻居发现
   - NAT64：内置 RFC 7050 主动探测（`ipv4only.arpa`），识别到 NAT64 时不按纯 IPv6 处理
+  - 单栈 + WARP：隧道带来对端协议族时，全局接管模式下自动把 DNS/出站策略从 `UseIPv6` 放开为 `UseIP`（否则纯 IPv6 机器即便有 WARP IPv4 出口也只查 AAAA，IPv4-only 站点仍不可达）；停用 WARP 时收回
 
 ---
 

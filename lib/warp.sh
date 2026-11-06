@@ -1385,6 +1385,9 @@ EOF_GLOBAL_JQ
                 xray_bin="/usr/local/bin/xray"
             fi
 
+            # 单栈主机 + WARP 全局接管：把 DNS/出站策略从 UseIPv6 放开为 UseIP
+            _xmg_warp_relax_stack_strategy "$tmp_cfg" "$mode" "$WARP_ACC_IPV4"
+
             if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
                 local test_out=""
                 if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
@@ -1443,25 +1446,98 @@ EOF_GLOBAL_JQ
         xmg_svc_reload_manager
     fi
 
-    # 7. 若 Xray 运行中，重载/重启服务
+    # 7. 无论服务当前是否在运行，都要走一次硬重启（停→启→验证 active）
+    #    WARP 出站只在进程启动时建立，配置变了必须换进程；服务已停时也要拉起
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
-        if xmg_svc_is_active "$s_name"; then
-            if ! xmg_svc_restart "$s_name" >/dev/null 2>&1; then
-                xmg_error "重启 $s_name 服务失败，正在自动回滚..."
-                if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
-                    cp -f "$bak" "$xray_cfg" 2>/dev/null || true
-                    xmg_svc_restart "$s_name" >/dev/null 2>&1 || true
-                fi
-                return 1
+        if ! _warp_restart_xray 2>/dev/null; then
+            xmg_error "重启 $s_name 服务失败，正在自动回滚 WARP 配置..."
+            if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
+                cp -f "$bak" "$xray_cfg" 2>/dev/null || true
+                _warp_restart_xray 2>/dev/null || true
             fi
-            xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
+            return 1
         fi
+        xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
     fi
 
     xmg_info "Xray WARP 出站已成功启用 (出站标签: warp-out, 模式: $mode)"
     xmg_info "配置片段位置: $XMG_WARP_XRAY_OUTBOUND"
     xmg_info "宿主机 100% 零侵入、零网卡接管、零系统路由改动，SSH 物理级绝对防断网！"
+    return 0
+}
+
+# WARP 变更后重启 Xray
+# 优先用 xray.sh 的硬重启（含注册文件自愈）；未加载时退回服务抽象层
+_warp_restart_xray() {
+    if declare -F xmg_xray_restart_hard >/dev/null 2>&1; then
+        xmg_xray_restart_hard && return 0
+        return 1
+    fi
+    xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8
+}
+
+# WARP 让单栈机获得双栈出口后，DNS / 出站策略要跟着放开
+# 纯 IPv6 主机渲染时被固定成 UseIPv6（因为宿主机没有 IPv4），
+# 隧道带来 172.16.x.x 之后仍只查 AAAA，所有 IPv4-only 站点依旧不可达
+_xmg_warp_relax_stack_strategy() {
+    local cfg="$1"
+    local mode="${2:-global}"
+    local v4="${3:-}"
+
+    [ -f "$cfg" ] || return 0
+    # 分流模式不动全局策略：未被 WARP 命中的流量仍需走宿主机原栈
+    [ "$mode" = "global" ] || return 0
+    # 只对纯 IPv6 主机处理；IPv4 主机本来就是 UseIP
+    xmg_warp_is_ipv6_only || return 0
+    [ -n "$v4" ] || return 0
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp="${cfg}.stack.$$"
+        if jq '
+            (if (.dns // {}).queryStrategy == "UseIPv6" then .dns.queryStrategy = "UseIP" else . end)
+            | (.outbounds // []) |= map(
+                if (((.streamSettings // {}).sockopt // {}).domainStrategy // "") == "UseIPv6"
+                then .streamSettings.sockopt.domainStrategy = "UseIP"
+                else . end)
+        ' "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv -f "$tmp" "$cfg"
+            xmg_info "已把 DNS/出站策略放开为 UseIP：WARP 隧道为纯 IPv6 主机提供了 IPv4 出口"
+            return 0
+        fi
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+
+    # 无 jq 兜底：只替换渲染器固定输出的这两个字段
+    sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/; s/"domainStrategy": "UseIPv6"/"domainStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
+    xmg_info "已把 DNS/出站策略放开为 UseIP（WARP 隧道提供 IPv4 出口）"
+    return 0
+}
+
+# 停用 WARP 后反向收紧：纯 IPv6 主机没有 IPv4 直连，必须回到 UseIPv6
+_xmg_warp_restore_stack_strategy() {
+    local cfg="$1"
+
+    [ -f "$cfg" ] || return 0
+    xmg_warp_is_ipv6_only || return 0
+
+    if command -v jq >/dev/null 2>&1; then
+        local tmp="${cfg}.stack.$$"
+        if jq '
+            (if (.dns // {}).queryStrategy == "UseIP" then .dns.queryStrategy = "UseIPv6" else . end)
+            | (.outbounds // []) |= map(
+                if (((.streamSettings // {}).sockopt // {}).domainStrategy // "") == "UseIP"
+                then .streamSettings.sockopt.domainStrategy = "UseIPv6"
+                else . end)
+        ' "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv -f "$tmp" "$cfg"
+            xmg_info "已恢复 DNS/出站策略为 UseIPv6（宿主机无 IPv4 直连）"
+            return 0
+        fi
+        rm -f "$tmp" 2>/dev/null || true
+    fi
+
+    sed -i 's/"queryStrategy": "UseIP"/"queryStrategy": "UseIPv6"/; s/"domainStrategy": "UseIP"/"domainStrategy": "UseIPv6"/' "$cfg" 2>/dev/null || true
     return 0
 }
 
@@ -1522,6 +1598,9 @@ EOF_DISABLE_JQ
                 xray_bin="/usr/local/bin/xray"
             fi
 
+            # 停用后纯 IPv6 主机失去隧道 IPv4，策略要收回 UseIPv6
+            _xmg_warp_restore_stack_strategy "$tmp_cfg"
+
             if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
                 local test_out=""
                 if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
@@ -1548,8 +1627,10 @@ EOF_DISABLE_JQ
 
         if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
             local s_name="${XMG_XRAY_SERVICE:-xray}"
-            if xmg_svc_is_active "$s_name"; then
-                xmg_svc_restart "$s_name" >/dev/null 2>&1 && xmg_info "已成功重启 $s_name 服务应用变更"
+            if _warp_restart_xray >/dev/null 2>&1; then
+                xmg_info "已成功重启 $s_name 服务应用变更"
+            else
+                xmg_warn "$s_name 重启失败，请执行 xmg xray restart 确认状态"
             fi
         fi
     fi

@@ -480,6 +480,16 @@ xmg_update_run() {
         xmg_update_verify
     fi
 
+    # 代码更新可能改变配置渲染与状态语义：重启 Xray，让新代码与现网配置一起生效
+    if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && xmg_svc_supported; then
+        xmg_info "重启 Xray 以加载更新后的代码..."
+        if xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8; then
+            xmg_info "Xray 已重启并确认 active"
+        else
+            xmg_warn "Xray 重启失败，请执行 xmg xray restart 检查服务状态"
+        fi
+    fi
+
     hash -r 2>/dev/null || true
     xmg_info "更新完成！"
     xmg_info "路径摘要:"

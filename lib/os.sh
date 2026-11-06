@@ -561,6 +561,77 @@ xmg_svc_logs() {
     return 0
 }
 
+# 强制结束服务进程（仅在优雅停止超时后使用）
+# systemd: 直接对 unit cgroup 发 SIGKILL；OpenRC: 读 pidfile
+xmg_svc_kill_force() {
+    local svc="$1"
+    xmg_os_detect
+
+    case "$XMG_INIT_SYSTEM" in
+        systemd)
+            systemctl kill -s SIGKILL "$svc" >/dev/null 2>&1 || true
+            ;;
+        *)
+            local pidfile="${XMG_PID_DIR:-/run}/${svc}.pid"
+            if [ -r "$pidfile" ]; then
+                local pid=""
+                pid="$(tr -dc '0-9' < "$pidfile" 2>/dev/null || true)"
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+            fi
+            ;;
+    esac
+    return 0
+}
+
+# 停 → 等进程真正退出 → 启 → 等进入 active
+#
+# 为什么不用 restart：
+#   1) 服务已处于 stopped/failed 时，部分 init 的 restart 不会把它拉起
+#   2) 进程尚未完全退出就启动，端口/句柄仍被占用，Xray 会因 bind 失败而退出
+#
+# 返回：0 已进入 active / 1 启动后仍非 active / 2 无可用服务管理器
+xmg_svc_restart_verified() {
+    local svc="$1"
+    local timeout="${2:-8}"
+    local i=0
+
+    xmg_os_detect
+
+    if ! xmg_svc_supported; then
+        return 2
+    fi
+
+    if xmg_svc_is_active "$svc"; then
+        xmg_svc_stop "$svc" >/dev/null 2>&1 || true
+
+        # 等待进程真正退出（逐秒轮询，兼容没有 sleep 小数支持的 BusyBox）
+        for ((i = 0; i < timeout; i++)); do
+            xmg_svc_is_active "$svc" || break
+            sleep 1
+        done
+
+        if xmg_svc_is_active "$svc"; then
+            xmg_warn "$svc 未在 ${timeout}s 内停止，强制结束进程"
+            xmg_svc_kill_force "$svc"
+            for ((i = 0; i < 3; i++)); do
+                xmg_svc_is_active "$svc" || break
+                sleep 1
+            done
+        fi
+    fi
+
+    xmg_svc_start "$svc" >/dev/null 2>&1 || true
+
+    for ((i = 0; i < timeout; i++)); do
+        xmg_svc_is_active "$svc" && return 0
+        sleep 1
+    done
+
+    return 1
+}
+
 # 配置文件落盘后的 init 侧生效动作（systemd 需 daemon-reload，OpenRC 无需）
 xmg_svc_reload_manager() {
     xmg_os_detect

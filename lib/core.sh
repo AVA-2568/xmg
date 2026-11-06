@@ -194,14 +194,19 @@ xmg_core_install() {
     # 关键收尾：无论装的是新内核还是同版本跳过，立即确保服务注册存在并生效
     xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
 
-    # 非 systemd 路径没有官方脚本帮忙启动，这里主动拉起一次（失败不阻断安装）
-    if ! xmg_init_use_systemd_units && xmg_svc_supported; then
-        if [ -f "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && ! xmg_svc_is_active "$XMG_XRAY_SERVICE"; then
-            if xmg_svc_start "$XMG_XRAY_SERVICE" >/dev/null 2>&1; then
-                xmg_info "Xray 服务已启动（$XMG_INIT_SYSTEM）"
+    # 二进制刚被替换：旧进程仍持有旧 inode，必须换进程新版本才生效
+    local cfg_path="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    if [ -s "$cfg_path" ] && xmg_svc_supported; then
+        if declare -F xmg_xray_restart_hard >/dev/null 2>&1; then
+            if xmg_xray_restart_hard; then
+                xmg_info "Xray 已重启并确认加载新内核"
             else
-                xmg_warn "Xray 服务启动失败（配置可能尚未生成，可先执行 xmg proxy apply 再启动）"
+                xmg_warn "Xray 重启失败，请执行 xmg xray restart 或查看 xmg xray diag"
             fi
+        elif xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8; then
+            xmg_info "Xray 已重启并确认加载新内核"
+        else
+            xmg_warn "Xray 重启失败，请执行 xmg xray restart 或查看 xmg xray diag"
         fi
     fi
 

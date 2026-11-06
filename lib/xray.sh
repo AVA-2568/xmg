@@ -514,8 +514,44 @@ xmg_xray_stop() {
 
 xmg_xray_restart() {
     xmg_require_root
-    xmg_systemctl restart "$XMG_XRAY_SERVICE"
-    xmg_info "Xray 已重启"
+
+    if xmg_xray_restart_hard; then
+        xmg_info "Xray 已重启（stop → start 已验证 active）"
+    else
+        xmg_error "Xray 重启失败，请检查: $( [ "$XMG_INIT_SYSTEM" = "openrc" ] && echo "rc-service $XMG_XRAY_SERVICE status" || echo "systemctl status $XMG_XRAY_SERVICE" )"
+        return 1
+    fi
+}
+
+# 硬重启：停 → 等进程退出 → 启 → 等 active
+# 配置变更、WARP 出站切换、内核二进制更新后都必须走这里，
+# 直接 restart 在进程未完全退出时会让新进程 bind 失败
+xmg_xray_restart_hard() {
+    local svc="${XMG_XRAY_SERVICE:-xray}"
+    local timeout="${1:-8}"
+
+    if ! xmg_svc_supported; then
+        xmg_warn "未检测到可用的服务管理器（init=$XMG_INIT_SYSTEM），无法重启 $svc"
+        return 1
+    fi
+
+    # 注册文件缺失时先补齐（升级/手工删除后常见）
+    if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+        xmg_core_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+    elif declare -F xmg_xray_patch_systemd_unit >/dev/null 2>&1; then
+        xmg_xray_patch_systemd_unit "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" >/dev/null 2>&1 || true
+    fi
+    xmg_svc_reload_manager
+
+    xmg_svc_restart_verified "$svc" "$timeout"
+    local rc=$?
+
+    if [ "$rc" -eq 1 ]; then
+        xmg_error "$svc 启动后未进入 active，最近日志:"
+        xmg_svc_logs "$svc" 15 2>/dev/null | sed 's/^/  /' >&2 || true
+        return 1
+    fi
+    return $rc
 }
 
 xmg_xray_reload() {

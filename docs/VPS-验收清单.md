@@ -343,3 +343,32 @@ getent ahosts ipv4only.arpa       # 应能解析出 64:ff9b::/96 前缀地址
 ```
 
 期望：NAT64=1 时 `xmg tune dns` 不按纯 IPv6 拦截 IPv4 DNS，配置类 DoH 仍可用。
+
+**N5. 单栈 + WARP 双栈（重点）**
+
+纯 IPv4 主机开 WARP 后无需改配置：出站 `address` 已同时包含 `172.16.0.2/32` 与 `fd01::/128`，`queryStrategy`/`domainStrategy` 本来就是 `UseIP`。
+
+纯 IPv6 主机开 WARP（全局接管）则必须放开策略，否则只查 AAAA，WARP 带来的 IPv4 出口形同虚设：
+
+```bash
+xmg warp enable
+grep -E 'queryStrategy|domainStrategy' /opt/xmg/xray/config.json   # 期望 UseIP
+xmg warp disable
+grep queryStrategy /opt/xmg/xray/config.json                        # 期望收回 UseIPv6
+```
+
+分流模式（`routing`）不改全局策略——未被 WARP 命中的流量仍需走宿主机原栈。
+
+**N6. 变更后必须换进程**
+
+Xray 的出站、WARP 隧道、DNS 策略都在进程启动时建立，`SIGHUP` 不支持重载。以下操作都必须触发「停 → 等进程退出 → 启 → 等 active」：
+
+```bash
+xmg proxy apply        # 节点增删改
+xmg warp enable|disable
+xmg core install       # 内核二进制更新（旧进程持有旧 inode）
+xmg update             # 代码更新
+xmg xray restart       # 手动
+```
+
+验证：`xmg selftest` 的「服务运行中」应 PASS；若失败会明确提示 `xmg xray diag`。
