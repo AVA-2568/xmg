@@ -1000,7 +1000,11 @@ _xmg_warp_find_xray_config() {
 
     if command -v pgrep >/dev/null 2>&1 || command -v ps >/dev/null 2>&1; then
         local proc_cmd=""
+        # BusyBox ps 不支持 aux，退回 POSIX 的 -ef
         proc_cmd="$(ps aux 2>/dev/null | grep -E '[x]ray.*run.*-c' | head -1 || true)"
+        if [ -z "$proc_cmd" ]; then
+            proc_cmd="$(ps -ef 2>/dev/null | grep -E '[x]ray.*run.*-c' | head -1 || true)"
+        fi
         if [ -n "$proc_cmd" ]; then
             local parsed_cfg=""
             parsed_cfg="$(echo "$proc_cmd" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"

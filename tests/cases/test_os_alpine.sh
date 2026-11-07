@@ -321,3 +321,36 @@ _CHRONY_OUT="$(PATH="$T_CHRONY/bin:$PATH" MOCK_INIT=openrc \
 t_contains "chronyd 依赖阻塞时用 --nodeps 拉起" "$_CHRONY_OUT" "跳过 net 依赖"
 
 rm -rf "$T_CHRONY"
+
+# --- 11. sysctl 下发格式：BusyBox 只认 key=value ---
+# 回归：曾把 "key = value" 整行交给 sysctl -w，空格留在键名里，
+# Alpine 上 24 条参数全部失败（连 vm.swappiness 都写不进去）。
+T_SYSCTL="$(TMPDIR=/tmp mktemp -d)"
+mkdir -p "$T_SYSCTL/proc/fs" "$T_SYSCTL/proc/vm" "$T_SYSCTL/bin"
+: > "$T_SYSCTL/proc/fs/file-max"
+: > "$T_SYSCTL/proc/vm/swappiness"
+cat > "$T_SYSCTL/bin/sysctl" <<'STUB'
+#!/bin/sh
+echo "$2" >> "$SYSCTL_LOG"
+case "$2" in
+    *" "*) exit 1 ;;
+    *=*) exit 0 ;;
+esac
+exit 1
+STUB
+chmod +x "$T_SYSCTL/bin/sysctl"
+printf 'fs.file-max = 1048576\nvm.swappiness = 10\nnet.ipv4.not_exist = 1\n' > "$T_SYSCTL/tune.conf"
+
+_SYSCTL_OUT="$(PATH="$T_SYSCTL/bin:$PATH" SYSCTL_LOG="$T_SYSCTL/calls.log" \
+    XMG_PROC_SYS_ROOT="$T_SYSCTL/proc" XMG_LIB_DIR="$SRC/lib" XMG_HOME="$T_SYSCTL/home" \
+    bash -c '
+        source "$XMG_LIB_DIR/os.sh"; source "$XMG_LIB_DIR/common.sh"; source "$XMG_LIB_DIR/tune.sh"
+        xmg_tune_sysctl_persist() { :; }
+        xmg_tune_sysctl_apply "$0"
+    ' "$T_SYSCTL/tune.conf" 2>&1)"
+_SYSCTL_CALLS="$(cat "$T_SYSCTL/calls.log" 2>/dev/null || true)"
+
+t_contains "sysctl 以 key=value 形式下发" "$_SYSCTL_CALLS" "fs.file-max=1048576"
+t_not_contains "下发给 sysctl 的参数不含空格" "$_SYSCTL_CALLS" "fs.file-max = "
+t_contains "内核不存在的键按跳过处理" "$_SYSCTL_OUT" "已跳过"
+rm -rf "$T_SYSCTL"

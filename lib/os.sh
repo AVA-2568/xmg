@@ -656,6 +656,17 @@ xmg_svc_reload_manager() {
     return 0
 }
 
+# 内存概览：GNU free 支持 -h，BusyBox free 只到 -m（-h 直接报错、无输出）
+xmg_mem_free_show() {
+    if free -h >/dev/null 2>&1; then
+        free -h
+    elif free -m >/dev/null 2>&1; then
+        free -m
+    else
+        return 1
+    fi
+}
+
 # 一行式环境摘要，供 doctor / 菜单 / 诊断使用
 xmg_os_summary() {
     xmg_os_detect

@@ -280,10 +280,45 @@ xmg_tune_sysctl_persist() {
 
 # 逐行应用 sysctl 配置文件，失败的 key 警告但不中断
 # 在受限容器环境下（如 OpenVZ/LXC/Docker 只读 sysctl），对不可写参数静默跳过并友情提示，平滑熔断返回 0
+# 单条 sysctl 写入：BusyBox 的 sysctl 只认 key=value，
+# 原实现把 "key = value" 整行原样交给 -w，空格留在键名里，
+# 于是 Alpine 上每一条都报失败（连 vm.swappiness 都写不进去）。
+# 返回 0 成功 / 1 失败 / 3 跳过（本内核没有这个键）
+_xmg_tune_sysctl_one() {
+    local raw="$1"
+    local key="" val="" proc=""
+
+    case "$raw" in
+        *=*) ;;
+        *) return 3 ;;
+    esac
+
+    key="${raw%%=*}"
+    val="${raw#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"; key="${key%"${key##*[![:space:]]}"}"
+    val="${val#"${val%%[![:space:]]*}"}"; val="${val%"${val##*[![:space:]]}"}"
+    [ -n "$key" ] && [ -n "$val" ] || return 3
+
+    # 键在本内核不存在（模块未加载/未编译）时算跳过，不计失败
+    # XMG_PROC_SYS_ROOT 仅用于测试注入，生产恒为 /proc/sys
+    proc="${XMG_PROC_SYS_ROOT:-/proc/sys}/${key//./\/}"
+    [ -e "$proc" ] || return 3
+
+    if command -v sysctl >/dev/null 2>&1; then
+        sysctl -w "${key}=${val}" >/dev/null 2>&1 || return 1
+        return 0
+    fi
+
+    [ -w "$proc" ] || return 1
+    printf '%s\n' "$val" > "$proc" 2>/dev/null || return 1
+    return 0
+}
+
 xmg_tune_sysctl_apply() {
     local file="$1"
     local line=""
-    local failed=0
+    local ok=0 failed=0 skipped=0 rc=0
+    local first_err=""
     local is_restricted=0
 
     if [ ! -r "$file" ]; then
@@ -304,27 +339,42 @@ xmg_tune_sysctl_apply() {
                 ;;
         esac
 
-        if ! sysctl -q -w "$line" >/dev/null 2>&1; then
-            failed=$((failed + 1))
-            if [ "$is_restricted" -eq 0 ]; then
-                xmg_warn "sysctl 应用失败: $line"
-            fi
-        fi
+        _xmg_tune_sysctl_one "$line"
+        rc=$?
+        case "$rc" in
+            0) ok=$((ok + 1)) ;;
+            3) skipped=$((skipped + 1)) ;;
+            *)
+                failed=$((failed + 1))
+                [ -n "$first_err" ] || first_err="$line"
+                # 只回显前 3 条，避免一次刷 20 多行噪音
+                if [ "$is_restricted" -eq 0 ] && [ "$failed" -le 3 ]; then
+                    xmg_warn "sysctl 应用失败: $line"
+                fi
+                ;;
+        esac
     done < "$file"
 
+    # 无论是否成功都同步到 /etc/sysctl.conf：重启后由 init 再尝试一次
+    xmg_tune_sysctl_persist "$file" >/dev/null 2>&1 || true
+
     if [ "$is_restricted" -eq 1 ]; then
-        if [ "$failed" -gt 0 ]; then
-            xmg_info "当前处于受限容器环境，已自动跳过不可写内核参数 ($failed 项)"
-        fi
-        xmg_tune_sysctl_persist "$file" >/dev/null 2>&1 || true
+        xmg_info "受限容器环境：成功 $ok 项，跳过 $skipped 项，失败 $failed 项"
         return 0
     fi
 
-    # 非 systemd 环境补一次 /etc/sysctl.conf 同步，保证重启后仍生效
-    xmg_tune_sysctl_persist "$file" || true
-
     if [ "$failed" -gt 0 ]; then
+        xmg_warn "sysctl 写入结果: 成功 $ok 项 / 跳过 $skipped 项 / 失败 $failed 项"
+        [ -n "$first_err" ] && xmg_warn "首个失败项: $first_err"
+        if [ "$ok" -eq 0 ]; then
+            xmg_error "没有任何参数生效：/proc/sys 可能只读，或内核未开放这些键"
+            return 1
+        fi
         return 1
+    fi
+
+    if [ "$skipped" -gt 0 ]; then
+        xmg_info "sysctl 已应用 $ok 项（$skipped 项本内核不支持，已跳过）"
     fi
     return 0
 }
@@ -484,7 +534,11 @@ xmg_tune_net_optimize() {
 
     xmg_info "检测到内存: ${mem_mb}MB，调优档位: $profile"
     xmg_warn "将写入 $XMG_TUNE_SYSCTL_NET_CONF 并立即应用"
-    xmg_warn "同时写入 nofile limits（PAM + systemd）"
+    if xmg_init_is_openrc; then
+        xmg_warn "同时写入 nofile limits（Alpine 无 PAM，该文件不生效；实际靠服务级 rc_ulimit）"
+    else
+        xmg_warn "同时写入 nofile limits（PAM + systemd）"
+    fi
 
     if ! xmg_confirm "确认执行内核网络参数优化?"; then
         xmg_info "已取消"
@@ -548,7 +602,7 @@ xmg_tune_net_optimize() {
 
     # 个别 key 在容器/精简内核上不可写属正常现象：警告后继续，保证 limits 仍然落盘
     if ! xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_NET_CONF"; then
-        xmg_warn "部分内核参数写入失败（容器/精简内核常见），已跳过失败项"
+        xmg_warn "部分内核参数未能应用，配置已落盘；换支持的内核或重启后会自动重试"
     fi
 
     xmg_tune_write_limits
@@ -1720,7 +1774,7 @@ xmg_tune_swap_show() {
     _xmg_tune_swap_devices
     echo
     echo "== 内存 =="
-    free -h 2>/dev/null || true
+    xmg_mem_free_show 2>/dev/null || true
     echo
     echo "vm.swappiness = $(cat /proc/sys/vm/swappiness 2>/dev/null || echo unknown)"
 }

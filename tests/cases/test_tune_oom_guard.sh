@@ -70,15 +70,19 @@ t_not_contains "高配机不写入 extreme_low 专用的低 tcp_mem" "$NET_CONF_
 # 3. 验证 xmg_tune_sysctl_apply 退出码截断防溢出
 # ==================================================================
 # 构造包含 256 条配置的测试文件
+# 同时伪造 /proc 键树：apply 会先看键是否存在，不存在按"跳过"处理（不计失败）
 SYSCTL_BIG="$XMG_TMP/big_sysctl.conf"
+SYSCTL_PROC="$XMG_TMP/proc"
 : > "$SYSCTL_BIG"
+mkdir -p "$SYSCTL_PROC/net/custom"
 for i in $(seq 1 256); do
     echo "net.custom.param_$i = 1" >> "$SYSCTL_BIG"
+    : > "$SYSCTL_PROC/net/custom/param_$i"
 done
 
 # 模拟 sysctl 全量失败
 sysctl() { return 1; }
-xmg_tune_sysctl_apply "$SYSCTL_BIG" >/dev/null 2>&1
+XMG_PROC_SYS_ROOT="$SYSCTL_PROC" xmg_tune_sysctl_apply "$SYSCTL_BIG" >/dev/null 2>&1
 _rc=$?
 t_equals "sysctl 失败 256 项退出码归一化为 1 而非截断溢出为 0" "$_rc" "1"
 

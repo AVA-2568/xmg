@@ -412,7 +412,11 @@ _xmg_proxy_server_host() {
         return 0
     fi
     local h=""
+    # BusyBox hostname 没有 -I，按「路由源地址 -> 全局地址」逐级回退
     h="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [ -z "$h" ] && command -v ip >/dev/null 2>&1; then
+        h="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)"
+    fi
     if [ -z "$h" ] && command -v ip >/dev/null 2>&1; then
         h="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)"
     fi

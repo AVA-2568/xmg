@@ -317,7 +317,7 @@ xmg_maint_process_inspect() {
     echo
 
     echo "== 内存状态 (Free) =="
-    free -h 2>/dev/null || true
+    xmg_mem_free_show 2>/dev/null || true
     echo
 
     echo "== CPU 占用最高 TOP 5 进程 =="
@@ -359,7 +359,7 @@ xmg_maint_drop_caches() {
     xmg_require_root
 
     echo "== 清理前内存状态 =="
-    free -h 2>/dev/null || true
+    xmg_mem_free_show 2>/dev/null || true
     echo
 
     if xmg_confirm "确认同步磁盘并释放系统缓存? (sync && drop_caches)"; then
@@ -373,7 +373,7 @@ xmg_maint_drop_caches() {
         fi
         echo
         echo "== 清理后内存状态 =="
-        free -h 2>/dev/null || true
+        xmg_mem_free_show 2>/dev/null || true
     else
         xmg_info "已取消"
     fi

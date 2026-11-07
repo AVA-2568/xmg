@@ -143,6 +143,12 @@ t_contains "extreme_low syn_backlog=1024" "$TUNE_NET_CONTENT" "net.ipv4.tcp_max_
 #    受限容器不可写参数静默跳过并友情提示，不报致命错误
 # ------------------------------------------------------------------
 SYSCTL_TEST_FILE="$XMG_TMP/test_sysctl.conf"
+# 伪造 /proc 键树：apply 先判断键是否存在，不存在按"跳过"处理（真实内核差异导致的跳过
+# 不应算失败），这里要让写入路径真的走到 sysctl 才会产生失败计数
+SYSCTL_TEST_PROC="$XMG_TMP/sysctl-proc"
+mkdir -p "$SYSCTL_TEST_PROC/net/core" "$SYSCTL_TEST_PROC/net/ipv4"
+: > "$SYSCTL_TEST_PROC/net/core/somaxconn"
+: > "$SYSCTL_TEST_PROC/net/ipv4/tcp_rmem"
 printf 'net.core.somaxconn = 2048\nnet.ipv4.tcp_rmem = 4096 87380 1048576\n' > "$SYSCTL_TEST_FILE"
 
 # 模拟受限容器 (xmg_detect_container_restricted 返回 1)
@@ -151,13 +157,13 @@ xmg_detect_container_restricted() { return 1; }
 sysctl() { return 1; }
 
 _sc_rc=0
-xmg_tune_sysctl_apply "$SYSCTL_TEST_FILE" >/dev/null 2>&1 || _sc_rc=$?
+XMG_PROC_SYS_ROOT="$SYSCTL_TEST_PROC" xmg_tune_sysctl_apply "$SYSCTL_TEST_FILE" >/dev/null 2>&1 || _sc_rc=$?
 t_equals "受限容器下 sysctl 失败熔断保护平滑返回 0" "$_sc_rc" "0"
 
 # 模拟非受限容器 (返回 0)，失败应正常返回失败计数 (非 0)
 xmg_detect_container_restricted() { return 0; }
 _sc_rc_normal=0
-xmg_tune_sysctl_apply "$SYSCTL_TEST_FILE" >/dev/null 2>&1 || _sc_rc_normal=$?
+XMG_PROC_SYS_ROOT="$SYSCTL_TEST_PROC" xmg_tune_sysctl_apply "$SYSCTL_TEST_FILE" >/dev/null 2>&1 || _sc_rc_normal=$?
 t_assert "正常主机下 sysctl 失败应返回非 0 计数" [ "$_sc_rc_normal" -ne 0 ]
 
 # ------------------------------------------------------------------
