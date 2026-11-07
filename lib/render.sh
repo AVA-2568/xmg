@@ -197,6 +197,88 @@ _xmg_render_dns_servers_json() {
     printf '[%s]' "$out"
 }
 
+# ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
+# REALITY 不需要证书：对 dest 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
+# serverNames 支持逗号分隔多值 —— 这就是「同一端口服务多个域名」的真实端口复用。
+_xmg_render_json_str_array() {
+    local raw="$1"
+    local item="" esc="" out="" first=1
+    local oldifs="$IFS"
+
+    IFS=','
+    for item in $raw; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [ -n "$item" ] || continue
+        _xmg_json_escape_into esc "$item"
+        if [ "$first" -eq 1 ]; then
+            out="\"$esc\""
+            first=0
+        else
+            out="$out, \"$esc\""
+        fi
+    done
+    IFS="$oldifs"
+    printf '[%s]' "$out"
+}
+
+# 生成 REALITY 入站的 JSON 片段（已缩进到 inbounds 数组元素层级）
+_xmg_render_reality_inbound_json() {
+    local listen="$1" port="$2" uuid="$3" path="$4" mode="$5"
+    local dest="$6" sni="$7" privkey="$8" shortid="$9"
+    local esc_listen esc_uuid esc_path esc_mode esc_dest esc_privkey esc_sid
+
+    _xmg_json_escape_into esc_listen "$listen"
+    _xmg_json_escape_into esc_uuid "$uuid"
+    _xmg_json_escape_into esc_path "$path"
+    _xmg_json_escape_into esc_mode "$mode"
+    _xmg_json_escape_into esc_dest "$dest"
+    _xmg_json_escape_into esc_privkey "$privkey"
+    _xmg_json_escape_into esc_sid "$shortid"
+
+    local names_json ids_json
+    names_json="$(_xmg_render_json_str_array "$sni")"
+    if [ -n "$shortid" ]; then
+        ids_json="$(_xmg_render_json_str_array "$shortid")"
+    else
+        # 空 shortId 也要显式给一个空串，否则部分客户端与服务端对不上
+        ids_json='[""]'
+    fi
+
+    printf '    {\n'
+    printf '      "tag": "inbound-reality",\n'
+    printf '      "listen": "%s",\n' "$esc_listen"
+    printf '      "port": %s,\n' "$port"
+    printf '      "protocol": "vless",\n'
+    printf '      "settings": {\n'
+    printf '        "users": [\n'
+    printf '          {\n'
+    printf '            "id": "%s",\n' "$esc_uuid"
+    printf '            "flow": "",\n'
+    printf '            "level": 0\n'
+    printf '          }\n'
+    printf '        ],\n'
+    printf '        "decryption": "none"\n'
+    printf '      },\n'
+    printf '      "streamSettings": {\n'
+    printf '        "network": "xhttp",\n'
+    printf '        "xhttpSettings": {\n'
+    printf '          "path": "%s",\n' "$esc_path"
+    printf '          "mode": "%s"\n' "$esc_mode"
+    printf '        },\n'
+    printf '        "security": "reality",\n'
+    printf '        "realitySettings": {\n'
+    printf '          "show": false,\n'
+    printf '          "dest": "%s",\n' "$esc_dest"
+    printf '          "xver": 0,\n'
+    printf '          "serverNames": %s,\n' "$names_json"
+    printf '          "privateKey": "%s",\n' "$esc_privkey"
+    printf '          "shortIds": %s\n' "$ids_json"
+    printf '        }\n'
+    printf '      }\n'
+    printf '    }'
+}
+
 # ===== 纯 Bash 零依赖内建渲染引擎 =====
 _xmg_render_config_bash() {
     local socks_on="$1" vless_on="$2"
@@ -226,6 +308,34 @@ _xmg_render_config_bash() {
     [ -n "$vless_path" ] || vless_path="/"
     [ -n "$vless_mode" ] || vless_mode="auto"
     [ -n "$socks_udp_bool" ] || socks_udp_bool=false
+
+    # REALITY 参数（VLESS + XHTTP + REALITY，无需证书）
+    local reality_on reality_listen reality_port reality_uuid reality_path reality_mode
+    local reality_dest reality_sni reality_pk reality_sid
+    reality_on="$(_xmg_render_get_val PROXY_REALITY_ENABLED 0)"
+    reality_listen="$(_xmg_render_get_val PROXY_REALITY_LISTEN "$default_listen")"
+    reality_port="$(_xmg_render_get_val PROXY_REALITY_PORT "8443")"
+    reality_uuid="$(_xmg_render_get_val PROXY_REALITY_UUID "")"
+    reality_path="$(_xmg_render_get_val PROXY_REALITY_PATH "/xhttp")"
+    reality_mode="$(_xmg_render_get_val PROXY_REALITY_MODE "auto")"
+    reality_dest="$(_xmg_render_get_val PROXY_REALITY_DEST "www.microsoft.com:443")"
+    reality_sni="$(_xmg_render_get_val PROXY_REALITY_SNI "www.microsoft.com")"
+    reality_pk="$(_xmg_render_get_val PROXY_REALITY_PRIVATE_KEY "")"
+    reality_sid="$(_xmg_render_get_val PROXY_REALITY_SHORT_ID "")"
+
+    [ -n "$reality_listen" ] || reality_listen="$default_listen"
+    if [ "$is_ipv6_only" = "true" ] && [ "$reality_listen" = "0.0.0.0" ]; then
+        reality_listen="::"
+    fi
+    [[ "$reality_port" =~ ^[0-9]+$ ]] && [ "$reality_port" -gt 0 ] && [ "$reality_port" -le 65535 ] || reality_port=8443
+    [ -n "$reality_path" ] || reality_path="/xhttp"
+    [ -n "$reality_mode" ] || reality_mode="auto"
+    [ -n "$reality_dest" ] || reality_dest="www.microsoft.com:443"
+    [ -n "$reality_sni" ] || reality_sni="www.microsoft.com"
+    # 缺私钥或 UUID 的 REALITY 入站会被 Xray 拒绝，直接不渲染，避免整份配置起不来
+    if [ -z "$reality_pk" ] || [ -z "$reality_uuid" ]; then
+        reality_on=0
+    fi
 
     # WARP 参数清洗与兜底
     [ -n "$warp_mode" ] || warp_mode="global"
@@ -301,7 +411,7 @@ _xmg_render_config_bash() {
     printf '    }\n'
     printf '  },\n'
 
-    if [ "$socks_on" != "1" ] && [ "$vless_on" != "1" ]; then
+    if [ "$socks_on" != "1" ] && [ "$vless_on" != "1" ] && [ "$reality_on" != "1" ]; then
         printf '  "inbounds": [],\n'
     else
         printf '  "inbounds": [\n'
@@ -367,6 +477,15 @@ _xmg_render_config_bash() {
             printf '        }\n'
             printf '      }\n'
             printf '    }'
+            need_comma=1
+        fi
+
+        if [ "$reality_on" = "1" ]; then
+            [ "$need_comma" -eq 1 ] && printf ',\n'
+            _xmg_render_reality_inbound_json \
+                "$reality_listen" "$reality_port" "$reality_uuid" \
+                "$reality_path" "$reality_mode" "$reality_dest" "$reality_sni" \
+                "$reality_pk" "$reality_sid"
         fi
         printf '\n  ],\n'
     fi
@@ -563,6 +682,39 @@ xmg_render_config() {
     vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "auto")"
     vless_cert_file="$(_xmg_render_get_val PROXY_VLESS_CERT_FILE "")"
     vless_key_file="$(_xmg_render_get_val PROXY_VLESS_KEY_FILE "")"
+
+    # 提取 REALITY 参数（与纯 Bash 引擎同一套兜底，保证两条渲染路径输出一致）
+    local reality_on reality_listen reality_port reality_uuid reality_path reality_mode
+    local reality_dest reality_sni reality_pk reality_sid reality_json="null"
+    reality_on="$(_xmg_render_get_val PROXY_REALITY_ENABLED 0)"
+    reality_listen="$(_xmg_render_get_val PROXY_REALITY_LISTEN "$default_listen")"
+    reality_port="$(_xmg_render_get_val PROXY_REALITY_PORT "8443")"
+    reality_uuid="$(_xmg_render_get_val PROXY_REALITY_UUID "")"
+    reality_path="$(_xmg_render_get_val PROXY_REALITY_PATH "/xhttp")"
+    reality_mode="$(_xmg_render_get_val PROXY_REALITY_MODE "auto")"
+    reality_dest="$(_xmg_render_get_val PROXY_REALITY_DEST "www.microsoft.com:443")"
+    reality_sni="$(_xmg_render_get_val PROXY_REALITY_SNI "www.microsoft.com")"
+    reality_pk="$(_xmg_render_get_val PROXY_REALITY_PRIVATE_KEY "")"
+    reality_sid="$(_xmg_render_get_val PROXY_REALITY_SHORT_ID "")"
+
+    [ -n "$reality_listen" ] || reality_listen="$default_listen"
+    if [ "$is_ipv6_only" = "true" ] && [ "$reality_listen" = "0.0.0.0" ]; then
+        reality_listen="::"
+    fi
+    [[ "$reality_port" =~ ^[0-9]+$ ]] && [ "$reality_port" -gt 0 ] && [ "$reality_port" -le 65535 ] || reality_port=8443
+    [ -n "$reality_path" ] || reality_path="/xhttp"
+    [ -n "$reality_mode" ] || reality_mode="auto"
+    [ -n "$reality_dest" ] || reality_dest="www.microsoft.com:443"
+    [ -n "$reality_sni" ] || reality_sni="www.microsoft.com"
+    if [ -z "$reality_pk" ] || [ -z "$reality_uuid" ]; then
+        reality_on=0
+    fi
+    if [ "$reality_on" = "1" ]; then
+        reality_json="$(_xmg_render_reality_inbound_json \
+            "$reality_listen" "$reality_port" "$reality_uuid" \
+            "$reality_path" "$reality_mode" "$reality_dest" "$reality_sni" \
+            "$reality_pk" "$reality_sid")"
+    fi
 
     # 提取全局 policy bufferSize 与端口保底
     local bufsz
@@ -882,7 +1034,8 @@ xmg_render_config() {
         }
       }
     }
-  ] else [] end)
+  ] else [] end) +
+  (if $reality_on then [$reality_inbound] else [] end)
 ) as $active_inbounds |
 .inbounds = $active_inbounds'
 
@@ -906,6 +1059,8 @@ xmg_render_config() {
             --arg vless_mode "$vless_mode"
             --arg vless_cert_file "$vless_cert_file"
             --arg vless_key_file "$vless_key_file"
+            --argjson reality_on "$([ "$reality_on" = "1" ] && printf 'true' || printf 'false')"
+            --argjson reality_inbound "$reality_json"
             --argjson warp_on "$warp_bool"
             --arg warp_mode "$warp_mode"
             --arg warp_endpoint "$warp_endpoint"

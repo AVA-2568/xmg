@@ -170,7 +170,13 @@ xmg_main() {
                 disable) shift; xmg_proxy_disable "$@" ;;
                 export)  shift; xmg_proxy_export "$@" ;;
                 acme)    shift; xmg_proxy_acme_issue "$@" ;;
-                link)    shift; xmg_proxy_vless_link "$@" ;;
+                link)    shift
+                         case "${1:-vless}" in
+                             reality) shift; xmg_proxy_reality_link "$@" ;;
+                             *)       xmg_proxy_vless_link "$@" ;;
+                         esac
+                         ;;
+                keygen)  shift; xmg_proxy_reality_keygen "$@" ;;
                 menu)    shift || true; ( set +e; xmg_proxy_menu "$@" ) ;;
                 *)       xmg_error "未知的 proxy 子命令: $1"; exit 2 ;;
             esac

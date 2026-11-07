@@ -91,6 +91,16 @@ xmg_state_defaults() {
         'PROXY_VLESS_CERT_SOURCE=user' \
         'PROXY_VLESS_CERT_FILE=' \
         'PROXY_VLESS_KEY_FILE=' \
+        'PROXY_REALITY_ENABLED=0' \
+        "PROXY_REALITY_LISTEN=$def_listen" \
+        'PROXY_REALITY_PORT=8443' \
+        'PROXY_REALITY_UUID=' \
+        'PROXY_REALITY_PATH=/xhttp' \
+        'PROXY_REALITY_MODE=auto' \
+        'PROXY_REALITY_DEST=www.microsoft.com:443' \
+        'PROXY_REALITY_SNI=www.microsoft.com' \
+        'PROXY_REALITY_PRIVATE_KEY=' \
+        'PROXY_REALITY_SHORT_ID=' \
         'XMG_BUFFER_SIZE=4' \
         'XMG_BACKUP_KEEP=5' \
         'XRAY_CHANNEL=preview' \
@@ -543,13 +553,15 @@ _xmg_state_validate_positive_int() {
 }
 
 xmg_state_validate() {
-    local socks_on vless_on _bufsz _keep
+    local socks_on vless_on reality_on _bufsz _keep
 
     _state_val socks_on PROXY_SOCKS_ENABLED
     _state_val vless_on PROXY_VLESS_ENABLED
+    _state_val reality_on PROXY_REALITY_ENABLED
 
     _xmg_state_validate_onoff PROXY_SOCKS_ENABLED "$socks_on" || return 2
     _xmg_state_validate_onoff PROXY_VLESS_ENABLED "$vless_on" || return 2
+    _xmg_state_validate_onoff PROXY_REALITY_ENABLED "$reality_on" || return 2
 
     # bufferSize 恒为小值，仅校验为正整数
     _state_val _bufsz XMG_BUFFER_SIZE
@@ -667,15 +679,79 @@ xmg_state_validate() {
         esac
     fi
 
-    # 端口冲突：仅两方案同时启用时检查
-    if [ "$socks_on" = "1" ] && [ "$vless_on" = "1" ]; then
-        local sp vp
-        _state_val sp PROXY_SOCKS_PORT
-        _state_val vp PROXY_VLESS_PORT
-        if [ "$sp" = "$vp" ]; then
-            xmg_error "端口冲突：SOCKS5 与 VLESS 均使用端口 $sp，请为其中一个更换端口"
+    if [ "$reality_on" = "1" ]; then
+        local rport rlisten ruuid rpath rmode rdest rsni rpk rsid
+        _state_val rport PROXY_REALITY_PORT
+        xmg_state_validate_port "$rport" || return 2
+
+        _state_val rlisten PROXY_REALITY_LISTEN
+        xmg_state_validate_ipv4or6 "$rlisten" || return 2
+
+        _state_val ruuid PROXY_REALITY_UUID
+        if [ -z "$ruuid" ]; then
+            xmg_error "REALITY 启用时 UUID 不能为空"
             return 2
         fi
+        if [[ ! "$ruuid" =~ ^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$ ]] \
+            && [ "${#ruuid}" -ge 30 ]; then
+            xmg_error "REALITY UUID 格式非法：既不是合法 UUID，长度也未小于 30 字节（当前 ${#ruuid}）"
+            return 2
+        fi
+
+        _state_val rpath PROXY_REALITY_PATH
+        if [ "${rpath:0:1}" != "/" ]; then
+            xmg_error "REALITY path 必须以 / 开头: '$rpath'"
+            return 2
+        fi
+
+        _state_val rmode PROXY_REALITY_MODE
+        xmg_state_validate_mode "$rmode" || return 2
+
+        # dest 是 REALITY 的回落目标（伪装站），形如 host:port / [v6]:port
+        _state_val rdest PROXY_REALITY_DEST
+        if [[ ! "$rdest" =~ ^(\[[0-9A-Fa-f:]+\]|[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?):([0-9]{1,5})$ ]]; then
+            xmg_error "REALITY dest 格式非法: '$rdest'（需为 host:port，如 www.microsoft.com:443）"
+            return 2
+        fi
+
+        _state_val rsni PROXY_REALITY_SNI
+        if [[ ! "$rsni" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+            xmg_error "REALITY serverName 格式非法: '$rsni'"
+            return 2
+        fi
+
+        _state_val rpk PROXY_REALITY_PRIVATE_KEY
+        if [ -z "$rpk" ]; then
+            xmg_error "REALITY 启用时 privateKey 不能为空（执行 xmg proxy keygen 生成）"
+            return 2
+        fi
+
+        # shortId 允许为空（不使用），否则必须是 1-16 位十六进制
+        _state_val rsid PROXY_REALITY_SHORT_ID
+        if [ -n "$rsid" ] && [[ ! "$rsid" =~ ^[0-9A-Fa-f]{1,16}$ ]]; then
+            xmg_error "REALITY shortId 必须是 1-16 位十六进制: '$rsid'"
+            return 2
+        fi
+    fi
+
+    # 端口冲突：任一两个启用的入站共用同一端口，Xray 会因 bind 失败起不来。
+    # TLS 与 REALITY 的 TLS 终结点互斥，只能分端口，不能共用一个 443。
+    local p_socks="" p_vless="" p_reality=""
+    [ "$socks_on" = "1" ] && _state_val p_socks PROXY_SOCKS_PORT
+    [ "$vless_on" = "1" ] && _state_val p_vless PROXY_VLESS_PORT
+    [ "$reality_on" = "1" ] && _state_val p_reality PROXY_REALITY_PORT
+
+    if [ -n "$p_socks" ] && [ -n "$p_vless" ] && [ "$p_socks" = "$p_vless" ]; then
+        xmg_error "端口冲突：SOCKS5 与 VLESS 均使用端口 $p_socks，请为其中一个更换端口"
+        return 2
+    fi
+    if [ -n "$p_socks" ] && [ -n "$p_reality" ] && [ "$p_socks" = "$p_reality" ]; then
+        xmg_error "端口冲突：SOCKS5 与 REALITY 均使用端口 $p_socks，请为其中一个更换端口"
+        return 2
+    fi
+    if [ -n "$p_vless" ] && [ -n "$p_reality" ] && [ "$p_vless" = "$p_reality" ]; then
+        xmg_error "端口冲突：VLESS(TLS) 与 REALITY 均使用端口 $p_vless（TLS 终结点不同，必须分端口）"
+        return 2
     fi
 
     # WARP 状态校验

@@ -115,6 +115,16 @@ xmg_proxy_parse_args() {
             --vless-cert-source) PARAMS["vless_cert_source"]="${2:-}"; shift 2 || return 2 ;;
             --vless-cert-file)   PARAMS["vless_cert_file"]="${2:-}";   shift 2 || return 2 ;;
             --vless-key-file)    PARAMS["vless_key_file"]="${2:-}";    shift 2 || return 2 ;;
+            --reality)           PARAMS["reality"]="${2:-}";           shift 2 || return 2 ;;
+            --reality-port)      PARAMS["reality_port"]="${2:-}";      shift 2 || return 2 ;;
+            --reality-listen)    PARAMS["reality_listen"]="${2:-}";    shift 2 || return 2 ;;
+            --reality-uuid)      PARAMS["reality_uuid"]="${2:-}";      shift 2 || return 2 ;;
+            --reality-path)      PARAMS["reality_path"]="${2:-}";      shift 2 || return 2 ;;
+            --reality-mode)      PARAMS["reality_mode"]="${2:-}";      shift 2 || return 2 ;;
+            --reality-dest)      PARAMS["reality_dest"]="${2:-}";      shift 2 || return 2 ;;
+            --reality-sni)       PARAMS["reality_sni"]="${2:-}";       shift 2 || return 2 ;;
+            --reality-pbk)       PARAMS["reality_pbk"]="${2:-}";       shift 2 || return 2 ;;
+            --reality-sid)       PARAMS["reality_sid"]="${2:-}";       shift 2 || return 2 ;;
             *)
                 xmg_error "未知参数: $1"
                 return 2
@@ -198,6 +208,15 @@ xmg_proxy_apply() {
     _xmg_stage_param PROXY_VLESS_CERT_SOURCE "${PARAMS[vless_cert_source]:-}"
     _xmg_stage_param PROXY_VLESS_CERT_FILE   "${PARAMS[vless_cert_file]:-}"
     _xmg_stage_param PROXY_VLESS_KEY_FILE    "${PARAMS[vless_key_file]:-}"
+    _xmg_stage_param PROXY_REALITY_PORT      "${PARAMS[reality_port]:-}"
+    _xmg_stage_param PROXY_REALITY_LISTEN    "${PARAMS[reality_listen]:-}"
+    _xmg_stage_param PROXY_REALITY_UUID      "${PARAMS[reality_uuid]:-}"
+    _xmg_stage_param PROXY_REALITY_PATH      "${PARAMS[reality_path]:-}"
+    _xmg_stage_param PROXY_REALITY_MODE      "${PARAMS[reality_mode]:-}"
+    _xmg_stage_param PROXY_REALITY_DEST      "${PARAMS[reality_dest]:-}"
+    _xmg_stage_param PROXY_REALITY_SNI       "${PARAMS[reality_sni]:-}"
+    _xmg_stage_param PROXY_REALITY_PRIVATE_KEY "${PARAMS[reality_pbk]:-}"
+    _xmg_stage_param PROXY_REALITY_SHORT_ID  "${PARAMS[reality_sid]:-}"
 
     if [ -n "${PARAMS[socks]:-}" ]; then
         _xmg_stage_onoff PROXY_SOCKS_ENABLED "${PARAMS[socks]}" || {
@@ -213,6 +232,44 @@ xmg_proxy_apply() {
         _xmg_stage_onoff PROXY_VLESS_ENABLED "${PARAMS[vless]}" || {
             xmg_state_stage_clear; return 2
         }
+    fi
+    if [ -n "${PARAMS[reality]:-}" ]; then
+        _xmg_stage_onoff PROXY_REALITY_ENABLED "${PARAMS[reality]}" || {
+            xmg_state_stage_clear; return 2
+        }
+    fi
+
+    # REALITY 自举：UUID / privateKey / shortId 缺失时自动补齐。
+    # 必须在 schema 校验之前完成，否则校验会直接以「不能为空」失败。
+    if [ "$(xmg_state_get PROXY_REALITY_ENABLED 0)" = "1" ]; then
+        local r_uuid="" r_pk="" r_pub="" r_sid="" _kp=""
+        r_uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
+        [ -n "$r_uuid" ] || r_uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
+        if [ -z "$r_uuid" ]; then
+            if [ -r /proc/sys/kernel/random/uuid ]; then
+                r_uuid="$(tr -d '\r\n' < /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+            fi
+            if [ -z "$r_uuid" ] && command -v openssl >/dev/null 2>&1; then
+                r_uuid="$(openssl rand -hex 16 2>/dev/null | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
+            fi
+        fi
+        [ -n "$r_uuid" ] && _xmg_stage PROXY_REALITY_UUID "$r_uuid"
+
+        r_pk="$(xmg_state_get PROXY_REALITY_PRIVATE_KEY "")"
+        if [ -z "$r_pk" ]; then
+            _kp="$(xmg_proxy_reality_keygen_raw 2>/dev/null || true)"
+            if [ -n "$_kp" ]; then
+                read -r r_pk r_pub <<< "$_kp"
+                _xmg_stage PROXY_REALITY_PRIVATE_KEY "$r_pk"
+                xmg_info "已自动生成 REALITY 密钥对（公钥: $r_pub）"
+            fi
+        fi
+
+        r_sid="$(xmg_state_get PROXY_REALITY_SHORT_ID "")"
+        if [ -z "$r_sid" ] && command -v openssl >/dev/null 2>&1; then
+            r_sid="$(openssl rand -hex 8 2>/dev/null || true)"
+            [ -n "$r_sid" ] && _xmg_stage PROXY_REALITY_SHORT_ID "$r_sid"
+        fi
     fi
 
     # schema 校验：读内存草稿。失败时丢弃草稿（state 文件从未被写），绝不触碰现网。
@@ -282,11 +339,113 @@ xmg_proxy_disable() {
     case "${1:-}" in
         socks) xmg_proxy_apply --socks off ;;
         vless) xmg_proxy_apply --vless off ;;
+        reality) xmg_proxy_apply --reality off ;;
         *)
-            xmg_error "用法: xmg_proxy_disable <socks|vless>"
+            xmg_error "用法: xmg_proxy_disable <socks|vless|reality>"
             return 2
             ;;
     esac
+}
+
+# ===== REALITY 密钥 =====
+# 输出 "privateKey publicKey"（一行两列），失败返回 1。
+# 兼容 xray 新旧两种输出：PrivateKey/Public key 与 Private key/Password。
+xmg_proxy_reality_keygen_raw() {
+    local bin=""
+    if declare -F xmg_xray_binary >/dev/null 2>&1; then
+        bin="$(xmg_xray_binary 2>/dev/null || true)"
+    fi
+    [ -n "$bin" ] || bin="$(command -v xray 2>/dev/null || true)"
+    [ -n "$bin" ] && [ -x "$bin" ] || return 1
+
+    local out="" priv="" pub=""
+    out="$("$bin" x25519 2>/dev/null || true)"
+    [ -n "$out" ] || return 1
+    priv="$(printf '%s\n' "$out" | sed -n 's/^[Pp]rivate[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
+    pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
+    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
+    [ -n "$priv" ] || return 1
+    printf '%s %s\n' "$priv" "$pub"
+}
+
+# 由私钥反推公钥（客户端链接里的 pbk）。失败时输出空串。
+_xmg_proxy_reality_pubkey() {
+    local pk="$1" bin=""
+    [ -n "$pk" ] || return 1
+    if declare -F xmg_xray_binary >/dev/null 2>&1; then
+        bin="$(xmg_xray_binary 2>/dev/null || true)"
+    fi
+    [ -n "$bin" ] || bin="$(command -v xray 2>/dev/null || true)"
+    [ -n "$bin" ] && [ -x "$bin" ] || return 1
+
+    local out="" pub=""
+    out="$("$bin" x25519 -i "$pk" 2>/dev/null || true)"
+    [ -n "$out" ] || return 1
+    pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
+    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
+    [ -n "$pub" ] || return 1
+    printf '%s' "$pub"
+}
+
+xmg_proxy_reality_keygen() {
+    local kp="" priv="" pub="" sid=""
+    kp="$(xmg_proxy_reality_keygen_raw 2>/dev/null || true)"
+    if [ -z "$kp" ]; then
+        xmg_error "未找到 xray 内核，无法生成 REALITY 密钥（先执行 xmg core install）"
+        return 1
+    fi
+    read -r priv pub <<< "$kp"
+    command -v openssl >/dev/null 2>&1 && sid="$(openssl rand -hex 8 2>/dev/null || true)"
+
+    echo "REALITY 密钥对（privateKey 填服务端，pbk 填客户端）:"
+    echo "  privateKey: $priv"
+    echo "  publicKey : ${pub:-（当前内核未输出，可用 xray x25519 -i <privateKey> 反推）}"
+    [ -n "$sid" ] && echo "  shortId   : $sid（1-16 位十六进制，可留空）"
+    return 0
+}
+
+# ===== REALITY 分享链接 =====
+# REALITY 不需要域名：节点地址是 VPS 公网 IP，伪装目标是 sni/dest。
+_xmg_proxy_server_host() {
+    if [ -n "${XMG_PUBLIC_HOST:-}" ]; then
+        printf '%s' "$XMG_PUBLIC_HOST"
+        return 0
+    fi
+    local h=""
+    h="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+    if [ -z "$h" ] && command -v ip >/dev/null 2>&1; then
+        h="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)"
+    fi
+    printf '%s' "${h:-<SERVER_IP>}"
+}
+
+xmg_proxy_reality_link() {
+    declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
+
+    local uuid="" port="" path="" mode="" sni="" pk="" sid="" pub="" host=""
+    uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
+    [ -n "$uuid" ] || uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
+    port="$(xmg_state_get PROXY_REALITY_PORT 8443)"
+    path="$(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
+    mode="$(xmg_state_get PROXY_REALITY_MODE "auto")"
+    sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
+    pk="$(xmg_state_get PROXY_REALITY_PRIVATE_KEY "")"
+    sid="$(xmg_state_get PROXY_REALITY_SHORT_ID "")"
+    [ -n "$uuid" ] || return 1
+
+    pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
+    [ -n "$pub" ] || pub="<PUBLIC_KEY>"
+    host="$(_xmg_proxy_server_host)"
+    [[ "$host" =~ : ]] && [[ ! "$host" =~ ^\[.*\]$ ]] && host="[${host}]"
+
+    local enc_path="${path//\//%2F}"
+    local link="vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&type=xhttp&path=${enc_path}&mode=${mode}#XMG-VLESS-REALITY"
+
+    echo "==================== REALITY 节点链接 ===================="
+    echo "服务端 privateKey 不出现在链接里；客户端用 pbk(公钥) 校验。"
+    printf '%s\n' "$link"
+    echo "=========================================================="
+    return 0
 }
 
 # ===== 客户端节点分享链接生成器 =====
@@ -395,6 +554,21 @@ xmg_proxy_status() {
         echo "  证书: $(xmg_state_get PROXY_VLESS_CERT_SOURCE)"
         echo
         xmg_proxy_vless_link 2>/dev/null || true
+    else
+        echo "  状态: 未启用"
+    fi
+    echo
+    echo "[VLESS + XHTTP + REALITY]"
+    local reality_on="0"
+    reality_on="$(xmg_state_get PROXY_REALITY_ENABLED 0)"
+    if [ "$reality_on" = "1" ]; then
+        echo "  状态: 启用（无证书，伪装目标 $(xmg_state_get PROXY_REALITY_DEST "www.microsoft.com:443")）"
+        echo "  监听: $(xmg_state_get PROXY_REALITY_LISTEN):$(xmg_state_get PROXY_REALITY_PORT 8443)"
+        echo "  SNI : $(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
+        echo "  path: $(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
+        echo "  mode: $(xmg_state_get PROXY_REALITY_MODE "auto")"
+        echo
+        xmg_proxy_reality_link 2>/dev/null || true
     else
         echo "  状态: 未启用"
     fi
