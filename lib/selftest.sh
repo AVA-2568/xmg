@@ -53,6 +53,8 @@ XMG_SELFTEST_PASS=0
 XMG_SELFTEST_FAIL=0
 XMG_SELFTEST_WARN=0
 XMG_SELFTEST_QUIET="${XMG_SELFTEST_QUIET:-0}"
+# 内核缺失时置 1：服务注册检查全部依赖内核，避免同一根因刷 3 条 FAIL
+XMG_SELFTEST_CORE_ABSENT=0
 
 # 独立加载兜底
 if ! declare -F xmg_error >/dev/null 2>&1; then
@@ -100,13 +102,20 @@ _st_check_env() {
     xmg_os_detect force
 
     local id="" like="" family=""
-    if [ -r /etc/os-release ]; then
-        id="$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | head -1 | tr -d '"'\''\r')"
-        like="$(sed -n 's/^ID_LIKE=//p' /etc/os-release 2>/dev/null | head -1 | tr -d '"'\''\r')"
+    local rel="${XMG_OS_RELEASE_FILE:-/etc/os-release}"
+    if [ -r "$rel" ]; then
+        id="$(sed -n 's/^ID=//p' "$rel" 2>/dev/null | head -1 | tr -d '"'\''\r')"
+        like="$(sed -n 's/^ID_LIKE=//p' "$rel" 2>/dev/null | head -1 | tr -d '"'\''\r')"
+    elif [ -r "${XMG_ALPINE_RELEASE_FILE:-/etc/alpine-release}" ]; then
+        # 极简 Alpine 镜像可能没有完整 os-release，与 os.sh 用同一回退口径
+        id="alpine"
     fi
     family="$(xmg_os_family_resolve "$id" "$like")"
 
-    if [ "$family" = "$XMG_OS_FAMILY" ]; then
+    if [ -n "${MOCK_OS_ID:-}" ]; then
+        # 测试桩注入下无法做「独立解析」交叉验证，直接采信探测结果
+        _st_pass "发行版家族: $XMG_OS_FAMILY (${XMG_OS_PRETTY:-unknown})"
+    elif [ "$family" = "$XMG_OS_FAMILY" ]; then
         _st_pass "发行版家族一致: $XMG_OS_FAMILY (${XMG_OS_PRETTY:-unknown})"
     else
         _st_fail "发行版家族不一致: 探测=$XMG_OS_FAMILY 独立解析=$family (id=$id)"
@@ -193,7 +202,10 @@ _st_check_core() {
     if [ -x "$bin" ]; then
         _st_pass "内核已安装: $bin ($("$bin" version 2>/dev/null | head -n 1 || echo 版本未知))"
     else
-        _st_fail "未找到 Xray 内核: $bin"
+        # 只装框架、内核后装是受支持的中间态：install.sh 只落框架，内核走 xmg core install。
+        # 这里判 FAIL 会让全新安装必然一片红，把真正的适配问题淹掉。
+        XMG_SELFTEST_CORE_ABSENT=1
+        _st_warn "Xray 内核尚未安装: $bin（执行 xmg core install 后再自检）"
         return 0
     fi
 
@@ -220,6 +232,11 @@ _st_check_service() {
 
     if ! xmg_svc_supported; then
         _st_warn "init=$XMG_INIT_SYSTEM，跳过服务注册检查"
+        return 0
+    fi
+
+    if [ "$XMG_SELFTEST_CORE_ABSENT" = "1" ]; then
+        _st_warn "内核未安装，跳过服务注册检查（安装内核时会自动生成并加入开机自启）"
         return 0
     fi
 
@@ -252,8 +269,8 @@ _st_check_service() {
         local initd="${XMG_INITD_DIR:-/etc/init.d}/${svc}"
         if [ -f "$initd" ]; then
             _st_pass "OpenRC 服务脚本存在: $initd"
-            if grep -q 'GOMEMLIMIT=100MiB' "$initd" 2>/dev/null; then
-                _st_pass "内存抑制已注入: GOMEMLIMIT=100MiB"
+            if grep -q 'GOMEMLIMIT=' "$initd" 2>/dev/null; then
+                _st_pass "内存抑制已注入: $(sed -n 's/.*GOMEMLIMIT=\([^[:space:]]*\).*/GOMEMLIMIT=\1/p' "$initd" | head -n 1)"
             else
                 _st_warn "OpenRC 脚本未包含 GOMEMLIMIT"
             fi
@@ -262,14 +279,15 @@ _st_check_service() {
             else
                 _st_warn "OpenRC 脚本未包含 rc_ulimit"
             fi
+            # 运行级断言依附于脚本存在：脚本都没有时必然也未注册，
+            # 同一个根因只报一条 FAIL，否则用户会被重复项误导
+            if xmg_svc_is_enabled "$svc"; then
+                _st_pass "已加入默认运行级"
+            else
+                _st_fail "未加入默认运行级（可执行 rc-update add $svc default）"
+            fi
         else
-            _st_fail "OpenRC 服务脚本不存在: $initd"
-        fi
-
-        if xmg_svc_is_enabled "$svc"; then
-            _st_pass "已加入默认运行级"
-        else
-            _st_fail "未加入默认运行级"
+            _st_fail "OpenRC 服务脚本不存在: $initd（可执行 xmg xray 重新注册）"
         fi
     fi
 
@@ -465,10 +483,15 @@ USAGE
     XMG_SELFTEST_PASS=0
     XMG_SELFTEST_FAIL=0
     XMG_SELFTEST_WARN=0
+    XMG_SELFTEST_CORE_ABSENT=0
+
+    # 抬头行必须先探测：以往探测发生在 _st_check_env 里，
+    # 导致全新会话下抬头永远打印 "发行版: unknown | init: unknown"
+    declare -F xmg_os_detect >/dev/null 2>&1 && xmg_os_detect force 2>/dev/null
 
     printf 'XMG 安装自检（只读，不会修改任何配置）\n'
     printf '主机: %s | 发行版: %s | init: %s\n' \
-        "$(hostname 2>/dev/null || echo unknown)" "${XMG_OS_PRETTY:-unknown}" "$XMG_INIT_SYSTEM"
+        "$(hostname 2>/dev/null || echo unknown)" "${XMG_OS_PRETTY:-unknown}" "${XMG_INIT_SYSTEM:-unknown}"
 
     _st_check_env
     _st_check_files
@@ -487,6 +510,11 @@ USAGE
     if [ "$XMG_SELFTEST_FAIL" -gt 0 ]; then
         printf '结论: 存在 %d 项不一致，请按上面的 FAIL 项处理\n' "$XMG_SELFTEST_FAIL"
         return 1
+    fi
+
+    if [ "$XMG_SELFTEST_CORE_ABSENT" = "1" ]; then
+        printf '结论: XMG 框架安装完整；Xray 内核尚未安装（执行 xmg core install 完成部署）\n'
+        return 0
     fi
 
     printf '结论: 安装一致性检查通过\n'

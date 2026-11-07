@@ -410,7 +410,12 @@ xmg_tune_write_limits() {
 root soft nofile $XMG_TUNE_NOFILE
 root hard nofile $XMG_TUNE_NOFILE
 EOF
-    xmg_info "nofile limits 已写入: $XMG_TUNE_LIMITS_CONF（新登录会话生效）"
+    # Alpine/OpenRC 没有 PAM，limits.d 根本不会被读取，不能对外宣称"已生效"
+    if xmg_init_is_openrc; then
+        xmg_warn "$XMG_TUNE_LIMITS_CONF 已写入，但 Alpine/OpenRC 无 PAM，该文件不会生效"
+    else
+        xmg_info "nofile limits 已写入: $XMG_TUNE_LIMITS_CONF（新登录会话生效）"
+    fi
 
     # systemd 服务不受 limits.d 影响，需单独设置 DefaultLimitNOFILE
     if xmg_init_use_systemd_units; then
@@ -1448,6 +1453,69 @@ xmg_tune_detect_ip_timezone() {
     echo ""
 }
 
+# 启动 chronyd：容器里发行版脚本的 `need net` 依赖常常无法满足
+# （networking 未运行 → OpenRC 拒绝启动，只回一句 failed to start），
+# 失败时用 --nodeps 重试，并把真实报错打出来。
+_xmg_tune_time_sync_start_chrony() {
+    local out="" rc=0
+
+    xmg_svc_enable chronyd >/dev/null 2>&1 || true
+
+    out="$(xmg_svc_start chronyd 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ] && xmg_svc_is_active chronyd; then
+        xmg_info "chronyd 已启动"
+        return 0
+    fi
+
+    if [ "$XMG_INIT_SYSTEM" = "openrc" ]; then
+        out="$(xmg_svc_start_nodeps chronyd 2>&1)" || rc=$?
+        if xmg_svc_is_active chronyd; then
+            xmg_info "chronyd 已启动（跳过 net 依赖，容器环境常见）"
+            return 0
+        fi
+    fi
+
+    # 以往全量重定向到 /dev/null，只剩一句「启动失败」，排障无从下手
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out" | tail -n 6 | sed 's/^/    /' >&2
+    fi
+    return 1
+}
+
+_xmg_tune_time_sync_fail_hint() {
+    local virt=""
+    if declare -F xmg_detect_virt >/dev/null 2>&1; then
+        virt="$(xmg_detect_virt 2>/dev/null || true)"
+    fi
+
+    case "$virt" in
+        lxc|docker|openvz|podman|systemd-nspawn)
+            xmg_warn "chronyd 启动失败（$virt 容器内常见：无 CAP_SYS_TIME 或 net 依赖不可用）"
+            xmg_warn "容器时钟通常由宿主机同步，可用 xmg doctor 的 NTP 项确认"
+            ;;
+        *)
+            xmg_warn "chronyd 启动失败，可手动: rc-service chronyd start"
+            ;;
+    esac
+    return 1
+}
+
+# 时间同步：chrony 优先，其次 busybox ntpd，全失败再给容器侧结论
+_xmg_tune_time_sync_start() {
+    if xmg_cmd_exists chronyc || xmg_cmd_exists chronyd || [ -x /etc/init.d/chronyd ]; then
+        _xmg_tune_time_sync_start_chrony && return 0
+    fi
+    if [ -x /etc/init.d/ntpd ]; then
+        xmg_svc_enable ntpd >/dev/null 2>&1 || true
+        if xmg_svc_start ntpd >/dev/null 2>&1 && xmg_svc_is_active ntpd; then
+            xmg_info "已回退到 busybox ntpd"
+            return 0
+        fi
+    fi
+    _xmg_tune_time_sync_fail_hint
+    return 1
+}
+
 # OpenRC（Alpine）时区与时间同步：无 timedatectl，直接用 /etc/timezone + /etc/localtime
 xmg_tune_time_sync_openrc() {
     local current_tz="unknown"
@@ -1505,23 +1573,12 @@ xmg_tune_time_sync_openrc() {
     fi
 
     # 时间同步：chrony 优先，其次 busybox ntpd
-    if xmg_cmd_exists chronyc || xmg_cmd_exists chronyd; then
-        xmg_svc_enable chronyd >/dev/null 2>&1 || true
-        xmg_svc_restart chronyd >/dev/null 2>&1 && xmg_info "chronyd 已启动" || xmg_warn "chronyd 启动失败"
-    else
+    if ! xmg_cmd_exists chronyc && ! xmg_cmd_exists chronyd; then
         xmg_info "未检测到 chrony，尝试安装: $(xmg_pkg_hint chrony)"
-        if xmg_pkg_install chrony >/dev/null 2>&1; then
-            xmg_svc_enable chronyd >/dev/null 2>&1 || true
-            xmg_svc_restart chronyd >/dev/null 2>&1 && xmg_info "chronyd 已安装并启动" || \
-                xmg_warn "chronyd 启动失败，可手动: rc-service chronyd start"
-        elif [ -x /etc/init.d/ntpd ]; then
-            xmg_svc_enable ntpd >/dev/null 2>&1 || true
-            xmg_svc_restart ntpd >/dev/null 2>&1 && xmg_info "已回退到 busybox ntpd" || \
-                xmg_warn "ntpd 启动失败"
-        else
-            xmg_warn "未找到可用的时间同步服务，请手动安装 chrony"
-        fi
+        xmg_pkg_install chrony >/dev/null 2>&1 || \
+            xmg_warn "chrony 安装失败，将尝试 busybox ntpd"
     fi
+    _xmg_tune_time_sync_start || true
 
     echo
     date 2>/dev/null || true
@@ -1644,9 +1701,23 @@ xmg_tune_swap_to_mb() {
     esac
 }
 
+# 仅输出 swap 设备表：BusyBox 的 swapon 没有 --show（Alpine 默认），退回 /proc/swaps
+_xmg_tune_swap_devices() {
+    if swapon --show 2>/dev/null; then
+        return 0
+    fi
+    local n=""
+    n="$(awk 'END {print NR+0}' /proc/swaps 2>/dev/null || echo 1)"
+    if [ "${n:-1}" -gt 1 ]; then
+        cat /proc/swaps
+    else
+        echo "(无)"
+    fi
+}
+
 xmg_tune_swap_show() {
     echo "== swap 设备 =="
-    swapon --show 2>/dev/null || echo "(无)"
+    _xmg_tune_swap_devices
     echo
     echo "== 内存 =="
     free -h 2>/dev/null || true
@@ -1822,7 +1893,7 @@ EOF
     xmg_tune_sysctl_apply "$XMG_TUNE_SYSCTL_SWAP_CONF"
 
     xmg_info "Swap 创建完成（已持久化到 /etc/fstab）"
-    swapon --show
+    grep -F "$XMG_TUNE_SWAPFILE" /proc/swaps 2>/dev/null || xmg_tune_swap_show
 }
 
 xmg_tune_swap_remove() {
@@ -1952,7 +2023,7 @@ xmg_tune_status() {
     echo
 
     echo "===== Swap ====="
-    swapon --show 2>/dev/null || echo "(无 swap)"
+    _xmg_tune_swap_devices
 }
 
 # ===== 菜单 =====

@@ -14,12 +14,14 @@ bash -c 'set -e; XMG_LIB_DIR="'"$SRC"'/lib"; source "'"$SRC"'/lib/selftest.sh"; 
 t_equals "selftest.sh 独立加载成功" "$_LOAD_RC" "0"
 
 # --- 2. 命令分派与帮助 ---
+# 显式指定 XMG_LIB_DIR：用例共享同一 shell，上文其他用例可能导出过
+# XMG_LIB_DIR=/opt/xmg/lib（本机不存在），不指定会让入口直接 exit 1
 _HELP_RC=0
-bash "$SRC/xmg" selftest --help >/dev/null 2>&1 || _HELP_RC=1
+XMG_LIB_DIR="$SRC/lib" bash "$SRC/xmg" selftest --help >/dev/null 2>&1 || _HELP_RC=1
 t_equals "xmg selftest --help 退出码为 0" "$_HELP_RC" "0"
 
 _BAD_RC=0
-bash "$SRC/xmg" selftest --nonsense >/dev/null 2>&1 || _BAD_RC=$?
+XMG_LIB_DIR="$SRC/lib" bash "$SRC/xmg" selftest --nonsense >/dev/null 2>&1 || _BAD_RC=$?
 t_equals "xmg selftest 非法参数退出码为 2" "$_BAD_RC" "2"
 
 # --- 3. 空环境：应报 FAIL 并返回 1 ---
@@ -92,3 +94,31 @@ t_contains "校验到服务运行中" "$_OK_OUT" "服务运行中"
 t_not_contains "无 FAIL 项" "$_OK_OUT" "[FAIL]"
 
 rm -rf "$T_OK"
+
+# --- 5. Alpine 仅装框架、内核未装：必须无 FAIL（回归） ---
+# 历史问题：抬头在探测前打印，永远显示 unknown；
+# 且内核缺失会让「内核/服务脚本/运行级」连刷 3 条 FAIL，掩盖真正的适配问题。
+T_BARE="$(TMPDIR=/tmp mktemp -d)"
+mkdir -p "$T_BARE/bin"
+: > "$T_BARE/bin/xmg"
+cp "$SRC/xmg.files" "$T_BARE/xmg.files"
+printf 'nameserver 1.1.1.1\n' > "$T_BARE/resolv.conf"
+
+_BARE_OUT="$(MOCK_OS_ID=alpine MOCK_OS_PRETTY="Alpine Linux v3.21" MOCK_OS_VER=3.21 MOCK_INIT=openrc \
+    XMG_HOME="$T_BARE" XMG_LIB_DIR="$SRC/lib" XMG_BIN="$T_BARE/bin/xmg" \
+    XMG_RESOLV_CONF_FILE="$T_BARE/resolv.conf" \
+    XMG_TUNE_SYSCTL_BBR_CONF="$T_BARE/no-bbr.conf" \
+    XMG_TUNE_SYSCTL_NET_CONF="$T_BARE/no-net.conf" \
+    XMG_TUNE_LIMITS_CONF="$T_BARE/no-limits.conf" \
+    XMG_TUNE_UNBOUND_CONF="$T_BARE/no-unbound.conf" \
+    bash "$SRC/xmg" selftest 2>&1)"
+_BARE_RC=$?
+t_equals "仅装框架（Alpine）自检返回 0" "$_BARE_RC" "0"
+t_not_contains "仅装框架不产生 FAIL" "$_BARE_OUT" "[FAIL]"
+t_contains "抬头显示发行版而非 unknown" "$_BARE_OUT" "发行版: Alpine Linux v3.21"
+t_contains "抬头显示 init 而非 unknown" "$_BARE_OUT" "init: openrc"
+t_contains "内核缺失给出安装指引" "$_BARE_OUT" "xmg core install"
+t_contains "结论点明内核尚未安装" "$_BARE_OUT" "Xray 内核尚未安装"
+t_contains "服务注册项降级为 WARN 而非 FAIL" "$_BARE_OUT" "跳过服务注册检查"
+
+rm -rf "$T_BARE"

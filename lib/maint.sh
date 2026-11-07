@@ -183,13 +183,21 @@ EOF
     xmg_info "journald 已限容 $XMG_MAINT_JOURNAL_MAX: $XMG_MAINT_JOURNALD_CONF"
 }
 
+# 根分区占用行：BusyBox df 遇到长设备名会折行，-P 强制一条记录一行后取末行
+_xmg_maint_disk_line() {
+    local line=""
+    line="$(df -Ph / 2>/dev/null | awk 'END {print}')"
+    [ -n "$line" ] || line="$(df -P / 2>/dev/null | awk 'END {print}')"
+    printf '%s\n' "$line" | awk '{if (NF >= 5) printf "%s/%s (%s)", $3, $2, $5; else printf "未知"}'
+}
+
 xmg_maint_clean() {
     xmg_require_root
 
     local before=""
     local after=""
 
-    before="$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5")"}')"
+    before="$(_xmg_maint_disk_line)"
 
     echo "清理前磁盘 /: $before"
     echo
@@ -238,7 +246,8 @@ xmg_maint_clean() {
             pacman -Scc --noconfirm 2>/dev/null || true
         elif xmg_cmd_exists apk; then
             xmg_info "清理 apk 缓存..."
-            apk cache clean 2>/dev/null || true
+            # apk cache clean 只在配置了 cache 目录时才有动作，直接删缓存目录更可靠
+            xmg_pkg_clean >/dev/null 2>&1 || rm -rf /var/cache/apk/* 2>/dev/null || true
         fi
 
         # 3. /var/log 历史压缩日志清理 (*.gz, *.1, *.old)
@@ -249,7 +258,7 @@ xmg_maint_clean() {
         xmg_info "清理过期临时文件 (/tmp, /var/tmp)..."
         find /tmp /var/tmp -mindepth 1 -atime +7 -delete 2>/dev/null || true
 
-        after="$(df -h / 2>/dev/null | awk 'NR==2 {print $3"/"$2" ("$5")"}')"
+        after="$(_xmg_maint_disk_line)"
         echo
         echo "清理后磁盘 /: $after"
         xmg_info "深度磁盘清理完成"
@@ -388,6 +397,8 @@ xmg_maint_disk_overview() {
         du -sh /var/cache/dnf 2>/dev/null || true
     elif [ -d /var/cache/yum ]; then
         du -sh /var/cache/yum 2>/dev/null || true
+    elif [ -d /var/cache/apk ]; then
+        du -sh /var/cache/apk 2>/dev/null || true
     else
         echo "无包管理器缓存目录"
     fi

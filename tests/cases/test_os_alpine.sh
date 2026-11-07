@@ -54,11 +54,26 @@ _OPENRC_SCRIPT="$(MOCK_INIT=openrc bash -c '
 ' 2>/dev/null)"
 
 t_contains "OpenRC 脚本声明 openrc-run 解释器" "$_OPENRC_SCRIPT" "#!/sbin/openrc-run"
-t_contains "OpenRC 脚本注入 GOMEMLIMIT" "$_OPENRC_SCRIPT" "export GOMEMLIMIT=100MiB"
+t_contains "OpenRC 脚本注入 GOMEMLIMIT" "$_OPENRC_SCRIPT" "export GOMEMLIMIT="
 t_contains "OpenRC 脚本注入 GOMAXPROCS" "$_OPENRC_SCRIPT" "export GOMAXPROCS=1"
 t_contains "OpenRC 脚本使用 XMG 配置路径" "$_OPENRC_SCRIPT" "run -config /opt/xmg/xray/config.json"
 t_contains "OpenRC 脚本设置 nofile 上限" "$_OPENRC_SCRIPT" "rc_ulimit="
-t_contains "OpenRC 脚本声明 net 依赖" "$_OPENRC_SCRIPT" "need net"
+t_contains "OpenRC 脚本声明 net 软依赖（容器内可用）" "$_OPENRC_SCRIPT" "use net"
+
+# 内存抑制必须随物理内存分档：64MB 机器上写死 100MiB 等于没设
+T_MEMINFO="$(TMPDIR=/tmp mktemp -d)/meminfo"
+printf 'MemTotal:          61440 kB\n' > "$T_MEMINFO"
+_MEM_ENV="$(XMG_MEMINFO_FILE="$T_MEMINFO" bash -c '
+    XMG_LIB_DIR="'"$SRC"'/lib"; XMG_HOME="$(mktemp -d)"
+    export XMG_LIB_DIR XMG_HOME XMG_MEMINFO_FILE
+    source "$XMG_LIB_DIR/os.sh"; source "$XMG_LIB_DIR/common.sh"; source "$XMG_LIB_DIR/xray.sh"
+    printf "limit=%s gogc=%s\n" "$(xmg_xray_gomemlimit)" "$(xmg_xray_gogc)"
+    rm -rf "$XMG_HOME"
+' 2>/dev/null)"
+t_contains "64MB 机器 GOMEMLIMIT 降到 32MiB" "$_MEM_ENV" "limit=32MiB"
+t_contains "64MB 机器注入更激进的 GOGC" "$_MEM_ENV" "gogc=40"
+rm -f "$T_MEMINFO"
+t_not_contains "OpenRC 脚本不使用 need net 硬依赖" "$_OPENRC_SCRIPT" "need net"
 
 # 语法自检：生成的脚本必须能被 bash -n 解析
 _OPENRC_SYNTAX_RC=0
@@ -263,3 +278,46 @@ t_contains "双栈时放通 ::1 访问" "$_CONF_V6" "access-control: ::1 allow"
 t_contains "IPv6 上游可用" "$_CONF_V6" "forward-addr: 2606:4700:4700::1111@853"
 
 rm -rf "$TMP_UNBOUND"
+
+# --- 10. chronyd 启动：net 依赖阻塞时用 --nodeps 兜底 ---
+# 容器里 networking 服务常未运行，发行版脚本的 need net 会让 OpenRC 直接拒绝启动，
+# XMG 必须先带依赖起一次，失败后 --nodeps 重试，并把真实报错交出来。
+T_CHRONY="$(TMPDIR=/tmp mktemp -d)"
+mkdir -p "$T_CHRONY/bin"
+
+printf '#!/bin/sh\nexit 0\n' > "$T_CHRONY/bin/chronyd"
+printf '#!/bin/sh\nexit 0\n' > "$T_CHRONY/bin/rc-update"
+cat > "$T_CHRONY/bin/rc-service" <<'STUB'
+#!/bin/sh
+# 模拟 OpenRC：带依赖启动被 net 阻塞，--nodeps 才成功
+svc=""; action=""; nodeps=0
+for a in "$@"; do
+    case "$a" in
+        --nodeps) nodeps=1 ;;
+        start|status|stop|restart) action="$a" ;;
+        *) svc="$a" ;;
+    esac
+done
+if [ "$action" = "status" ]; then
+    [ -f "$CHRONY_STATE" ] && exit 0 || exit 3
+fi
+if [ "$nodeps" = "1" ]; then
+    : > "$CHRONY_STATE"
+    exit 0
+fi
+echo " * WARNING: chronyd is scheduled to start when net has started"
+exit 1
+STUB
+chmod +x "$T_CHRONY/bin/chronyd" "$T_CHRONY/bin/rc-update" "$T_CHRONY/bin/rc-service"
+
+_CHRONY_OUT="$(PATH="$T_CHRONY/bin:$PATH" MOCK_INIT=openrc \
+    CHRONY_STATE="$T_CHRONY/state" XMG_HOME="$T_CHRONY" XMG_LIB_DIR="$SRC/lib" \
+    bash -c '
+        source "$XMG_LIB_DIR/os.sh"
+        source "$XMG_LIB_DIR/common.sh"
+        source "$XMG_LIB_DIR/tune.sh"
+        _xmg_tune_time_sync_start_chrony
+    ' 2>&1)"
+t_contains "chronyd 依赖阻塞时用 --nodeps 拉起" "$_CHRONY_OUT" "跳过 net 依赖"
+
+rm -rf "$T_CHRONY"

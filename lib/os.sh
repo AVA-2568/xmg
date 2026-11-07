@@ -464,6 +464,21 @@ xmg_svc_restart() { xmg_svc_do restart "$1"; }
 xmg_svc_enable()  { xmg_svc_do enable "$1"; }
 xmg_svc_disable() { xmg_svc_do disable "$1"; }
 
+# 绕过 OpenRC 依赖解析直接启动：容器里 networking/net 服务常常不可用，
+# 而发行版自带服务脚本普遍写着 `need net`，OpenRC 会因此拒绝启动并只留一句
+# "failed to start"。--nodeps 让进程先起来（端口/时钟同步并不真的依赖 net 服务）。
+xmg_svc_start_nodeps() {
+    local svc="$1"
+
+    xmg_os_detect
+    if [ "$XMG_INIT_SYSTEM" != "openrc" ]; then
+        xmg_svc_start "$svc"
+        return $?
+    fi
+    command -v rc-service >/dev/null 2>&1 || return 1
+    rc-service --nodeps "$svc" start
+}
+
 xmg_svc_reload() {
     local svc="$1"
     xmg_os_detect

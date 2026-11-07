@@ -111,7 +111,11 @@ _xmg_doctor_get_qdisc() {
     if [ -z "$qd" ] && command -v sysctl >/dev/null 2>&1; then
         qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
     fi
-    printf '%s' "${qd:-unknown}"
+    # 部分 LXC/容器内核不暴露 default_qdisc，退回 tc 读根队列
+    if [ -z "$qd" ] && command -v tc >/dev/null 2>&1; then
+        qd="$(tc qdisc show 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "qdisc") {print $(i + 1); exit}}' || true)"
+    fi
+    printf '%s' "${qd:-未知}"
 }
 
 # 2. 采集 TCP 缓冲与连接跟踪上限
@@ -212,6 +216,39 @@ _xmg_doctor_get_swap_summary() {
     fi
 }
 
+# 3.1 磁盘占用：小盘机（20G 甚至更小）最常见的故障源是磁盘写满，
+# Xray 日志/证书一旦写不进去就是整机不可用，必须进体检。
+_xmg_doctor_disk_pct() {
+    if [ -n "${MOCK_DISK_PCT:-}" ]; then
+        printf '%s' "$MOCK_DISK_PCT"
+        return 0
+    fi
+    # -P：BusyBox df 遇到长设备名会折行，POSIX 模式强制一条记录一行
+    df -P / 2>/dev/null | awk 'END {p=$5; gsub(/%/,"",p); print (p ~ /^[0-9]+$/ ? p : "")}'
+}
+
+_xmg_doctor_get_disk_summary() {
+    if [ -n "${MOCK_DISK_STATUS:-}" ]; then
+        printf '%s' "$MOCK_DISK_STATUS"
+        return 0
+    fi
+    local line="" total="" used="" pct=""
+    line="$(df -Ph / 2>/dev/null | awk 'END {print}')"
+    [ -n "$line" ] || line="$(df -P / 2>/dev/null | awk 'END {print}')"
+    if [ -z "$line" ]; then
+        printf '未知'
+        return 0
+    fi
+    total="$(printf '%s\n' "$line" | awk '{print $2}')"
+    used="$(printf '%s\n' "$line" | awk '{print $3}')"
+    pct="$(_xmg_doctor_disk_pct)"
+    if [ -n "$total" ] && [ -n "$used" ]; then
+        printf '%s/%s (%s%%)' "$used" "$total" "${pct:-?}"
+    else
+        printf '未知'
+    fi
+}
+
 # 4. 采集 Xray 状态与配置校验
 _xmg_doctor_get_xray_version() {
     if [ -n "${MOCK_XRAY_VERSION:-}" ]; then
@@ -243,6 +280,23 @@ _xmg_doctor_get_xray_status() {
         printf '%s' "$MOCK_XRAY_STATUS"
         return 0
     fi
+
+    # 内核都没装时，"stopped" 会被误读成服务异常；这里直接给"未安装"
+    local bin=""
+    if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+        bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+    fi
+    if [ -z "$bin" ]; then
+        bin="$(command -v xray 2>/dev/null || true)"
+    fi
+    if [ -z "$bin" ] && [ -x /usr/local/bin/xray ]; then
+        bin="/usr/local/bin/xray"
+    fi
+    if [ -z "$bin" ]; then
+        printf '未安装'
+        return 0
+    fi
+
     if declare -F xmg_service_active_read >/dev/null 2>&1; then
         xmg_service_active_read "${XMG_XRAY_SERVICE:-xray}"
         return 0
@@ -269,8 +323,9 @@ _xmg_doctor_validate_xray_config() {
 
     local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
     if [ ! -f "$cfg" ]; then
-        # 配置文件尚未创建时，若无其他配置则视为待配置（不判严重语法故障）
-        return 0
+        # 配置文件尚未创建：返回 2「未配置」，与「校验通过」区分开，
+        # 否则全新机器上会显示「配置校验: OK」而实际一个配置都没有
+        return 2
     fi
 
     local bin=""
@@ -452,25 +507,43 @@ _xmg_doctor_get_cert_status() {
     fi
 
     if command -v openssl >/dev/null 2>&1; then
-        local end_date=""
-        end_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || true)"
-        if [ -n "$end_date" ]; then
-            local end_ts now_ts diff_s days
-            end_ts="$(date -d "$end_date" +%s 2>/dev/null || echo 0)"
-            now_ts="$(date +%s)"
-            diff_s=$((end_ts - now_ts))
-            days=$((diff_s / 86400))
-            if [ "$diff_s" -le 0 ]; then
-                printf '已过期'
-            elif [ "$days" -le 15 ]; then
-                printf '即将过期 (剩余 %d 天)' "$days"
-            else
-                printf '有效 (剩余 %d 天)' "$days"
-            fi
+        # 用 -checkend 判有效期，不解析日期字符串：
+        # openssl 输出 "Nov  7 13:49:17 2026 GMT"，BusyBox date -d 解析不了，
+        # 在 Alpine 上会把有效证书误判成「已过期」。
+        if ! openssl x509 -checkend 0 -noout -in "$cert_file" >/dev/null 2>&1; then
+            printf '已过期'
             return 0
         fi
+        if ! openssl x509 -checkend $((15 * 86400)) -noout -in "$cert_file" >/dev/null 2>&1; then
+            printf '即将过期 (剩余不足 15 天)'
+            return 0
+        fi
+        local days=""
+        days="$(_xmg_doctor_cert_days_left "$cert_file" 2>/dev/null || true)"
+        if [ -n "$days" ]; then
+            printf '有效 (剩余 %d 天)' "$days"
+        else
+            printf '有效'
+        fi
+        return 0
     fi
     printf '已就绪'
+}
+
+# 剩余天数：仅在 date 能解析 openssl 日期（GNU coreutils）时给出，
+# BusyBox 环境返回空由调用方降级为「有效」，绝不给出错误天数。
+_xmg_doctor_cert_days_left() {
+    local cert_file="$1"
+    local end_date="" end_ts="" now_ts=""
+
+    end_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || true)"
+    [ -n "$end_date" ] || return 1
+    end_ts="$(date -d "$end_date" +%s 2>/dev/null || true)"
+    case "$end_ts" in
+        ''|0|*[!0-9]*) return 1 ;;
+    esac
+    now_ts="$(date +%s)"
+    printf '%d' $(( (end_ts - now_ts) / 86400 ))
 }
 
 # 5.2 探测当前 DoH 解析连通性与网络延迟
@@ -627,6 +700,17 @@ _xmg_doctor_get_ntp_status() {
             return 0
         fi
     fi
+    # Alpine 常见：openntpd / busybox ntpd —— 没有 timedatectl，也没有 chronyc
+    if command -v ntpctl >/dev/null 2>&1; then
+        if [ -n "$(ntpctl -s status 2>/dev/null || true)" ]; then
+            printf '已启用 (openntpd)'
+            return 0
+        fi
+    fi
+    if declare -F xmg_svc_is_active >/dev/null 2>&1 && xmg_svc_is_active ntpd 2>/dev/null; then
+        printf '已启用 (busybox ntpd)'
+        return 0
+    fi
     printf '未同步/未配置'
 }
 
@@ -697,6 +781,8 @@ xmg_doctor_run() {
     mem_summary="$(_xmg_doctor_get_memory_summary)"
     local swap_summary=""
     swap_summary="$(_xmg_doctor_get_swap_summary)"
+    local disk_summary=""
+    disk_summary="$(_xmg_doctor_get_disk_summary)"
 
     # 4. 内核与网络调优采集
     local bbr_cc=""
@@ -714,10 +800,13 @@ xmg_doctor_run() {
     local xray_st=""
     xray_st="$(_xmg_doctor_get_xray_status)"
     local cfg_valid_str="OK"
-    if ! _xmg_doctor_validate_xray_config; then
-        cfg_valid_str="FAIL"
-        has_critical=1
-    fi
+    local cfg_rc=0
+    _xmg_doctor_validate_xray_config || cfg_rc=$?
+    case "$cfg_rc" in
+        0) cfg_valid_str="OK" ;;
+        2) cfg_valid_str="未配置" ;;
+        *) cfg_valid_str="FAIL"; has_critical=1 ;;
+    esac
     local gomemlimit=""
     gomemlimit="$(_xmg_doctor_get_gomemlimit)"
     local listen_ports=""
@@ -738,6 +827,12 @@ xmg_doctor_run() {
     ntp_status="$(_xmg_doctor_get_ntp_status)"
 
     # 8. Critical 联合判定规则
+    # 磁盘写满（>=95%）与配置语法错误同级：Xray 写不了日志/证书就整机不可用
+    local disk_pct=""
+    disk_pct="$(_xmg_doctor_disk_pct)"
+    if [ -n "$disk_pct" ] && [ "$disk_pct" -ge 95 ] 2>/dev/null; then
+        has_critical=1
+    fi
     if [ "${MOCK_NTP_CRITICAL:-0}" = "1" ]; then
         has_critical=1
     fi
@@ -781,10 +876,11 @@ xmg_doctor_run() {
         "$c_cyan" "$nat64_str" "$c_reset"
 
     # [资源]
-    printf '%s[资源]%s 物理内存: %s%s%s | Swap: %s%s%s\n' \
+    printf '%s[资源]%s 物理内存: %s%s%s | Swap: %s%s%s | 磁盘 /: %s%s%s\n' \
         "$c_bold" "$c_reset" \
         "$c_cyan" "$mem_summary" "$c_reset" \
-        "$c_cyan" "$swap_summary" "$c_reset"
+        "$c_cyan" "$swap_summary" "$c_reset" \
+        "$c_cyan" "$disk_summary" "$c_reset"
 
     # [内核]
     printf '%s[内核]%s 拥塞控制: %s%s%s | 队列算法: %s%s%s | TCP 缓冲: %s | 连接跟踪上限: %s%s%s\n' \
@@ -796,7 +892,10 @@ xmg_doctor_run() {
 
     # [Xray]
     local cfg_color="$c_green"
-    [ "$cfg_valid_str" = "FAIL" ] && cfg_color="$c_red"
+    case "$cfg_valid_str" in
+        FAIL)   cfg_color="$c_red" ;;
+        未配置) cfg_color="$c_yellow" ;;
+    esac
     local cert_st=""
     cert_st="$(_xmg_doctor_get_cert_status)"
     printf '%s[Xray]%s 版本: %s%s%s | 状态: %s%s%s | 配置校验: %s%s%s | 证书: %s%s%s | 内存抑制: %s%s%s | 监听端口: %s%s%s\n' \

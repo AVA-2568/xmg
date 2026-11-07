@@ -6,6 +6,11 @@ SRC="$TESTS_DIR/.."
 FILES="$SRC/xmg.files"
 MAIN="$SRC/xmg"
 
+# source common.sh 会把 XMG_HOME/XMG_LIB_DIR 补成 /opt/xmg 并 export，
+# 必须在加载任何 lib 之前记下真实初始值，供用例结束时还原。
+_TE_PRE_HOME="${XMG_HOME-}"
+_TE_PRE_LIB="${XMG_LIB_DIR-}"
+
 # --- 1. 清单与模块定义检查 ---
 t_contains "xmg.files 清单包含 lib/doctor.sh" "$(cat "$FILES")" "lib/doctor.sh"
 t_assert "lib/doctor.sh 文件存在" test -f "$SRC/lib/doctor.sh"
@@ -159,3 +164,60 @@ t_assert "定义 _xmg_doctor_get_doh_latency 函数" declare -F _xmg_doctor_get_
 t_equals "MOCK_CERT_STATUS 正常生效" "$(MOCK_CERT_STATUS="有效 (剩余 85 天)" _xmg_doctor_get_cert_status)" "有效 (剩余 85 天)"
 t_equals "MOCK_DOH_LATENCY 正常生效" "$(MOCK_DOH_LATENCY="42ms (优秀)" _xmg_doctor_get_doh_latency)" "42ms (优秀)"
 t_equals "测试模式下 DoH 延迟默认短路返回" "$(XMG_TEST_MODE=1 _xmg_doctor_get_doh_latency)" "35ms (优秀)"
+
+# --- 8. Alpine 回归：证书有效期不得依赖 GNU date ---
+# BusyBox date -d 解析不了 openssl 的 "Nov  7 13:49:17 2026 GMT"，
+# 旧实现会把有效证书算成 "已过期"。改为 openssl -checkend 后与平台无关。
+T_CERT="$(TMPDIR=/tmp mktemp -d)"
+mkdir -p "$T_CERT/etc/xray/certs"
+if command -v openssl >/dev/null 2>&1; then
+    # 用配置文件写主题，避免 -subj "/CN=..." 在 Git Bash 下被当成路径改写
+    cat > "$T_CERT/req.cnf" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = xmg.test
+[v3]
+basicConstraints = CA:TRUE
+CNF
+    openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout "$T_CERT/key.pem" \
+        -out "$T_CERT/etc/xray/certs/fullchain.crt" \
+        -days 365 -config "$T_CERT/req.cnf" >/dev/null 2>&1 || true
+    t_assert "生成 365 天有效期的测试证书" test -s "$T_CERT/etc/xray/certs/fullchain.crt"
+    _CERT_ST="$(XMG_HOME="$T_CERT" _xmg_doctor_get_cert_status 2>/dev/null || true)"
+    t_contains "有效证书判定为有效" "$_CERT_ST" "有效"
+    t_not_contains "有效证书不被误判为已过期" "$_CERT_ST" "已过期"
+    t_equals "剩余天数四舍五入到 364 天左右" "$(XMG_HOME="$T_CERT" _xmg_doctor_cert_days_left "$T_CERT/etc/xray/certs/fullchain.crt" 2>/dev/null | awk '{print ($1 >= 360 && $1 <= 366) ? "ok" : "bad"}')" "ok"
+fi
+rm -rf "$T_CERT"
+
+# --- 9. 无配置时「配置校验」显示未配置，而不是 OK ---
+T_NOCFG="$(TMPDIR=/tmp mktemp -d)"
+_NOCFG_RC=0
+XMG_XRAY_CONFIG="$T_NOCFG/none.json" _xmg_doctor_validate_xray_config || _NOCFG_RC=$?
+t_equals "无配置文件时校验接口返回 2（未配置）" "$_NOCFG_RC" "2"
+
+_NOCFG_OUT="$(XMG_XRAY_CONFIG="$T_NOCFG/none.json" \
+    MOCK_XRAY_VERSION="未安装" MOCK_XRAY_STATUS="stopped" \
+    MOCK_DOH_LATENCY="1ms (优秀)" MOCK_CERT_STATUS="未配置" \
+    xmg_doctor_run --dry-run 2>&1 || true)"
+t_contains "诊断卡片显示配置校验: 未配置" "$_NOCFG_OUT" "配置校验: 未配置"
+t_not_contains "无配置时不显示配置校验 OK" "$_NOCFG_OUT" "配置校验: OK"
+rm -rf "$T_NOCFG"
+
+# --- 10. 用例收尾：还原加载 lib 之前的路径变量 ---
+# common.sh 会 export XMG_HOME=/opt/xmg、XMG_LIB_DIR=/opt/xmg/lib；留在环境里，
+# 后续用例的 `bash xmg selftest` 会拿到不存在的 /opt/xmg/lib 而直接 exit 1。
+if [ -n "$_TE_PRE_HOME" ]; then
+    export XMG_HOME="$_TE_PRE_HOME"
+else
+    unset XMG_HOME
+fi
+if [ -n "$_TE_PRE_LIB" ]; then
+    export XMG_LIB_DIR="$_TE_PRE_LIB"
+else
+    unset XMG_LIB_DIR
+fi
