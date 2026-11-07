@@ -104,6 +104,21 @@ t_contains "诊断输出包含运行状态" "$_OUT" "running"
 t_contains "诊断输出包含配置校验 OK" "$_OUT" "配置校验: OK"
 t_contains "诊断输出包含 GOMEMLIMIT 内存抑制" "$_OUT" "100MiB"
 t_contains "诊断输出包含监听端口" "$_OUT" "监听端口"
+
+# 3.5.1 机型变更后落盘 Go 参数过期必须告警
+_DRIFT_OUT="$(MOCK_VIRT="kvm" \
+        MOCK_MEM_TOTAL_KB="4194304" \
+        MOCK_CPU_CORES="8" \
+        MOCK_CONTAINER_RESTRICTED="0" \
+        MOCK_NET_IPV4="1" \
+        MOCK_NET_IPV6="1" \
+        MOCK_NET_NAT="0" \
+        MOCK_NET_NAT64="0" \
+        MOCK_GOMEMLIMIT="32MiB" \
+        MOCK_GOMAXPROCS="1" \
+        xmg_doctor_run --dry-run 2>&1 || true)"
+t_contains "Go 参数与当前机型不匹配时给出过期提示" "$_DRIFT_OUT" "Go 参数已过期"
+t_contains "过期提示包含期望参数值" "$_DRIFT_OUT" "150MiB"
 t_contains "诊断输出包含证书状态" "$_OUT" "证书:"
 
 # 3.6 [DNS]
@@ -207,6 +222,27 @@ _NOCFG_OUT="$(XMG_XRAY_CONFIG="$T_NOCFG/none.json" \
 t_contains "诊断卡片显示配置校验: 未配置" "$_NOCFG_OUT" "配置校验: 未配置"
 t_not_contains "无配置时不显示配置校验 OK" "$_NOCFG_OUT" "配置校验: OK"
 rm -rf "$T_NOCFG"
+
+# --- 9.5 NAT 机型未声明外部端口时必须显式提示（README 承诺的体检行为） ---
+T_NAT="$(TMPDIR=/tmp mktemp -d)"
+mkdir -p "$T_NAT/etc/xray"
+printf 'PROXY_VLESS_ENABLED=1\nPROXY_VLESS_PORT=20000\n' > "$T_NAT/etc/xray/state.env"
+_HINT_NAT="$(XMG_HOME="$T_NAT" XMG_ETC_DIR="$T_NAT/etc" \
+    XMG_XRAY_STATE_DIR="$T_NAT/etc/xray" XMG_STATE_FILE="$T_NAT/etc/xray/state.env" \
+    XMG_NET_NAT=1 _xmg_doctor_external_port_hint 2>/dev/null || true)"
+t_contains "NAT 未声明外部端口时提示 --external-port" "$_HINT_NAT" "--external-port"
+
+printf 'PROXY_EXTERNAL_PORT=20000\n' >> "$T_NAT/etc/xray/state.env"
+_HINT_OK="$(XMG_HOME="$T_NAT" XMG_ETC_DIR="$T_NAT/etc" \
+    XMG_XRAY_STATE_DIR="$T_NAT/etc/xray" XMG_STATE_FILE="$T_NAT/etc/xray/state.env" \
+    XMG_NET_NAT=1 _xmg_doctor_external_port_hint 2>/dev/null || true)"
+t_equals "已声明外部端口时不再提示" "$_HINT_OK" ""
+
+_HINT_NONAT="$(XMG_HOME="$T_NAT" XMG_ETC_DIR="$T_NAT/etc" \
+    XMG_XRAY_STATE_DIR="$T_NAT/etc/xray" XMG_STATE_FILE="$T_NAT/etc/xray/state.env" \
+    XMG_NET_NAT=0 _xmg_doctor_external_port_hint 2>/dev/null || true)"
+t_equals "非 NAT 机型不提示外部端口" "$_HINT_NONAT" ""
+rm -rf "$T_NAT"
 
 # --- 10. 用例收尾：还原加载 lib 之前的路径变量 ---
 # common.sh 会 export XMG_HOME=/opt/xmg、XMG_LIB_DIR=/opt/xmg/lib；留在环境里，

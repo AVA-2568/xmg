@@ -85,6 +85,17 @@ CFG="$(cat "$XMG_XRAY_CONFIG")"
 t_contains "共存含 socks" "$CFG" '"tag": "inbound-socks"'
 t_contains "共存含 vless" "$CFG" '"tag": "inbound-vless"'
 
+# NAT 端口映射：外部端口显式声明后用于客户端链接
+xmg_proxy_apply --external-port 20000 2>/dev/null
+t_equals "state 记录外部映射端口" "$(xmg_state_get PROXY_EXTERNAL_PORT)" "20000"
+_EXT_LINK="$(MOCK_NET_NAT=1 xmg_proxy_vless_link 2>/dev/null || true)"
+_EXT_DIRECT="$(printf '%s\n' "$_EXT_LINK" | grep 'XMG-VLESS-Direct' || true)"
+t_contains "NAT 机型分享链接使用外部端口" "$_EXT_LINK" ":20000?"
+t_contains "NAT 机型直连链接使用外部端口" "$_EXT_DIRECT" ":20000?"
+t_not_contains "直连链接不再暴露内部 443" "$_EXT_DIRECT" ":443?"
+# 恢复现场：外部端口是全局字段，不清理会污染后续链接用例
+xmg_state_set PROXY_EXTERNAL_PORT ""
+
 # ------------------------------------------------------------------
 # 校验失败：返回 2 且绝不触碰现网（config 与 state 都不变）
 # ------------------------------------------------------------------
@@ -100,6 +111,16 @@ t_equals "校验失败后 state 不变" "$(cat "$XMG_STATE_FILE")" "$SGOOD"
 # ------------------------------------------------------------------
 xmg_proxy_apply --vless-port 1080 2>/dev/null
 t_equals "端口冲突应返回 2" "$?" "2"
+
+# ------------------------------------------------------------------
+# NAT 外部端口：非法值必须在校验阶段拒绝，不得静默落盘
+# ------------------------------------------------------------------
+SGOOD_EXT="$(cat "$XMG_STATE_FILE")"
+xmg_proxy_apply --external-port 70000 2>/dev/null
+t_equals "外部端口 70000 应返回 2" "$?" "2"
+xmg_proxy_apply --external-port abc 2>/dev/null
+t_equals "非数字外部端口应返回 2" "$?" "2"
+t_equals "非法外部端口不落盘" "$(cat "$XMG_STATE_FILE")" "$SGOOD_EXT"
 
 # ------------------------------------------------------------------
 # disable：只影响目标方案
@@ -125,6 +146,8 @@ t_not_contains "status 不泄露密码" "$OUT" "supersecret"
 JOUT="$(xmg_proxy_status --json 2>/dev/null)"
 t_contains "JSON 含 socks_enabled" "$JOUT" '"socks_enabled"'
 t_contains "JSON 含 vless_enabled" "$JOUT" '"vless_enabled"'
+t_contains "JSON 含 reality_enabled" "$JOUT" '"reality_enabled"'
+t_contains "JSON 含 external_port" "$JOUT" '"external_port"'
 t_contains "JSON 含 buffer_size" "$JOUT" '"buffer_size"'
 t_not_contains "JSON 不含密码" "$JOUT" "supersecret"
 t_contains "JSON 首字符为 {" "${JOUT:0:1}" "{"

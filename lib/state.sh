@@ -84,6 +84,9 @@ xmg_state_defaults() {
         'PROXY_VLESS_ENABLED=0' \
         "PROXY_VLESS_LISTEN=$def_listen" \
         'PROXY_VLESS_PORT=443' \
+        'PROXY_EXTERNAL_PORT=' \
+        'PROXY_VLESS_EXTERNAL_PORT=' \
+        'PROXY_REALITY_EXTERNAL_PORT=' \
         'PROXY_VLESS_DOMAIN=' \
         'PROXY_VLESS_UUID=' \
         'PROXY_VLESS_PATH=/' \
@@ -569,6 +572,17 @@ xmg_state_validate() {
     # 备份保留份数
     _state_val _keep XMG_BACKUP_KEEP
     _xmg_state_validate_positive_int XMG_BACKUP_KEEP "$_keep" || return 2
+
+    # NAT 外部映射端口：空 = 未声明；非空必须是合法端口。
+    # 不校验会让 --external-port abc / 70000 静默落盘，分享链接再悄悄退回内部端口。
+    # 优先取方案级（VLESS/REALITY 各自映射），全局 PROXY_EXTERNAL_PORT 作单入站兜底。
+    local _ext_key="" _ext_val=""
+    for _ext_key in PROXY_EXTERNAL_PORT PROXY_VLESS_EXTERNAL_PORT PROXY_REALITY_EXTERNAL_PORT; do
+        _state_val _ext_val "$_ext_key"
+        if [ -n "$_ext_val" ]; then
+            xmg_state_validate_port "$_ext_val" || return 2
+        fi
+    done
 
     if [ "$socks_on" = "1" ]; then
         local port listen user pass udp

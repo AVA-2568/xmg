@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-2.1.0}"
+XMG_VERSION="${XMG_VERSION:-2.2.0}"
 
 xmg_usage() {
     cat <<EOF
@@ -29,18 +29,19 @@ XMG $XMG_VERSION
   xmg monitor         启动 XMG Monitor (Real-Time)
   xmg menu            进入管理菜单
   xmg doctor [--dry-run] 运行 VPS 一键健康诊断
-  xmg proxy apply [参数]   应用代理方案配置（幂等）
+  xmg proxy apply [参数]   应用代理方案配置（幂等，NAT 机型支持 --external-port）
   xmg proxy status [--json] 查看代理方案状态
-  xmg proxy disable <socks|vless>  停用某方案
+  xmg proxy disable <socks|vless|reality>  停用某方案
   xmg proxy export         导出当前状态（含明文，勿贴终端）
   xmg proxy acme <域名>    申请并写入证书
-  xmg proxy link           查看客户端节点分享链接 (VLESS)
+  xmg proxy link [vless|reality]  查看客户端节点分享链接
+  xmg proxy keygen         生成 REALITY 密钥对（privateKey / pbk）
   xmg proxy menu           代理方案交互向导
   xmg core install         安装/更新内核（按记录的通道）
   xmg core version         查看内核版本
   xmg core status          查看内核状态
   xmg core menu            内核管理菜单
-  xmg warp [apply|auto|enable|disable|status|optimize|test|export|import|menu] WARP 原生出站管理
+  xmg warp [apply|auto|enable|disable|status|optimize|test|export|import|uninstall|menu] WARP 原生出站管理
   xmg tune [bbr|net|dns|dot|swap|status|menu] 系统与内核网络调优
   xmg firewall [status|allow|enable|disable|reload|flush|menu] 防火墙端口管理
   xmg ssh [status|port|disable-pwd|enable-pwd|fail2ban|menu] SSH 安全与防爆破
@@ -50,7 +51,7 @@ XMG $XMG_VERSION
   xmg uninstall [run|menu] [--yes|-y] 卸载 XMG
   xmg system          查看系统状态概况摘要
   xmg os              查看发行版 / init / 包管理器识别结果
-  xmg selftest        安装一致性自检（只读，FAIL 时退出码 1）
+  xmg selftest [-q]   安装一致性自检（只读，FAIL 时退出码 1）
   xmg version         显示版本
   xmg help            显示帮助
 

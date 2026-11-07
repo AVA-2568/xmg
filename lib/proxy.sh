@@ -107,6 +107,9 @@ xmg_proxy_parse_args() {
             --socks-udp)         PARAMS["socks_udp"]="${2:-}";         shift 2 || return 2 ;;
             --vless)             PARAMS["vless"]="${2:-}";             shift 2 || return 2 ;;
             --vless-port)        PARAMS["vless_port"]="${2:-}";        shift 2 || return 2 ;;
+            --external-port)     PARAMS["external_port"]="${2:-}";     shift 2 || return 2 ;;
+            --vless-external-port)   PARAMS["vless_external_port"]="${2:-}";   shift 2 || return 2 ;;
+            --reality-external-port) PARAMS["reality_external_port"]="${2:-}"; shift 2 || return 2 ;;
             --vless-listen)      PARAMS["vless_listen"]="${2:-}";      shift 2 || return 2 ;;
             --vless-domain)      PARAMS["vless_domain"]="${2:-}";      shift 2 || return 2 ;;
             --vless-uuid)        PARAMS["vless_uuid"]="${2:-}";        shift 2 || return 2 ;;
@@ -200,6 +203,9 @@ xmg_proxy_apply() {
     _xmg_stage_param PROXY_SOCKS_USER   "${PARAMS[socks_user]:-}"
     _xmg_stage_param PROXY_SOCKS_PASS   "${PARAMS[socks_pass]:-}"
     _xmg_stage_param PROXY_VLESS_PORT   "${PARAMS[vless_port]:-}"
+    _xmg_stage_param PROXY_EXTERNAL_PORT "${PARAMS[external_port]:-}"
+    _xmg_stage_param PROXY_VLESS_EXTERNAL_PORT "${PARAMS[vless_external_port]:-}"
+    _xmg_stage_param PROXY_REALITY_EXTERNAL_PORT "${PARAMS[reality_external_port]:-}"
     _xmg_stage_param PROXY_VLESS_LISTEN "${PARAMS[vless_listen]:-}"
     _xmg_stage_param PROXY_VLESS_DOMAIN "${PARAMS[vless_domain]:-}"
     _xmg_stage_param PROXY_VLESS_UUID   "${PARAMS[vless_uuid]:-}"
@@ -423,13 +429,105 @@ _xmg_proxy_server_host() {
     printf '%s' "${h:-<SERVER_IP>}"
 }
 
+# NAT 端口映射机型：外部公网端口无法从本机可靠探测，只接受显式声明。
+# 已声明则客户端链接用外部端口；未声明且识别为 NAT 机型时给出明确提示。
+_xmg_proxy_client_port() {
+    local listen_port="$1" specific_key="${2:-}" ext="" specific=""
+    # 方案级映射优先（VLESS 443 与 REALITY 8443 在 NAT 上通常映射到不同公网端口），
+    # 未声明时回落到全局 PROXY_EXTERNAL_PORT，兼容单入站旧配置。
+    if [ -n "$specific_key" ]; then
+        specific="$specific_key"
+        ext="$(xmg_state_get "$specific_key" "" 2>/dev/null || true)"
+        case "$ext" in
+            ''|*[!0-9]*) ext="" ;;
+            *)
+                if [ "$ext" -lt 1 ] || [ "$ext" -gt 65535 ]; then
+                    ext=""
+                fi
+                ;;
+        esac
+    fi
+    if [ -z "$ext" ]; then
+        ext="$(xmg_state_get PROXY_EXTERNAL_PORT "" 2>/dev/null || true)"
+        case "$ext" in
+            ''|*[!0-9]*) ext="" ;;
+            *)
+                if [ "$ext" -lt 1 ] || [ "$ext" -gt 65535 ]; then
+                    ext=""
+                fi
+                ;;
+        esac
+    fi
+    if [ -n "$ext" ]; then
+        printf '%s' "$ext"
+        return 0
+    fi
+    if [ -z "${XMG_NET_NAT:-}" ] && declare -F xmg_detect_network >/dev/null 2>&1; then
+        xmg_detect_network >/dev/null 2>&1 || true
+    fi
+    if [ "${XMG_NET_NAT:-0}" = "1" ]; then
+        xmg_warn "NAT 端口映射机型未声明外部端口，客户端链接暂用内部监听端口 ${listen_port}"
+        case "$specific" in
+            PROXY_VLESS_EXTERNAL_PORT)   xmg_warn "请执行: xmg proxy apply --vless-external-port <公网端口>" ;;
+            PROXY_REALITY_EXTERNAL_PORT) xmg_warn "请执行: xmg proxy apply --reality-external-port <公网端口>" ;;
+            *)                           xmg_warn "请执行: xmg proxy apply --external-port <映射后的公网端口>" ;;
+        esac
+    fi
+    printf '%s' "$listen_port"
+}
+
+# ===== 分享链接取值编码 =====
+# VLESS URI 的 query 值必须按 RFC 3986 百分号编码。
+# 过去只把 "/" 替换成 %2F：path 里出现 ? & # 空格 或非 ASCII 时链接会被截断/串参数，
+# 客户端解析出的 path 与 SNI 对不上，表现为「节点导入成功但连不上」。
+_xmg_urlencode() {
+    local s="${1-}" out="" c=""
+    local i=0
+    # 必须是字节语义：UTF-8 多字节字符逐字符替换会得到错误编码
+    local LC_ALL=C
+
+    for ((i = 0; i < ${#s}; i++)); do
+        c="${s:i:1}"
+        case "$c" in
+            # ":" / "@" 属于 RFC 3986 query 的 pchar，保留原样：
+            # IPv6 字面量 SNI 若被编码成 %3A，部分客户端会解析失败。
+            [A-Za-z0-9.~_:@-]) out="$out$c" ;;
+            *)
+                printf -v c '%%%02X' "'$c"
+                out="$out$c"
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
+# 自签证书判定：0=自签，1=CA 签发，2=无法判定。
+# 只有自签才在直连链接里附带 allowInsecure=1，ACME/CA 证书带这个参数
+# 等于让客户端放弃校验，属于无谓的安全降级；无法判定时按自签处理（保连通）。
+_xmg_proxy_cert_self_signed() {
+    local f="${1:-}" subj="" iss=""
+    if [ -z "$f" ] || [ ! -r "$f" ]; then
+        return 2
+    fi
+    command -v openssl >/dev/null 2>&1 || return 2
+    subj="$(openssl x509 -in "$f" -noout -subject 2>/dev/null || true)"
+    iss="$(openssl x509 -in "$f" -noout -issuer 2>/dev/null || true)"
+    if [ -z "$subj" ] || [ -z "$iss" ]; then
+        return 2
+    fi
+    if [ "$subj" = "$iss" ]; then
+        return 0
+    fi
+    return 1
+}
+
 xmg_proxy_reality_link() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
 
     local uuid="" port="" path="" mode="" sni="" pk="" sid="" pub="" host=""
     uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
     [ -n "$uuid" ] || uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
-    port="$(xmg_state_get PROXY_REALITY_PORT 8443)"
+    port="$(_xmg_proxy_client_port "$(xmg_state_get PROXY_REALITY_PORT 8443)" PROXY_REALITY_EXTERNAL_PORT)"
     path="$(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
     mode="$(xmg_state_get PROXY_REALITY_MODE "auto")"
     sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
@@ -438,12 +536,29 @@ xmg_proxy_reality_link() {
     [ -n "$uuid" ] || return 1
 
     pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
-    [ -n "$pub" ] || pub="<PUBLIC_KEY>"
+    local pub_ok=1
+    if [ -z "$pub" ]; then
+        pub="<PUBLIC_KEY>"
+        pub_ok=0
+        xmg_warn "无法从 privateKey 推导公钥（需要 xray 二进制），链接里的 pbk 为占位符"
+        xmg_warn "请执行 xmg core install 后重试，或先用 xmg proxy keygen 生成密钥对"
+    fi
     host="$(_xmg_proxy_server_host)"
-    [[ "$host" =~ : ]] && [[ ! "$host" =~ ^\[.*\]$ ]] && host="[${host}]"
+    if [[ "$host" =~ : ]] && [[ ! "$host" =~ ^\[.*\]$ ]]; then
+        host="[${host}]"
+    fi
 
-    local enc_path="${path//\//%2F}"
-    local link="vless://${uuid}@${host}:${port}?encryption=none&security=reality&sni=${sni}&fp=chrome&pbk=${pub}&sid=${sid}&type=xhttp&path=${enc_path}&mode=${mode}#XMG-VLESS-REALITY"
+    # 结构遵循 vless://<uuid>@<host>:<port>?<query>#<remark>
+    # spx 是 REALITY 的 spiderX，官方示例显式给出；缺省时部分客户端会留空导致回落异常。
+    local q_uuid="" q_sni="" q_pbk="" q_sid="" q_path=""
+    q_uuid="$(_xmg_urlencode "$uuid")"
+    q_sni="$(_xmg_urlencode "$sni")"
+    q_pbk="$(_xmg_urlencode "$pub")"
+    [ "$pub_ok" = "1" ] || q_pbk="$pub"
+    q_sid="$(_xmg_urlencode "$sid")"
+    q_path="$(_xmg_urlencode "$path")"
+
+    local link="vless://${q_uuid}@${host}:${port}?encryption=none&security=reality&sni=${q_sni}&fp=chrome&pbk=${q_pbk}&sid=${q_sid}&spx=%2F&type=xhttp&path=${q_path}&mode=${mode}#XMG-VLESS-REALITY"
 
     echo "==================== REALITY 节点链接 ===================="
     echo "服务端 privateKey 不出现在链接里；客户端用 pbk(公钥) 校验。"
@@ -460,30 +575,47 @@ xmg_proxy_vless_link() {
     domain="$(xmg_state_get PROXY_VLESS_DOMAIN)"
     path="$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")"
     mode="$(xmg_state_get PROXY_VLESS_MODE "auto")"
-    port="$(xmg_state_get PROXY_VLESS_PORT "443")"
+    port="$(_xmg_proxy_client_port "$(xmg_state_get PROXY_VLESS_PORT "443")" PROXY_VLESS_EXTERNAL_PORT)"
 
     if [ -z "$uuid" ] || [ -z "$domain" ]; then
         return 1
     fi
 
-    local enc_path=""
-    enc_path="${path//\//%2F}"
+    local q_uuid="" q_domain="" q_path=""
+    q_uuid="$(_xmg_urlencode "$uuid")"
+    q_domain="$(_xmg_urlencode "$domain")"
+    q_path="$(_xmg_urlencode "$path")"
 
-    # 1. CDN 代理模式（推荐：客户端连接 443 端口，走 Cloudflare CDN 隐藏真实 IP，支持 HTTP/3 QUIC 极速连接）
-    local cdn_link="vless://${uuid}@${domain}:443?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h3%2Ch2&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}#XMG-VLESS-CDN"
+    # 1. CDN 代理模式（客户端连接 443，走 Cloudflare CDN 隐藏真实 IP）
+    # 注意：XHTTP 是 TCP/TLS 传输，没有 QUIC/HTTP3 分支，ALPN 只能是 h2 / http1.1。
+    # 早期写的 alpn=h3 属于无效声明，严格客户端会握手失败。
+    local cdn_link="vless://${q_uuid}@${q_domain}:443?encryption=none&security=tls&sni=${q_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${q_domain}&path=${q_path}&mode=${mode}#XMG-VLESS-CDN"
 
-    # 2. 直连模式（直连当前主机端口，若用自签证书需在客户端开启跳过证书验证）
+    # 2. 直连模式（直连当前主机端口；仅自签证书才附带 allowInsecure=1）
     local direct_host="$domain"
     if [[ "$direct_host" =~ : ]] && [[ ! "$direct_host" =~ ^\[.*\]$ ]]; then
         direct_host="[${direct_host}]"
     fi
-    local direct_link="vless://${uuid}@${direct_host}:${port}?encryption=none&security=tls&sni=${domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${domain}&path=${enc_path}&mode=${mode}&allowInsecure=1#XMG-VLESS-Direct"
+    local insecure=""
+    if [ "$(xmg_state_get PROXY_VLESS_CERT_SOURCE "user")" = "user" ]; then
+        local cert_rc=2
+        if _xmg_proxy_cert_self_signed "$(xmg_state_get PROXY_VLESS_CERT_FILE "")"; then
+            cert_rc=0
+        else
+            cert_rc=$?
+        fi
+        # 0=自签 / 2=无法判定（没有 openssl 或路径不可读）→ 保守附带
+        if [ "$cert_rc" -eq 0 ] || [ "$cert_rc" -eq 2 ]; then
+            insecure="&allowInsecure=1"
+        fi
+    fi
+    local direct_link="vless://${q_uuid}@${direct_host}:${port}?encryption=none&security=tls&sni=${q_domain}&fp=chrome&alpn=h2%2Chttp%2F1.1&type=xhttp&host=${q_domain}&path=${q_path}&mode=${mode}${insecure}#XMG-VLESS-Direct"
 
     echo "==================== 客户端节点分享链接 ===================="
-    echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口，默认已启用 HTTP/3 QUIC 加速):"
+    echo "[方案 A：Cloudflare CDN 代理模式] (推荐，走 443 端口):"
     printf '%s\n' "$cdn_link"
     echo
-    printf '[方案 B：源站直连模式] (直连端口 %s，若用自签证书需客户端开启跳过证书验证):\n' "$port"
+    printf '[方案 B：源站直连模式] (直连端口 %s；证书校验策略随证书来源自动适配):\n' "$port"
     printf '%s\n' "$direct_link"
     echo "============================================================"
     return 0
@@ -517,8 +649,28 @@ xmg_proxy_status() {
     vless_path="$(xmg_state_get PROXY_VLESS_PATH)"
     vless_mode="$(xmg_state_get PROXY_VLESS_MODE)"
 
-    # JSON 分支：绝不输出任何密码字段
+    # JSON 分支：绝不输出任何密码/私钥字段
     if [ "$json" -eq 1 ]; then
+        local reality_on reality_port reality_sni ext_port ext_json="null"
+        local vless_ext_json="null" reality_ext_json="null" tmp_ext=""
+        reality_on="$(xmg_state_get PROXY_REALITY_ENABLED 0)"
+        reality_port="$(xmg_state_get PROXY_REALITY_PORT 8443)"
+        reality_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
+        # state.env 可能被手工改坏：非 0/1 或非数字一律归一，避免输出非法 JSON
+        [ "$reality_on" = "1" ] || reality_on=0
+        case "$reality_port" in
+            ''|*[!0-9]*) reality_port=8443 ;;
+        esac
+        ext_port="$(xmg_state_get PROXY_EXTERNAL_PORT "")"
+        tmp_ext="$(xmg_state_get PROXY_VLESS_EXTERNAL_PORT "")"
+        case "$tmp_ext" in ''|*[!0-9]*) ;; *) vless_ext_json="$tmp_ext" ;; esac
+        tmp_ext="$(xmg_state_get PROXY_REALITY_EXTERNAL_PORT "")"
+        case "$tmp_ext" in ''|*[!0-9]*) ;; *) reality_ext_json="$tmp_ext" ;; esac
+        case "$ext_port" in
+            ''|*[!0-9]*) ;;
+            *) ext_json="$ext_port" ;;
+        esac
+
         printf '{\n'
         printf '  "socks_enabled": %s,\n' "$socks_on"
         printf '  "socks_listen": "%s",\n' "$(xmg_json_escape "$(xmg_state_get PROXY_SOCKS_LISTEN)")"
@@ -530,6 +682,12 @@ xmg_proxy_status() {
         printf '  "vless_domain": "%s",\n' "$(xmg_json_escape "$vless_domain")"
         printf '  "vless_path": "%s",\n' "$(xmg_json_escape "$vless_path")"
         printf '  "vless_mode": "%s",\n' "$(xmg_json_escape "$vless_mode")"
+        printf '  "reality_enabled": %s,\n' "$reality_on"
+        printf '  "reality_port": %s,\n' "$reality_port"
+        printf '  "reality_sni": "%s",\n' "$(xmg_json_escape "$reality_sni")"
+        printf '  "external_port": %s,\n' "$ext_json"
+        printf '  "vless_external_port": %s,\n' "$vless_ext_json"
+        printf '  "reality_external_port": %s,\n' "$reality_ext_json"
         printf '  "buffer_size": %s,\n' "$(xmg_state_get XMG_BUFFER_SIZE)"
         printf '  "kernel_channel": "%s"\n' "$(xmg_json_escape "$(xmg_state_get XRAY_CHANNEL)")"
         printf '}\n'
@@ -552,6 +710,11 @@ xmg_proxy_status() {
     if [ "$vless_on" = "1" ]; then
         echo "  状态: 启用"
         echo "  监听: $(xmg_state_get PROXY_VLESS_LISTEN):$vless_port"
+        local vless_ext=""
+        vless_ext="$(xmg_state_get PROXY_VLESS_EXTERNAL_PORT "")"
+        if [ -n "$vless_ext" ]; then
+            echo "  外部: $vless_ext (NAT 映射)"
+        fi
         echo "  域名: $vless_domain"
         echo "  path: $vless_path"
         echo "  mode: $vless_mode"
@@ -568,6 +731,11 @@ xmg_proxy_status() {
     if [ "$reality_on" = "1" ]; then
         echo "  状态: 启用（无证书，伪装目标 $(xmg_state_get PROXY_REALITY_DEST "www.microsoft.com:443")）"
         echo "  监听: $(xmg_state_get PROXY_REALITY_LISTEN):$(xmg_state_get PROXY_REALITY_PORT 8443)"
+        local reality_ext=""
+        reality_ext="$(xmg_state_get PROXY_REALITY_EXTERNAL_PORT "")"
+        if [ -n "$reality_ext" ]; then
+            echo "  外部: $reality_ext (NAT 映射)"
+        fi
         echo "  SNI : $(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
         echo "  path: $(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
         echo "  mode: $(xmg_state_get PROXY_REALITY_MODE "auto")"
@@ -797,7 +965,7 @@ _xmg_read() {
 # ===== REALITY 配置向导 =====
 # REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
 xmg_proxy_reality_wizard() {
-    local r_port r_listen r_sni r_dest r_path r_mode cur_listen def_sni def_dest
+    local r_port r_listen r_sni r_dest r_path r_mode r_ext cur_listen def_sni def_dest
 
     def_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
     def_dest="$(xmg_state_get PROXY_REALITY_DEST "${def_sni}:443")"
@@ -819,6 +987,7 @@ xmg_proxy_reality_wizard() {
     r_dest="$(_xmg_read "dest(回落目标 host:port)" "$def_dest")"
     r_path="$(_xmg_read "path" "$(xmg_state_get PROXY_REALITY_PATH "/xhttp")")"
     r_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_REALITY_MODE "auto")")"
+    r_ext="$(_xmg_read "外部映射端口(NAT 机型填公网端口，直连留空)" "$(xmg_state_get PROXY_REALITY_EXTERNAL_PORT "")")"
 
     if ! xmg_proxy_apply \
         --reality on \
@@ -827,7 +996,8 @@ xmg_proxy_reality_wizard() {
         --reality-sni "$r_sni" \
         --reality-dest "$r_dest" \
         --reality-path "$r_path" \
-        --reality-mode "$r_mode"; then
+        --reality-mode "$r_mode" \
+        --reality-external-port "$r_ext"; then
         return 1
     fi
 
@@ -881,7 +1051,7 @@ xmg_proxy_menu() {
                 xmg_pause
                 ;;
             2)
-                local v_port v_listen v_domain v_uuid v_path v_mode v_src v_cert v_key
+                local v_port v_listen v_domain v_uuid v_path v_mode v_ext v_src v_cert v_key
                 local def_cf="${XMG_ACME_CERT_FILE:-$XMG_HOME/etc/xray/certs/fullchain.crt}"
                 local def_kf="${XMG_ACME_KEY_FILE:-$XMG_HOME/etc/xray/certs/priv.key}"
                 local cur_v_listen
@@ -897,6 +1067,7 @@ xmg_proxy_menu() {
                 v_uuid="$(_xmg_read "UUID" "$(xmg_state_get PROXY_VLESS_UUID)")"
                 v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")")"
                 v_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_VLESS_MODE "auto")")"
+                v_ext="$(_xmg_read "外部映射端口(NAT 机型填公网端口，直连留空)" "$(xmg_state_get PROXY_VLESS_EXTERNAL_PORT "")")"
                 v_src="$(_xmg_read "证书来源(user/acme)" "$(xmg_state_get PROXY_VLESS_CERT_SOURCE "user")")"
                 if [ "$v_src" = "user" ]; then
                     v_cert="$(_xmg_read "证书路径" "$(xmg_state_get PROXY_VLESS_CERT_FILE "$def_cf")")"
@@ -935,6 +1106,7 @@ xmg_proxy_menu() {
                     --vless-uuid "$v_uuid" \
                     --vless-path "$v_path" \
                     --vless-mode "$v_mode" \
+                    --vless-external-port "$v_ext" \
                     --vless-cert-source "$v_src" \
                     --vless-cert-file "$v_cert" \
                     --vless-key-file "$v_key" || true

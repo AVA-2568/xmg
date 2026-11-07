@@ -22,7 +22,7 @@ xmg doctor --dry-run
 - `[环境]` 正确显示虚拟化（KVM / OpenVZ / LXC / Docker）与容器特权状态；
 - `[内存]` 215MB 机型正确标记为 `extreme_low` 档位；
 - `[网络]` 正确识别 IPv4/IPv6 单双栈及 NAT 环境；
-- `[Xray]` 确认配置校验为 OK、`GOMEMLIMIT=100MiB` 生效；
+- `[Xray]` 确认配置校验为 OK、`GOMEMLIMIT` 已按当前机型注入；
 - `[DNS]` 内置 DoH 连通，出站 `domainStrategy: UseIP`（或纯 IPv6 下 `UseIPv6`）。
 
 ---
@@ -37,9 +37,9 @@ bash install.sh
 ls -la /opt/xmg/
 readlink -f /usr/local/bin/xmg      # 应指向 /opt/xmg/bin/xmg
 
-# 跑一遍自带测试（Linux 上应远快于开发机）
-bash /opt/xmg/tests/run.sh
-# 期望：FAIL=0（438+ 测试全部通过）
+# 跑一遍仓库内测试（tests/ 不随安装包落盘，需在仓库目录执行）
+bash tests/run.sh
+# 期望：FAIL=0（断言数随用例增长，以实际汇总为准）
 ```
 
 ---
@@ -71,9 +71,9 @@ xmg proxy apply --socks on --socks-port 1080 --socks-user testuser --socks-pass 
 ```bash
 cat /etc/systemd/system/xray.service.d/20-xmg.conf
 # 期望看到以下压制参数：
-# Environment="GOMEMLIMIT=100MiB"
+# Environment="GOMEMLIMIT=64MiB"（215MB 机型示例，实际由脚本按机型计算）
 # Environment="GODEBUG=madvdontneed=1"
-# Environment="GOMAXPROCS=1"
+# Environment="GOMAXPROCS=<有效核数，上限 4>"（0.5C 机型为 1）
 ```
 
 **4. 实际 Xray 进程内存占用（RSS）检查**
@@ -134,6 +134,38 @@ grep '"connIdle"' /opt/xmg/xray/config.json
 
 ---
 
+## D2. REALITY 入站与分享链接结构
+
+```bash
+xmg proxy apply --reality on --reality-port 8443 --reality-sni www.microsoft.com
+xmg xray validate
+xmg proxy link reality
+xmg proxy link vless
+```
+
+**期望**：
+
+- `config.json` 内 REALITY 入站含 `"security": "reality"` 与 `realitySettings`（`dest` / `serverNames` / `privateKey` / `shortIds`），且**不含** `certificates`；
+- 链接结构为 `vless://<uuid>@<host>:<port>?encryption=none&security=reality&sni=...&fp=chrome&pbk=...&sid=...&spx=%2F&type=xhttp&path=...&mode=...`；
+- `pbk` 是**公钥**（base64url），不是服务端 `privateKey`；
+- IPv6 主机在链接中带方括号：`@[2001:db8::1]:8443`；
+- path 含空格 / `?` / `&` / 中文时，链接里必须是 `%XX` 编码，不能出现裸空格或第二个 `?`；
+- TLS 直连链接：ACME（CA 签发）证书**不带** `allowInsecure=1`；自签证书才附带，避免无谓的证书校验降级；
+- CDN 链接的 `alpn` 为 `h2,http/1.1`（XHTTP 是 TCP/TLS 传输，不支持 QUIC/HTTP3）。
+
+NAT 机型多入站时用方案级端口，避免两条链接共用同一个公网端口：
+
+```bash
+xmg proxy apply --vless-external-port 20001 --reality-external-port 20002
+xmg proxy link vless      # 端口应为 20001
+xmg proxy link reality    # 端口应为 20002
+```
+
+`xmg proxy status --json` 应包含 `reality_enabled` / `reality_port` / `reality_sni` / `external_port` /
+`vless_external_port` / `reality_external_port`，且不出现任何密码或私钥字段。
+
+---
+
 ## E. NAT 与纯 IPv6 网络适配
 
 **9. NAT 端口映射连通性**
@@ -142,6 +174,13 @@ NAT 机通常分配高位端口（如 10022 SSH, 11080 SOCKS, 10443 VLESS）：
 ```bash
 # 外部通过映射端口验证 SOCKS5
 curl --socks5-user testuser --socks5 testpass123 --socks5-hostname <公网IP>:<公网映射端口> https://cloudflare.com/cdn-cgi/trace
+```
+
+多入站同时启用时，外部映射端口要用方案级参数分别声明（全局 `--external-port` 只适合单入站）：
+
+```bash
+xmg proxy apply --vless-external-port 10443 --reality-external-port 18443
+xmg doctor        # NAT 机型未声明外部端口时，输出 [提示] 行
 ```
 
 **10. 纯 IPv6 节点自适应**
@@ -157,15 +196,20 @@ curl --socks5-user testuser --socks5 testpass123 --socks5-hostname <公网IP>:<�
 
 | 验证项 | 结论 |
 |---|---|
-| 全量自动化测试 | `PASS=438 FAIL=0`，退出码 0 |
+| 全量自动化测试 | `FAIL=0`，退出码 0（断言总数随用例增长，以实际汇总为准） |
 | 全部脚本静态语法 | 所有 `lib/*.sh`、`xmg`、`install.sh` 执行 `bash -n` 零语法错误 |
 | 模块瘦身与解耦 | 彻底剥离 `caddy.sh`、`site.sh`、`third-party.sh`，清单与菜单同步更新 |
 | 环境自省模块 (`detect.sh`) | 架构探测、内存阶梯 (extreme_low)、网络双栈/NAT/NAT64 探测全部覆盖 |
 | 状态两阶段原子提交 | 批量暂存 `stage` + 一次性落盘 `commit_draft`，消灭 N+1 磁盘写放大 |
 | Xray 官方规范补齐 | 注入 `rejectUnknownSni: true`、`domainStrategy` 闭环、`connIdle: 60`、双栈 DoH |
-| 内存压制与解耦 | drop-in 注入 `GOMEMLIMIT=100MiB`，防 tmpfs 爆破，保留全部 10 个兼容接口 |
+| REALITY 入站 | XHTTP + REALITY 字段下发、密钥对自动生成、`vless://` 链接含 `pbk`/`sid`/`spx` |
+| 分享链接规范 | query 值完整百分号编码、IPv6 主机加方括号、ACME 证书不附带 `allowInsecure` |
+| 内存压制与解耦 | drop-in 按运行时内存（cgroup 配额）注入 `GOMEMLIMIT` / `GOGC` / `GOMAXPROCS`，`nofile` 按内存分档 |
 | 专属调优 (`tune.sh`) | extreme_low 网络缓冲（4MB）、8192 conntrack、容器安全熔断与 Swap 预检 |
-| 自检诊断工具 (`doctor.sh`) | `xmg doctor` 结构化输出终端自检卡片，支持 CLI 与菜单 |
+| 自检诊断工具 (`doctor.sh`) | `xmg doctor` 结构化输出终端自检卡片，含 NAT 外部端口与 Go 参数漂移提示 |
+| 安装自检 (`selftest.sh`) | `xmg selftest` 按发行版/init/防火墙后端切换断言，清单比对可发现升级中断 |
+| Alpine / OpenRC | 发行版/init/包管理器抽象、`/etc/init.d/xray`、`xmg-firewall` 开机重放、unbound DoT |
+| 防火墙联动 | `xmg firewall allow` 自动纳入已启用的 SOCKS5 / VLESS / REALITY 端口 |
 
 ---
 
@@ -241,7 +285,7 @@ rc-update show | grep xray
 grep -E 'GOMEMLIMIT|rc_ulimit|command=' /etc/init.d/xray
 ```
 
-期望：二进制落 `/usr/local/bin/xray`；`/etc/init.d/xray` 存在且含 `GOMEMLIMIT=100MiB`、`rc_ulimit`；`xray` 已进 `default` 运行级；`xmg xray restart` 走 `rc-service`。
+期望：二进制落 `/usr/local/bin/xray`；`/etc/init.d/xray` 存在且含 `GOMEMLIMIT=`、`rc_ulimit`；`xray` 已进 `default` 运行级；`xmg xray restart` 走 `rc-service`。
 
 **A3. 代理配置闭环**
 
@@ -385,4 +429,4 @@ xmg update             # 代码更新
 xmg xray restart       # 手动
 ```
 
-验证：`xmg selftest` 的「服务运行中」应 PASS；若失败会明确提示 `xmg xray diag`。
+验证：`xmg selftest` 的「服务运行中」应 PASS；若失败会明确提示 `xmg xray status` / `xmg doctor`。

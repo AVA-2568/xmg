@@ -50,6 +50,17 @@ if ! declare -F xmg_detect_virt >/dev/null 2>&1; then
     fi
 fi
 
+# 机型期望值（GOMEMLIMIT/GOMAXPROCS）来自 xray.sh，随安装包一同落盘
+if ! declare -F xmg_xray_gomemlimit >/dev/null 2>&1; then
+    if [ -f "$_XMG_DOCTOR_LIBDIR/xray.sh" ]; then
+        # shellcheck source=/dev/null
+        source "$_XMG_DOCTOR_LIBDIR/xray.sh"
+    elif [ -f "${XMG_LIB_DIR:-/opt/xmg/lib}/xray.sh" ]; then
+        # shellcheck source=/dev/null
+        source "${XMG_LIB_DIR:-/opt/xmg/lib}/xray.sh"
+    fi
+fi
+
 if ! declare -F xmg_service_active_read >/dev/null 2>&1; then
     if [ -f "$_XMG_DOCTOR_LIBDIR/system.sh" ]; then
         # shellcheck source=/dev/null
@@ -381,6 +392,103 @@ _xmg_doctor_get_gomemlimit() {
     fi
 
     printf '未配置'
+}
+
+_xmg_doctor_get_gomaxprocs() {
+    if [ -n "${MOCK_GOMAXPROCS:-}" ]; then
+        printf '%s' "$MOCK_GOMAXPROCS"
+        return 0
+    fi
+    local dropin="${XMG_SYSTEMD_DIR:-/etc/systemd/system}/${XMG_XRAY_SERVICE:-xray}.service.d/20-xmg.conf"
+    if [ -r "$dropin" ]; then
+        local line=""
+        while IFS= read -r line || [ -n "$line" ]; do
+            if [[ "$line" =~ GOMAXPROCS=([^[:space:]\"]+) ]]; then
+                printf '%s' "${BASH_REMATCH[1]}"
+                return 0
+            fi
+        done < "$dropin"
+    fi
+    local openrc_script="${XMG_INITD_DIR:-/etc/init.d}/${XMG_XRAY_SERVICE:-xray}"
+    if [ -r "$openrc_script" ]; then
+        local oline=""
+        while IFS= read -r oline || [ -n "$oline" ]; do
+            if [[ "$oline" =~ ^export[[:space:]]+GOMAXPROCS=([^[:space:]]+) ]]; then
+                printf '%s' "${BASH_REMATCH[1]}"
+                return 0
+            fi
+        done < "$openrc_script"
+    fi
+    printf '未配置'
+}
+
+# 机型升配/降配后，落盘的 Go 参数不会自动变化；体检时把差异显式告警
+_xmg_doctor_go_param_drift() {
+    declare -F xmg_xray_gomemlimit >/dev/null 2>&1 || return 0
+    local actual_limit="" actual_procs="" expected_limit="" expected_procs="" msg=""
+    actual_limit="$(_xmg_doctor_get_gomemlimit)"
+    actual_procs="$(_xmg_doctor_get_gomaxprocs)"
+    expected_limit="$(xmg_xray_gomemlimit 2>/dev/null || true)"
+    if declare -F xmg_xray_gomaxprocs >/dev/null 2>&1; then
+        expected_procs="$(xmg_xray_gomaxprocs 2>/dev/null || true)"
+    fi
+    if [ -n "$expected_limit" ] && [ -n "$actual_limit" ] && [ "$actual_limit" != "未配置" ] && [ "$actual_limit" != "$expected_limit" ]; then
+        msg="GOMEMLIMIT ${actual_limit} -> ${expected_limit}"
+    fi
+    if [ -n "$expected_procs" ] && [ -n "$actual_procs" ] && [ "$actual_procs" != "未配置" ] && [ "$actual_procs" != "$expected_procs" ]; then
+        if [ -n "$msg" ]; then
+            msg="${msg}, "
+        fi
+        msg="${msg}GOMAXPROCS ${actual_procs} -> ${expected_procs}"
+    fi
+    if [ -n "$msg" ]; then
+        printf '%s' "$msg"
+    fi
+    return 0
+}
+
+# NAT 端口映射机型：外部公网端口无法从本机探测，只能靠 --external-port 声明。
+# 已启用代理却没声明时，客户端拿到的是内网端口，连不上却看不出原因，体检时先点出来。
+_xmg_doctor_external_port_hint() {
+    [ "${XMG_NET_NAT:-0}" = "1" ] || return 0
+    if ! declare -F xmg_state_get >/dev/null 2>&1; then
+        local lib_dir="${XMG_LIB_DIR:-/opt/xmg/lib}"
+        [ -r "$lib_dir/state.sh" ] || return 0
+        # shellcheck source=/dev/null
+        source "$lib_dir/state.sh" >/dev/null 2>&1 || return 0
+    fi
+    declare -F xmg_state_load >/dev/null 2>&1 && xmg_state_load >/dev/null 2>&1 || true
+
+    local global_ext="" missing="" name="" on="" ext=""
+    global_ext="$(xmg_state_get PROXY_EXTERNAL_PORT "" 2>/dev/null || true)"
+    case "$global_ext" in
+        ''|*[!0-9]*) global_ext="" ;;
+        *)
+            if [ "$global_ext" -lt 1 ] || [ "$global_ext" -gt 65535 ]; then
+                global_ext=""
+            fi
+            ;;
+    esac
+
+    for name in VLESS REALITY; do
+        on="$(xmg_state_get "PROXY_${name}_ENABLED" 0 2>/dev/null || printf 0)"
+        [ "$on" = "1" ] || continue
+        ext="$(xmg_state_get "PROXY_${name}_EXTERNAL_PORT" "" 2>/dev/null || true)"
+        case "$ext" in
+            ''|*[!0-9]*) ext="" ;;
+            *)
+                if [ "$ext" -lt 1 ] || [ "$ext" -gt 65535 ]; then
+                    ext=""
+                fi
+                ;;
+        esac
+        [ -n "$ext" ] || ext="$global_ext"
+        [ -n "$ext" ] || missing="$missing $name"
+    done
+
+    [ -n "$missing" ] || return 0
+    printf 'NAT 机型未声明外部映射端口 (%s)，客户端链接将使用内网端口；可执行: xmg proxy apply --external-port <公网端口>' "${missing# }"
+    return 0
 }
 
 _xmg_doctor_get_listening_ports() {
@@ -875,6 +983,12 @@ xmg_doctor_run() {
         "$c_cyan" "$nat_str" "$c_reset" \
         "$c_cyan" "$nat64_str" "$c_reset"
 
+    local ext_hint=""
+    ext_hint="$(_xmg_doctor_external_port_hint)"
+    if [ -n "$ext_hint" ]; then
+        printf '%s[提示]%s %s\n' "$c_yellow" "$c_reset" "$ext_hint"
+    fi
+
     # [资源]
     printf '%s[资源]%s 物理内存: %s%s%s | Swap: %s%s%s | 磁盘 /: %s%s%s\n' \
         "$c_bold" "$c_reset" \
@@ -906,6 +1020,13 @@ xmg_doctor_run() {
         "$c_cyan" "$cert_st" "$c_reset" \
         "$c_cyan" "$gomemlimit" "$c_reset" \
         "$c_cyan" "$listen_ports" "$c_reset"
+
+    local go_drift=""
+    go_drift="$(_xmg_doctor_go_param_drift)"
+    if [ -n "$go_drift" ]; then
+        printf '%s[提示]%s Go 参数已过期（%s），请重跑 xmg xray restart 刷新\n' \
+            "$c_yellow" "$c_reset" "$go_drift"
+    fi
 
     # [DNS]
     local doh_lat=""

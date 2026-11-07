@@ -152,7 +152,39 @@ t_contains "IPV6=no 被自动纠偏为 IPV6=yes" "$_UFW_CONF_AFTER" "IPV6=yes"
 t_not_contains "不再残留 IPV6=no" "$_UFW_CONF_AFTER" "IPV6=no"
 t_contains "保留原有其他配置项" "$_UFW_CONF_AFTER" 'DEFAULT_INPUT_POLICY="DROP"'
 
+# --- 6. 代理入站端口自动纳入放行（避免开防火墙后代理端口被默认 DROP） ---
+_FW_PROXY_HOME="$(mktemp -d)"
+mkdir -p "$_FW_PROXY_HOME/etc/xray"
+cat > "$_FW_PROXY_HOME/etc/xray/state.env" <<'EOF'
+PROXY_SOCKS_ENABLED=1
+PROXY_SOCKS_PORT=1080
+PROXY_SOCKS_UDP=1
+PROXY_VLESS_ENABLED=1
+PROXY_VLESS_PORT=20000
+PROXY_REALITY_ENABLED=1
+PROXY_REALITY_PORT=8443
+EOF
+_FW_PROXY_PORTS="$(XMG_HOME="$_FW_PROXY_HOME" \
+    XMG_ETC_DIR="$_FW_PROXY_HOME/etc" \
+    XMG_XRAY_STATE_DIR="$_FW_PROXY_HOME/etc/xray" \
+    XMG_STATE_FILE="$_FW_PROXY_HOME/etc/xray/state.env" \
+    bash -c 'source "'"$TESTS_DIR/../lib/firewall.sh"'"; _xmg_fw_enabled_proxy_ports' 2>/dev/null)"
+t_contains "代理端口纳入放行: SOCKS5 1080" "$_FW_PROXY_PORTS" "1080"
+t_contains "代理端口纳入放行: VLESS 20000" "$_FW_PROXY_PORTS" "20000"
+t_contains "代理端口纳入放行: REALITY 8443" "$_FW_PROXY_PORTS" "8443"
+
+# 未启用任何方案时不得凭空多放端口
+_FW_EMPTY_HOME="$(mktemp -d)"
+mkdir -p "$_FW_EMPTY_HOME/etc/xray"
+: > "$_FW_EMPTY_HOME/etc/xray/state.env"
+_FW_EMPTY_PORTS="$(XMG_HOME="$_FW_EMPTY_HOME" \
+    XMG_ETC_DIR="$_FW_EMPTY_HOME/etc" \
+    XMG_XRAY_STATE_DIR="$_FW_EMPTY_HOME/etc/xray" \
+    XMG_STATE_FILE="$_FW_EMPTY_HOME/etc/xray/state.env" \
+    bash -c 'source "'"$TESTS_DIR/../lib/firewall.sh"'"; _xmg_fw_enabled_proxy_ports' 2>/dev/null)"
+t_equals "未启用方案时无额外放行端口" "$_FW_EMPTY_PORTS" ""
+
 # 清理环境
 export PATH="$_SAVED_PATH"
 unset MOCK_UFW_LOG XMG_UFW_DEFAULT_CONF
-rm -rf "$TMP_FW_DIR"
+rm -rf "$TMP_FW_DIR" "$_FW_PROXY_HOME" "$_FW_EMPTY_HOME"

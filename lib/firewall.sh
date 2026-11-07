@@ -35,6 +35,7 @@ fi
 
 # ===== 依赖加载 =====
 _XMG_FW_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_XMG_FW_SELF_DIR="$_XMG_FW_LIBDIR"
 if ! declare -F xmg_info >/dev/null 2>&1; then
     if [ -f "$_XMG_FW_LIBDIR/common.sh" ]; then
         # shellcheck source=lib/common.sh
@@ -456,6 +457,45 @@ xmg_firewall_status() {
     xmg_fw_ipt_status
 }
 
+# 只读加载状态模块：不建目录、不写默认值，firewall allow 不应产生副作用
+_xmg_fw_load_state() {
+    declare -F xmg_state_get >/dev/null 2>&1 && return 0
+    local dir="" f=""
+    for dir in "${XMG_LIB_DIR:-}" "${_XMG_FW_SELF_DIR:-}" "${XMG_HOME:-/opt/xmg}/lib"; do
+        [ -n "$dir" ] || continue
+        f="$dir/state.sh"
+        if [ -r "$f" ]; then
+            # shellcheck source=/dev/null
+            source "$f" && return 0
+        fi
+    done
+    return 1
+}
+
+_xmg_fw_enabled_proxy_ports() {
+    _xmg_fw_load_state || return 0
+    if declare -F xmg_state_load >/dev/null 2>&1; then
+        xmg_state_load >/dev/null 2>&1 || true
+    fi
+
+    local name="" on="" port="" seen=" "
+    for name in SOCKS VLESS REALITY; do
+        on="$(xmg_state_get "PROXY_${name}_ENABLED" 0 2>/dev/null || printf 0)"
+        [ "$on" = "1" ] || continue
+        port="$(xmg_state_get "PROXY_${name}_PORT" "" 2>/dev/null || true)"
+        case "$port" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || continue
+        case "$seen" in
+            *" $port "*) continue ;;
+        esac
+        seen="$seen$port "
+        printf '%s\n' "$port"
+    done
+    return 0
+}
+
 xmg_firewall_allow_basic() {
     xmg_require_root
 
@@ -473,6 +513,18 @@ xmg_firewall_allow_basic() {
             ;;
     esac
 
+    # 代理入站端口（按 state 中已启用的方案补齐，避免开了防火墙就连不上）
+    local proxy_ports="" proxy_added="" socks_udp_on="0"
+    _xmg_fw_load_state >/dev/null 2>&1 || true
+    # 必须在父 shell 里加载一次：上面的端口枚举跑在 $( ) 子 shell，状态不会回传
+    if declare -F xmg_state_load >/dev/null 2>&1; then
+        xmg_state_load >/dev/null 2>&1 || true
+    fi
+    proxy_ports="$(_xmg_fw_enabled_proxy_ports 2>/dev/null || true)"
+    if declare -F xmg_state_get >/dev/null 2>&1; then
+        socks_udp_on="$(xmg_state_get PROXY_SOCKS_UDP 0 2>/dev/null || printf 0)"
+    fi
+
     if xmg_firewall_is_ufw; then
         xmg_firewall_need_ufw
         xmg_firewall_fix_ipv6
@@ -487,11 +539,39 @@ xmg_firewall_allow_basic() {
             xmg_info "检测到当前生效 SSH 端口为 ${cur_ssh_port}，已自适应放行 ${cur_ssh_port}/tcp 防锁死"
         fi
 
+        local p=""
+        for p in $proxy_ports; do
+            case "$p" in
+                22|80|443) continue ;;
+            esac
+            if [ -n "$cur_ssh_port" ] && [ "$p" = "$cur_ssh_port" ]; then
+                continue
+            fi
+            ufw allow "${p}/tcp" comment 'XMG proxy' \
+                || xmg_warn "放行代理端口 ${p}/tcp 失败"
+            proxy_added="$proxy_added ${p}/tcp"
+        done
+        if [ "$socks_udp_on" = "1" ]; then
+            local sp=""
+            sp="$(xmg_state_get PROXY_SOCKS_PORT "" 2>/dev/null || true)"
+            case "$sp" in
+                ''|*[!0-9]*) ;;
+                *)
+                    ufw allow "${sp}/udp" comment 'XMG proxy UDP' \
+                        || xmg_warn "放行 SOCKS5 UDP 端口 ${sp}/udp 失败"
+                    proxy_added="$proxy_added ${sp}/udp"
+                    ;;
+            esac
+        fi
+
         xmg_info "已放行 22/tcp、80/tcp、443/tcp"
         if [ -n "$cur_ssh_port" ] && [ "$cur_ssh_port" != "22" ]; then
             xmg_info "已同步放行自定义 SSH 端口: ${cur_ssh_port}/tcp"
         else
             xmg_warn "如果 SSH 不是 22 端口，请自行放行真实 SSH 端口"
+        fi
+        if [ -n "$proxy_added" ]; then
+            xmg_info "已按当前代理配置放行:${proxy_added}"
         fi
         return 0
     fi
@@ -505,8 +585,34 @@ xmg_firewall_allow_basic() {
         xmg_info "检测到当前生效 SSH 端口为 ${cur_ssh_port}，已加入放行列表防锁死"
     fi
 
+    local p2=""
+    for p2 in $proxy_ports; do
+        case "$p2" in
+            22|80|443) continue ;;
+        esac
+        if [ -n "$cur_ssh_port" ] && [ "$p2" = "$cur_ssh_port" ]; then
+            continue
+        fi
+        xmg_fw_allow_add "$p2" tcp
+        proxy_added="$proxy_added ${p2}/tcp"
+    done
+    if [ "$socks_udp_on" = "1" ]; then
+        local sp2=""
+        sp2="$(xmg_state_get PROXY_SOCKS_PORT "" 2>/dev/null || true)"
+        case "$sp2" in
+            ''|*[!0-9]*) ;;
+            *)
+                xmg_fw_allow_add "$sp2" udp
+                proxy_added="$proxy_added ${sp2}/udp"
+                ;;
+        esac
+    fi
+
     xmg_fw_ipt_apply || xmg_error "iptables 规则应用失败，请检查内核模块"
     xmg_info "已放行 22/tcp、80/tcp、443/tcp（写入 $XMG_FW_ALLOW_FILE）"
+    if [ -n "$proxy_added" ]; then
+        xmg_info "已按当前代理配置放行:${proxy_added}"
+    fi
 }
 
 xmg_firewall_allow_custom_port() {
