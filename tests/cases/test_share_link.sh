@@ -8,6 +8,7 @@ _SL_SAVED_HOME="${XMG_HOME-}"
 _SL_SAVED_ETC="${XMG_ETC_DIR-}"
 _SL_SAVED_STATE="${XMG_STATE_FILE-}"
 _SL_SAVED_LIB="${XMG_LIB_DIR-}"
+_SL_SAVED_CFG="${XMG_XRAY_CONFIG-}"
 
 _SL_TMP="$(mktemp -d)"
 mkdir -p "$_SL_TMP/etc/xray"
@@ -17,6 +18,8 @@ export XMG_ETC_DIR="$_SL_TMP/etc"
 export XMG_XRAY_STATE_DIR="$_SL_TMP/etc/xray"
 export XMG_STATE_FILE="$_SL_TMP/etc/xray/state.env"
 export XMG_LIB_DIR="$SRC/lib"
+# 隔离运行配置：链接校验只读 state，不受上一个用例残留的 config 影响
+export XMG_XRAY_CONFIG="$_SL_TMP/none.json"
 
 # shellcheck source=/dev/null
 source "$SRC/lib/common.sh"
@@ -176,4 +179,5 @@ if [ -n "$_SL_SAVED_HOME" ]; then export XMG_HOME="$_SL_SAVED_HOME"; else unset 
 if [ -n "$_SL_SAVED_ETC" ]; then export XMG_ETC_DIR="$_SL_SAVED_ETC"; else unset XMG_ETC_DIR; fi
 if [ -n "$_SL_SAVED_STATE" ]; then export XMG_STATE_FILE="$_SL_SAVED_STATE"; else unset XMG_STATE_FILE; fi
 if [ -n "$_SL_SAVED_LIB" ]; then export XMG_LIB_DIR="$_SL_SAVED_LIB"; else unset XMG_LIB_DIR; fi
+if [ -n "$_SL_SAVED_CFG" ]; then export XMG_XRAY_CONFIG="$_SL_SAVED_CFG"; else unset XMG_XRAY_CONFIG; fi
 rm -rf "$_SL_TMP"

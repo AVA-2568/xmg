@@ -256,7 +256,15 @@ xmg_proxy_apply() {
         r_uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
         [ -n "$r_uuid" ] || r_uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
         if [ -z "$r_uuid" ]; then
-            if [ -r /proc/sys/kernel/random/uuid ]; then
+            # 优先让内核生成（xray uuid），保证格式与当前版本一致
+            local _xbin=""
+            if declare -F xmg_xray_binary >/dev/null 2>&1; then
+                _xbin="$(xmg_xray_binary 2>/dev/null || true)"
+            fi
+            if [ -n "$_xbin" ] && [ -x "$_xbin" ]; then
+                r_uuid="$("$_xbin" uuid 2>/dev/null | head -n 1 | tr -d '\r\n' || true)"
+            fi
+            if [ -z "$r_uuid" ] && [ -r /proc/sys/kernel/random/uuid ]; then
                 r_uuid="$(tr -d '\r\n' < /proc/sys/kernel/random/uuid 2>/dev/null || true)"
             fi
             if [ -z "$r_uuid" ] && command -v openssl >/dev/null 2>&1; then
@@ -288,6 +296,17 @@ xmg_proxy_apply() {
             _derived_pub="$(_xmg_proxy_reality_pubkey "$r_pk" 2>/dev/null || true)"
             if [ -n "$_derived_pub" ]; then
                 _xmg_stage PROXY_REALITY_PUBLIC_KEY "$_derived_pub"
+            fi
+        fi
+
+        # 公私钥成对性校验：两者都有但不成对时按私钥重推，否则客户端会收到真实证书
+        local _pub_now="" _pub_derived=""
+        _pub_now="$(xmg_state_get PROXY_REALITY_PUBLIC_KEY "")"
+        if [ -n "$r_pk" ] && [ -n "$_pub_now" ]; then
+            _pub_derived="$(_xmg_proxy_reality_pubkey "$r_pk" 2>/dev/null || true)"
+            if [ -n "$_pub_derived" ] && [ "$_pub_derived" != "$(_xmg_proxy_normalize_pbk "$_pub_now")" ]; then
+                xmg_warn "REALITY 公钥与私钥不匹配，已按私钥重新推导并覆盖"
+                _xmg_stage PROXY_REALITY_PUBLIC_KEY "$_pub_derived"
             fi
         fi
 
@@ -389,7 +408,7 @@ xmg_proxy_reality_keygen_raw() {
     [ -n "$out" ] || return 1
     priv="$(printf '%s\n' "$out" | sed -n 's/^[Pp]rivate[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
     pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
-    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
+    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password[^:]*:[[:space:]]*//p' | head -n 1)"
     [ -n "$priv" ] || return 1
     pub="$(_xmg_proxy_normalize_pbk "$pub")"
     printf '%s %s\n' "$priv" "$pub"
@@ -405,17 +424,20 @@ _xmg_proxy_reality_pubkey() {
     [ -n "$bin" ] || bin="$(command -v xray 2>/dev/null || true)"
     [ -n "$bin" ] && [ -x "$bin" ] || return 1
 
-    local out="" pub=""
-    out="$("$bin" x25519 -i "$pk" 2>/dev/null || true)"
+    local out="" pub="" pk_norm=""
+    pk_norm="$(_xmg_proxy_normalize_pbk "$pk")"
+    out="$("$bin" x25519 -i "$pk_norm" 2>/dev/null || true)"
     [ -n "$out" ] || return 1
     pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
-    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
-    # 兼容不带标签的输出：取最后一个 43/44 位 base64 token（若同时打印私钥与公钥，公钥在后）
+    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password[^:]*:[[:space:]]*//p' | head -n 1)"
+    # 兼容不带标签的输出：排除 Hash32 行后取最后一个 43/44 位 base64 token
     if [ -z "$pub" ]; then
-        pub="$(printf '%s\n' "$out" | grep -oE '[A-Za-z0-9_+/-]{43}=?' | tail -n 1)"
+        pub="$(printf '%s\n' "$out" | grep -v '^Hash32:' | grep -oE '[A-Za-z0-9_+/-]{43}=?' | tail -n 1)"
     fi
     [ -n "$pub" ] || return 1
     pub="$(_xmg_proxy_normalize_pbk "$pub")"
+    # 推导结果等于输入私钥，说明解析到了回显行；这是错的，宁可失败也不能把私钥当公钥下发
+    [ "$pub" != "$pk_norm" ] || return 1
     printf '%s' "$pub"
 }
 
@@ -627,6 +649,24 @@ _xmg_proxy_cert_self_signed() {
     return 1
 }
 
+# 从运行中的 config.json 读取 REALITY 实际生效值。
+# 链接必须匹配“服务端正在跑的配置”，state 只是期望值；两者不一致时以配置为准并告警。
+_xmg_proxy_runtime_reality_pk() {
+    local cfg="${1:-}"
+    [ -n "$cfg" ] && [ -r "$cfg" ] || return 1
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '[.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.privateKey] | map(select(. != null and . != "")) | first // empty' "$cfg" 2>/dev/null && return 0
+    fi
+    grep -o '"privateKey"[[:space:]]*:[[:space:]]*"[^"]*"' "$cfg" 2>/dev/null | head -n 1 | cut -d'"' -f4
+}
+
+_xmg_proxy_runtime_reality_sids() {
+    local cfg="${1:-}"
+    [ -n "$cfg" ] && [ -r "$cfg" ] || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    jq -r '.inbounds[]? | select(.streamSettings.security == "reality") | .streamSettings.realitySettings.shortIds[]?' "$cfg" 2>/dev/null
+}
+
 xmg_proxy_reality_link() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
 
@@ -653,14 +693,57 @@ xmg_proxy_reality_link() {
         return 1
     fi
 
-    # 公钥优先取 state（apply 时已随密钥对落盘），旧数据再从私钥反推一次
+    # 链接必须匹配“正在运行的 config.json”：state 可能改了但没 apply/重启
+    local cfg_pk="" cfg_sids="" sid_new="" pk_changed=0
+    cfg_pk="$(_xmg_proxy_runtime_reality_pk "${XMG_XRAY_CONFIG:-}" 2>/dev/null || true)"
+    if [ -n "$cfg_pk" ] && [ "$cfg_pk" != "$pk" ]; then
+        xmg_warn "运行配置的 privateKey 与 state 不一致，链接按运行配置生成（请重新 apply 同步 state）"
+        pk="$cfg_pk"
+        pk_changed=1
+    fi
+    cfg_sids="$(_xmg_proxy_runtime_reality_sids "${XMG_XRAY_CONFIG:-}" 2>/dev/null || true)"
+    if [ -n "$cfg_sids" ]; then
+        if printf '%s\n' "$cfg_sids" | grep -Fxq -- "$sid"; then
+            :
+        else
+            sid_new="$(printf '%s\n' "$cfg_sids" | sed -n '/^$/!{p;q;}')"
+            if [ -n "$sid" ]; then
+                xmg_warn "运行配置的 shortIds 不包含 state 的 shortId，已改用运行配置中的值"
+            elif [ -n "$sid_new" ]; then
+                xmg_warn "state 未设置 shortId，已改用运行配置中的值"
+            fi
+            sid="$sid_new"
+        fi
+    fi
+
+    # 公钥优先取 state（apply 时已随密钥对落盘），旧数据再从私钥反推一次。
+    # 两边都有时必须校验是否成对：pbk 与服务端 privateKey 不匹配 = 客户端收到真实证书。
     pub="$(xmg_state_get PROXY_REALITY_PUBLIC_KEY "")"
-    if [ -z "$pub" ]; then
-        pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
+    local derived_pub="" pub_verified=0
+    derived_pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
+    if [ -n "$pub" ]; then
+        pub="$(_xmg_proxy_normalize_pbk "$pub")"
+        if [ -n "$derived_pub" ]; then
+            if [ "$pub" != "$derived_pub" ]; then
+                xmg_warn "state 中的 pbk 与 privateKey 不匹配，已按私钥重新推导"
+                xmg_warn "请执行 xmg proxy apply --reality on 重新落盘，并用新链接重新导入客户端"
+                pub="$derived_pub"
+            else
+                pub_verified=1
+            fi
+        fi
+    else
+        pub="$derived_pub"
     fi
     if [ -z "$pub" ]; then
         xmg_error "缺少 REALITY 公钥 (pbk)，无法生成可用链接"
         xmg_warn "执行 xmg proxy apply --reality on 让 XMG 自动补全，或用 xmg proxy keygen 生成后导入"
+        return 1
+    fi
+    # 运行配置的私钥与 state 不同、又推导不出它的公钥：宁可不给链接，也不能给错 pbk
+    if [ "$pk_changed" = "1" ] && [ -z "$derived_pub" ]; then
+        xmg_error "运行配置的 privateKey 与 state 不一致，且无法推导对应公钥"
+        xmg_warn "请执行 xmg proxy apply --reality on 重新同步，或确认 xray 内核可用"
         return 1
     fi
     pub="$(_xmg_proxy_normalize_pbk "$pub")"
@@ -694,6 +777,9 @@ xmg_proxy_reality_link() {
     echo "==================== REALITY 节点链接 ===================="
     echo "服务端 privateKey: 不写入链接（REALITY 的安全要求，客户端只需要公钥）"
     echo "客户端 pbk(公钥): $pub"
+    if [ "$pub_verified" = "1" ]; then
+        echo "公钥校验: 与 privateKey 匹配"
+    fi
     if [ -n "$sid" ]; then
         echo "客户端 sid(shortId): $sid"
     else

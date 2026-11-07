@@ -85,6 +85,9 @@ vless://<uuid>@<host>:<port>?<query>#<remark>
 7. **公网地址**：`XMG_PUBLIC_HOST` → `PROXY_PUBLIC_HOST`（`--public-host` 落盘）→ 本机全局地址 → Cloudflare trace 出口探测。
    私网段（10/8、172.16/12、192.168/16、100.64/10、127/8、169.254/16、fe80::/10、fc00::/7）一律跳过；
    仍无法确定时拒绝生成链接，绝不把内网地址塞给客户端。
+8. **以运行配置为准**：生成链接前读取 `config.json` 的 REALITY `privateKey` / `shortIds`。
+   与 state 不一致时按运行配置修正并告警；运行配置的私钥无法推导公钥时拒绝输出，避免发出错误 `pbk`
+   （客户端表现就是 `REALITY: received real certificate`）。
 
 已知限制：CDN 链接固定 443（Cloudflare 常规入口）；直连链接的 authority 使用域名，若域名开启 Cloudflare 代理说明本意就是 CDN，直连应改用仅 DNS 的子域。
 
