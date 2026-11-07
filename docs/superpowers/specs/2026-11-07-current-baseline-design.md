@@ -47,9 +47,10 @@
 | `PROXY_REALITY_ENABLED` / `_PORT` / `_LISTEN` | REALITY 入站开关与监听 |
 | `PROXY_REALITY_UUID` / `_PATH` / `_MODE` | 用户标识与 XHTTP 参数 |
 | `PROXY_REALITY_DEST` / `_SNI` | 回落目标与 serverName |
-| `PROXY_REALITY_PRIVATE_KEY` / `_SHORT_ID` | REALITY 密钥与 shortId（私钥不出链接） |
+| `PROXY_REALITY_PRIVATE_KEY` / `_PUBLIC_KEY` / `_SHORT_ID` | REALITY 密钥对与 shortId（私钥不出链接） |
 | `PROXY_EXTERNAL_PORT` | 全局 NAT 映射端口（单入站兼容） |
 | `PROXY_VLESS_EXTERNAL_PORT` / `PROXY_REALITY_EXTERNAL_PORT` | 方案级 NAT 映射端口（优先于全局） |
+| `PROXY_PUBLIC_HOST` | 客户端可达的公网地址（NAT/容器无法自动探测时显式声明，优先级最高） |
 
 校验边界（`xmg_state_validate`）在落盘前统一执行，失败返回 2 且不触碰现网：
 
@@ -76,10 +77,14 @@ vless://<uuid>@<host>:<port>?<query>#<remark>
 2. **TLS（XHTTP）**：`encryption=none&security=tls&sni&fp=chrome&alpn=h2,http/1.1&type=xhttp&host&path&mode`。
    CDN 模式地址固定 `:443`，直连模式使用主机端口（NAT 时取外部映射端口）。
 3. **REALITY**：`security=reality&sni&fp=chrome&pbk&sid&spx=%2F&type=xhttp&path&mode`。
-   `pbk` 由服务端私钥推导（需 xray 二进制）；推导失败时输出占位符并告警，不输出私钥。
+   `pbk` 取 `apply` 时随密钥对落盘的 `PROXY_REALITY_PUBLIC_KEY`，旧数据回退到 `xray x25519 -i` 反推；
+   两者都缺失时拒绝生成链接，不再输出 `<PUBLIC_KEY>` 占位符。`sid` 未启用时省略该参数，长度必须是偶数位十六进制。
 4. **证书校验降级**：仅当证书来源为 `user` 且判定为自签（或无 openssl 无法判定）时，直连链接附带 `allowInsecure=1`；ACME/CA 证书不带。
 5. **IPv6**：authority 部分自动加方括号。
 6. **NAT**：方案级外部端口优先，未声明时回落到全局；仍未声明则使用监听端口并告警，`xmg doctor` 在 NAT 机型输出 `[提示]`。
+7. **公网地址**：`XMG_PUBLIC_HOST` → `PROXY_PUBLIC_HOST`（`--public-host` 落盘）→ 本机全局地址 → Cloudflare trace 出口探测。
+   私网段（10/8、172.16/12、192.168/16、100.64/10、127/8、169.254/16、fe80::/10、fc00::/7）一律跳过；
+   仍无法确定时拒绝生成链接，绝不把内网地址塞给客户端。
 
 已知限制：CDN 链接固定 443（Cloudflare 常规入口）；直连链接的 authority 使用域名，若域名开启 Cloudflare 代理说明本意就是 CDN，直连应改用仅 DNS 的子域。
 

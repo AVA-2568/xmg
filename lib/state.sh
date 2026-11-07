@@ -87,6 +87,7 @@ xmg_state_defaults() {
         'PROXY_EXTERNAL_PORT=' \
         'PROXY_VLESS_EXTERNAL_PORT=' \
         'PROXY_REALITY_EXTERNAL_PORT=' \
+        'PROXY_PUBLIC_HOST=' \
         'PROXY_VLESS_DOMAIN=' \
         'PROXY_VLESS_UUID=' \
         'PROXY_VLESS_PATH=/' \
@@ -103,6 +104,7 @@ xmg_state_defaults() {
         'PROXY_REALITY_DEST=www.microsoft.com:443' \
         'PROXY_REALITY_SNI=www.microsoft.com' \
         'PROXY_REALITY_PRIVATE_KEY=' \
+        'PROXY_REALITY_PUBLIC_KEY=' \
         'PROXY_REALITY_SHORT_ID=' \
         'XMG_BUFFER_SIZE=4' \
         'XMG_BACKUP_KEEP=5' \
@@ -584,6 +586,24 @@ xmg_state_validate() {
         fi
     done
 
+    # 公网地址：NAT / 容器里本机探测只能拿到私网 IP，必须允许显式声明
+    local _ph=""
+    _state_val _ph PROXY_PUBLIC_HOST
+    if [ -n "$_ph" ]; then
+        case "$_ph" in
+            *" "*|*/*|*"://"*)
+                xmg_error "PUBLIC_HOST 必须是纯 IP 或域名，不能带协议/路径/空格: '$_ph'"
+                return 2
+                ;;
+        esac
+        if [[ "$_ph" =~ ^[0-9A-Fa-f:.]+$ ]]; then
+            xmg_state_validate_ipv4or6 "$_ph" || return 2
+        elif [[ ! "$_ph" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+            xmg_error "PUBLIC_HOST 格式非法: '$_ph'"
+            return 2
+        fi
+    fi
+
     if [ "$socks_on" = "1" ]; then
         local port listen user pass udp
         _state_val port PROXY_SOCKS_PORT
@@ -740,10 +760,21 @@ xmg_state_validate() {
             return 2
         fi
 
-        # shortId 允许为空（不使用），否则必须是 1-16 位十六进制
+        # shortId 允许为空（不使用），否则必须是偶数位十六进制（Xray 要求 8 字节，最多 16 字符）
         _state_val rsid PROXY_REALITY_SHORT_ID
-        if [ -n "$rsid" ] && [[ ! "$rsid" =~ ^[0-9A-Fa-f]{1,16}$ ]]; then
-            xmg_error "REALITY shortId 必须是 1-16 位十六进制: '$rsid'"
+        if [ -n "$rsid" ]; then
+            if [[ ! "$rsid" =~ ^[0-9A-Fa-f]+$ ]] || [ "${#rsid}" -gt 16 ] || [ $(( ${#rsid} % 2 )) -ne 0 ]; then
+                xmg_error "REALITY shortId 必须是 2-16 位偶数长度十六进制: '$rsid'"
+                return 2
+            fi
+        fi
+
+        # 公钥可选（缺失时由 link 从私钥推导），但给了就必须是合法的 X25519 base64（含标准/URL 两种字母表）
+        local rpub=""
+        _state_val rpub PROXY_REALITY_PUBLIC_KEY
+        rpub="${rpub%=}"
+        if [ -n "$rpub" ] && [[ ! "$rpub" =~ ^[A-Za-z0-9_+/-]{43}$ ]]; then
+            xmg_error "REALITY publicKey 必须是 43 位 base64（X25519 公钥）: '$rpub'"
             return 2
         fi
     fi

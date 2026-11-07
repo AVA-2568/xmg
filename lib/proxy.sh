@@ -107,6 +107,7 @@ xmg_proxy_parse_args() {
             --socks-udp)         PARAMS["socks_udp"]="${2:-}";         shift 2 || return 2 ;;
             --vless)             PARAMS["vless"]="${2:-}";             shift 2 || return 2 ;;
             --vless-port)        PARAMS["vless_port"]="${2:-}";        shift 2 || return 2 ;;
+            --public-host)       PARAMS["public_host"]="${2:-}";       shift 2 || return 2 ;;
             --external-port)     PARAMS["external_port"]="${2:-}";     shift 2 || return 2 ;;
             --vless-external-port)   PARAMS["vless_external_port"]="${2:-}";   shift 2 || return 2 ;;
             --reality-external-port) PARAMS["reality_external_port"]="${2:-}"; shift 2 || return 2 ;;
@@ -126,7 +127,8 @@ xmg_proxy_parse_args() {
             --reality-mode)      PARAMS["reality_mode"]="${2:-}";      shift 2 || return 2 ;;
             --reality-dest)      PARAMS["reality_dest"]="${2:-}";      shift 2 || return 2 ;;
             --reality-sni)       PARAMS["reality_sni"]="${2:-}";       shift 2 || return 2 ;;
-            --reality-pbk)       PARAMS["reality_pbk"]="${2:-}";       shift 2 || return 2 ;;
+            --reality-private-key) PARAMS["reality_private_key"]="${2:-}"; shift 2 || return 2 ;;
+            --reality-public-key|--reality-pbk) PARAMS["reality_public_key"]="${2:-}"; shift 2 || return 2 ;;
             --reality-sid)       PARAMS["reality_sid"]="${2:-}";       shift 2 || return 2 ;;
             *)
                 xmg_error "未知参数: $1"
@@ -203,6 +205,7 @@ xmg_proxy_apply() {
     _xmg_stage_param PROXY_SOCKS_USER   "${PARAMS[socks_user]:-}"
     _xmg_stage_param PROXY_SOCKS_PASS   "${PARAMS[socks_pass]:-}"
     _xmg_stage_param PROXY_VLESS_PORT   "${PARAMS[vless_port]:-}"
+    _xmg_stage_param PROXY_PUBLIC_HOST "${PARAMS[public_host]:-}"
     _xmg_stage_param PROXY_EXTERNAL_PORT "${PARAMS[external_port]:-}"
     _xmg_stage_param PROXY_VLESS_EXTERNAL_PORT "${PARAMS[vless_external_port]:-}"
     _xmg_stage_param PROXY_REALITY_EXTERNAL_PORT "${PARAMS[reality_external_port]:-}"
@@ -221,7 +224,8 @@ xmg_proxy_apply() {
     _xmg_stage_param PROXY_REALITY_MODE      "${PARAMS[reality_mode]:-}"
     _xmg_stage_param PROXY_REALITY_DEST      "${PARAMS[reality_dest]:-}"
     _xmg_stage_param PROXY_REALITY_SNI       "${PARAMS[reality_sni]:-}"
-    _xmg_stage_param PROXY_REALITY_PRIVATE_KEY "${PARAMS[reality_pbk]:-}"
+    _xmg_stage_param PROXY_REALITY_PRIVATE_KEY "${PARAMS[reality_private_key]:-}"
+    _xmg_stage_param PROXY_REALITY_PUBLIC_KEY  "${PARAMS[reality_public_key]:-}"
     _xmg_stage_param PROXY_REALITY_SHORT_ID  "${PARAMS[reality_sid]:-}"
 
     if [ -n "${PARAMS[socks]:-}" ]; then
@@ -267,7 +271,19 @@ xmg_proxy_apply() {
             if [ -n "$_kp" ]; then
                 read -r r_pk r_pub <<< "$_kp"
                 _xmg_stage PROXY_REALITY_PRIVATE_KEY "$r_pk"
-                xmg_info "已自动生成 REALITY 密钥对（公钥: $r_pub）"
+                if [ -n "$r_pub" ]; then
+                    _xmg_stage PROXY_REALITY_PUBLIC_KEY "$r_pub"
+                fi
+                xmg_info "已自动生成 REALITY 密钥对（公钥: ${r_pub:-推导失败}）"
+            fi
+        fi
+
+        # 私钥已在、公钥缺失（旧版本升级或手工导入）：能推导就补，link 不再依赖运行时反推
+        if [ -n "$r_pk" ] && [ -z "$(xmg_state_get PROXY_REALITY_PUBLIC_KEY "")" ]; then
+            local _derived_pub=""
+            _derived_pub="$(_xmg_proxy_reality_pubkey "$r_pk" 2>/dev/null || true)"
+            if [ -n "$_derived_pub" ]; then
+                _xmg_stage PROXY_REALITY_PUBLIC_KEY "$_derived_pub"
             fi
         fi
 
@@ -371,6 +387,7 @@ xmg_proxy_reality_keygen_raw() {
     pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
     [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
     [ -n "$priv" ] || return 1
+    pub="$(_xmg_proxy_normalize_pbk "$pub")"
     printf '%s %s\n' "$priv" "$pub"
 }
 
@@ -389,7 +406,12 @@ _xmg_proxy_reality_pubkey() {
     [ -n "$out" ] || return 1
     pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
     [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password:[[:space:]]*//p' | head -n 1)"
+    # 兼容不带标签的输出：取最后一个 43/44 位 base64 token（若同时打印私钥与公钥，公钥在后）
+    if [ -z "$pub" ]; then
+        pub="$(printf '%s\n' "$out" | grep -oE '[A-Za-z0-9_+/-]{43}=?' | tail -n 1)"
+    fi
     [ -n "$pub" ] || return 1
+    pub="$(_xmg_proxy_normalize_pbk "$pub")"
     printf '%s' "$pub"
 }
 
@@ -412,20 +434,91 @@ xmg_proxy_reality_keygen() {
 
 # ===== REALITY 分享链接 =====
 # REALITY 不需要域名：节点地址是 VPS 公网 IP，伪装目标是 sni/dest。
+# 私网 / 不可全局路由地址判定（域名返回 1，按"非私网"处理）
+_xmg_proxy_ip_is_private() {
+    local ip="${1:-}"
+    case "$ip" in
+        ''|*[!0-9A-Fa-f:.]*) return 1 ;;
+    esac
+    if [[ "$ip" == *:* ]]; then
+        case "$ip" in
+            ::1|::|fe80:*|fc*|fd*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    local a="" b=""
+    IFS=. read -r a b _ <<< "$ip"
+    case "$a" in
+        10|127|0) return 0 ;;
+        169) [ "$b" = "254" ] && return 0 ;;
+        172) [ "$b" -ge 16 ] && [ "$b" -le 31 ] && return 0 ;;
+        192) [ "$b" = "168" ] && return 0 ;;
+        100) [ "$b" -ge 64 ] && [ "$b" -le 127 ] && return 0 ;;
+    esac
+    return 1
+}
+
+# 返回用于客户端链接的主机地址。
+# 优先级：XMG_PUBLIC_HOST 环境变量 → state 中的 PROXY_PUBLIC_HOST → 本机全局地址 →
+# Cloudflare trace 探测出口公网 IP。NAT / 容器里本机只能看到私网地址，必须探测或显式声明，
+# 否则链接里会出现 10.x / 172.17.x，客户端根本连不上。
 _xmg_proxy_server_host() {
+    local h=""
     if [ -n "${XMG_PUBLIC_HOST:-}" ]; then
-        printf '%s' "$XMG_PUBLIC_HOST"
+        h="$XMG_PUBLIC_HOST"
+    fi
+    if [ -z "$h" ] && declare -F xmg_state_get >/dev/null 2>&1; then
+        h="$(xmg_state_get PROXY_PUBLIC_HOST "")"
+    fi
+    h="${h#[}"
+    h="${h%]}"
+    if [ -n "$h" ]; then
+        printf '%s' "$h"
         return 0
     fi
-    local h=""
-    # BusyBox hostname 没有 -I，按「路由源地址 -> 全局地址」逐级回退
-    h="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
-    if [ -z "$h" ] && command -v ip >/dev/null 2>&1; then
-        h="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)"
+
+    local cand="" c=""
+    if command -v ip >/dev/null 2>&1; then
+        cand="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)"
     fi
-    if [ -z "$h" ] && command -v ip >/dev/null 2>&1; then
-        h="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n 1 || true)"
+    if [ -z "$cand" ]; then
+        # BusyBox hostname 没有 -I
+        cand="$(hostname -I 2>/dev/null || true)"
     fi
+    if [ -z "$cand" ] && command -v ip >/dev/null 2>&1; then
+        cand="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)"
+    fi
+
+    for c in $cand; do
+        c="${c%%/*}"
+        if ! _xmg_proxy_ip_is_private "$c"; then
+            h="$c"
+            break
+        fi
+    done
+    if [ -n "$h" ]; then
+        printf '%s' "$h"
+        return 0
+    fi
+
+    # 本机只有私网地址：探测出口公网 IP（NAT/OVZ 场景）
+    if command -v curl >/dev/null 2>&1; then
+        local trace="" fam=""
+        trace="$(curl -4 -sS --connect-timeout 3 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+        h="$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -n 1)"
+        if _xmg_proxy_ip_is_private "$h"; then
+            h=""
+        fi
+        if [ -z "$h" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
+            trace="$(curl -6 -sS --connect-timeout 3 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+            h="$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -n 1)"
+            if _xmg_proxy_ip_is_private "$h"; then
+                h=""
+            fi
+        fi
+    fi
+
     printf '%s' "${h:-<SERVER_IP>}"
 }
 
@@ -501,6 +594,15 @@ _xmg_urlencode() {
     printf '%s' "$out"
 }
 
+# X25519 公钥统一成 URL-safe 形式（43 字符、无 padding），避免 + / 在 query 里被误解析
+_xmg_proxy_normalize_pbk() {
+    local k="${1-}"
+    k="${k//+/-}"
+    k="${k//\//_}"
+    k="${k%%=*}"
+    printf '%s' "$k"
+}
+
 # 自签证书判定：0=自签，1=CA 签发，2=无法判定。
 # 只有自签才在直连链接里附带 allowInsecure=1，ACME/CA 证书带这个参数
 # 等于让客户端放弃校验，属于无谓的安全降级；无法判定时按自签处理（保连通）。
@@ -535,15 +637,23 @@ xmg_proxy_reality_link() {
     sid="$(xmg_state_get PROXY_REALITY_SHORT_ID "")"
     [ -n "$uuid" ] || return 1
 
-    pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
-    local pub_ok=1
+    # 公钥优先取 state（apply 时已随密钥对落盘），旧数据再从私钥反推一次
+    pub="$(xmg_state_get PROXY_REALITY_PUBLIC_KEY "")"
     if [ -z "$pub" ]; then
-        pub="<PUBLIC_KEY>"
-        pub_ok=0
-        xmg_warn "无法从 privateKey 推导公钥（需要 xray 二进制），链接里的 pbk 为占位符"
-        xmg_warn "请执行 xmg core install 后重试，或先用 xmg proxy keygen 生成密钥对"
+        pub="$(_xmg_proxy_reality_pubkey "$pk" 2>/dev/null || true)"
     fi
+    if [ -z "$pub" ]; then
+        xmg_error "缺少 REALITY 公钥 (pbk)，无法生成可用链接"
+        xmg_warn "执行 xmg proxy apply --reality on 让 XMG 自动补全，或用 xmg proxy keygen 生成后导入"
+        return 1
+    fi
+    pub="$(_xmg_proxy_normalize_pbk "$pub")"
     host="$(_xmg_proxy_server_host)"
+    if [ -z "$host" ] || [ "$host" = "<SERVER_IP>" ]; then
+        xmg_error "无法确定本机公网地址，REALITY 链接不可用"
+        xmg_warn "请设置环境变量 XMG_PUBLIC_HOST=<公网 IP> 后重试（NAT 机型填映射后的公网地址）"
+        return 1
+    fi
     if [[ "$host" =~ : ]] && [[ ! "$host" =~ ^\[.*\]$ ]]; then
         host="[${host}]"
     fi
@@ -554,14 +664,25 @@ xmg_proxy_reality_link() {
     q_uuid="$(_xmg_urlencode "$uuid")"
     q_sni="$(_xmg_urlencode "$sni")"
     q_pbk="$(_xmg_urlencode "$pub")"
-    [ "$pub_ok" = "1" ] || q_pbk="$pub"
     q_sid="$(_xmg_urlencode "$sid")"
     q_path="$(_xmg_urlencode "$path")"
 
-    local link="vless://${q_uuid}@${host}:${port}?encryption=none&security=reality&sni=${q_sni}&fp=chrome&pbk=${q_pbk}&sid=${q_sid}&spx=%2F&type=xhttp&path=${q_path}&mode=${mode}#XMG-VLESS-REALITY"
+    # shortId 未启用时不发空 sid 参数，避免部分客户端把它当成非法值
+    local sid_q=""
+    if [ -n "$q_sid" ]; then
+        sid_q="&sid=${q_sid}"
+    fi
+
+    local link="vless://${q_uuid}@${host}:${port}?encryption=none&security=reality&sni=${q_sni}&fp=chrome&pbk=${q_pbk}${sid_q}&spx=%2F&type=xhttp&path=${q_path}&mode=${mode}#XMG-VLESS-REALITY"
 
     echo "==================== REALITY 节点链接 ===================="
-    echo "服务端 privateKey 不出现在链接里；客户端用 pbk(公钥) 校验。"
+    echo "服务端 privateKey: 不写入链接（REALITY 的安全要求，客户端只需要公钥）"
+    echo "客户端 pbk(公钥): $pub"
+    if [ -n "$sid" ]; then
+        echo "客户端 sid(shortId): $sid"
+    else
+        echo "客户端 sid(shortId): 未启用（服务端 shortIds 含空串）"
+    fi
     printf '%s\n' "$link"
     echo "=========================================================="
     return 0
@@ -688,6 +809,7 @@ xmg_proxy_status() {
         printf '  "external_port": %s,\n' "$ext_json"
         printf '  "vless_external_port": %s,\n' "$vless_ext_json"
         printf '  "reality_external_port": %s,\n' "$reality_ext_json"
+        printf '  "public_host": "%s",\n' "$(xmg_json_escape "$(xmg_state_get PROXY_PUBLIC_HOST "")")"
         printf '  "buffer_size": %s,\n' "$(xmg_state_get XMG_BUFFER_SIZE)"
         printf '  "kernel_channel": "%s"\n' "$(xmg_json_escape "$(xmg_state_get XRAY_CHANNEL)")"
         printf '}\n'
@@ -740,7 +862,9 @@ xmg_proxy_status() {
         echo "  path: $(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
         echo "  mode: $(xmg_state_get PROXY_REALITY_MODE "auto")"
         echo
-        xmg_proxy_reality_link 2>/dev/null || true
+        if ! xmg_proxy_reality_link 2>/dev/null; then
+            xmg_warn "REALITY 链接不可用：缺少公钥 (pbk)，执行 xmg proxy apply --reality on 自动补全"
+        fi
     else
         echo "  状态: 未启用"
     fi
@@ -964,7 +1088,7 @@ _xmg_read() {
 # ===== REALITY 配置向导 =====
 # REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
 xmg_proxy_reality_wizard() {
-    local r_port r_listen r_sni r_dest r_path r_mode r_ext cur_listen def_sni def_dest
+    local r_port r_listen r_sni r_dest r_path r_mode r_ext r_public cur_listen def_sni def_dest
 
     def_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
     def_dest="$(xmg_state_get PROXY_REALITY_DEST "${def_sni}:443")"
@@ -983,10 +1107,11 @@ xmg_proxy_reality_wizard() {
     r_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_REALITY_PORT "8443")")"
     r_listen="$(_xmg_read "监听地址" "$cur_listen")"
     r_sni="$(_xmg_read "serverName(伪装域名)" "$def_sni")"
-    r_dest="$(_xmg_read "dest(回落目标 host:port)" "$def_dest")"
+    r_dest="$(_xmg_read "target(回落目标 host:port，旧名 dest)" "$def_dest")"
     r_path="$(_xmg_read "path" "$(xmg_state_get PROXY_REALITY_PATH "/xhttp")")"
     r_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_REALITY_MODE "auto")")"
     r_ext="$(_xmg_read "外部映射端口(NAT 机型填公网端口，直连留空)" "$(xmg_state_get PROXY_REALITY_EXTERNAL_PORT "")")"
+    r_public="$(_xmg_read "公网地址(域名或公网 IP，NAT 机型建议显式填写)" "$(xmg_state_get PROXY_PUBLIC_HOST "")")"
 
     if ! xmg_proxy_apply \
         --reality on \
@@ -996,7 +1121,8 @@ xmg_proxy_reality_wizard() {
         --reality-dest "$r_dest" \
         --reality-path "$r_path" \
         --reality-mode "$r_mode" \
-        --reality-external-port "$r_ext"; then
+        --reality-external-port "$r_ext" \
+        --public-host "$r_public"; then
         return 1
     fi
 

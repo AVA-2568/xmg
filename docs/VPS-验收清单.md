@@ -145,8 +145,9 @@ xmg proxy link vless
 
 **期望**：
 
-- `config.json` 内 REALITY 入站含 `"security": "reality"` 与 `realitySettings`（`dest` / `serverNames` / `privateKey` / `shortIds`），且**不含** `certificates`；
+- `config.json` 内 REALITY 入站含 `"security": "reality"` 与 `realitySettings`（`target` / `dest` / `serverNames` / `privateKey` / `shortIds`），且**不含** `certificates`；
 - 链接结构为 `vless://<uuid>@<host>:<port>?encryption=none&security=reality&sni=...&fp=chrome&pbk=...&sid=...&spx=%2F&type=xhttp&path=...&mode=...`；
+- `<host>` 必须是客户端可达的**公网地址**：NAT/容器机型用 `--public-host` 或 `XMG_PUBLIC_HOST` 显式声明，链接里出现 `10.x` / `172.16-31.x` / `192.168.x` 即为错误；
 - `pbk` 是**公钥**（base64url），不是服务端 `privateKey`；
 - IPv6 主机在链接中带方括号：`@[2001:db8::1]:8443`；
 - path 含空格 / `?` / `&` / 中文时，链接里必须是 `%XX` 编码，不能出现裸空格或第二个 `?`；

@@ -198,7 +198,7 @@ _xmg_render_dns_servers_json() {
 }
 
 # ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
-# REALITY 不需要证书：对 dest 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
+# REALITY 不需要证书：对 target 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
 # serverNames 支持逗号分隔多值 —— 这就是「同一端口服务多个域名」的真实端口复用。
 _xmg_render_json_str_array() {
     local raw="$1"
@@ -267,10 +267,13 @@ _xmg_render_reality_inbound_json() {
     printf '          "mode": "%s"\n' "$esc_mode"
     printf '        },\n'
     printf '        "security": "reality",\n'
-    printf '        "realitySettings": {\n'
-    printf '          "show": false,\n'
-    printf '          "dest": "%s",\n' "$esc_dest"
-    printf '          "xver": 0,\n'
+        printf '        "realitySettings": {\n'
+        printf '          "show": false,\n'
+        # 官方当前字段名是 target（旧名 dest，两者互为别名）；同时下发两份，
+        # 兼顾仍只认 dest 的旧内核：新内核 target 优先覆盖 dest，旧内核忽略未知 target。
+        printf '          "target": "%s",\n' "$esc_dest"
+        printf '          "dest": "%s",\n' "$esc_dest"
+        printf '          "xver": 0,\n'
     printf '          "serverNames": %s,\n' "$names_json"
     printf '          "privateKey": "%s",\n' "$esc_privkey"
     printf '          "shortIds": %s\n' "$ids_json"

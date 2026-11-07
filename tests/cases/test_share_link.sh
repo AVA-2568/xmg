@@ -34,6 +34,33 @@ t_equals "UTF-8 字节编码" "$(_xmg_urlencode '中文')" "%E4%B8%AD%E6%96%87"
 t_equals "非保留字符保持原样" "$(_xmg_urlencode 'aZ0-_.~')" "aZ0-_.~"
 t_equals "IPv6 冒号不编码" "$(_xmg_urlencode '2001:db8::1')" "2001:db8::1"
 
+# --- 1.1 私网地址判定与公网地址优先级 ---
+t_assert "10.x 判为私网" _xmg_proxy_ip_is_private 10.0.0.1
+t_assert "172.16.x 判为私网" _xmg_proxy_ip_is_private 172.16.0.1
+t_assert "172.31.x 判为私网" _xmg_proxy_ip_is_private 172.31.255.254
+t_assert "192.168.x 判为私网" _xmg_proxy_ip_is_private 192.168.1.1
+t_assert "100.64.x (CGNAT) 判为私网" _xmg_proxy_ip_is_private 100.64.0.1
+t_assert "fe80:: 判为私网" _xmg_proxy_ip_is_private fe80::1
+t_assert "fd00::/8 ULA 判为私网" _xmg_proxy_ip_is_private fd12:3456::1
+_pub_state="public"
+if _xmg_proxy_ip_is_private 203.0.113.9; then _pub_state="private"; fi
+t_equals "公网 IPv4 不判私网" "$_pub_state" "public"
+_dom_state="public"
+if _xmg_proxy_ip_is_private node.example.com; then _dom_state="private"; fi
+t_equals "域名不判私网" "$_dom_state" "public"
+
+cat > "$XMG_STATE_FILE" <<'EOF'
+PROXY_PUBLIC_HOST=203.0.113.7
+EOF
+xmg_state_load
+t_equals "公网地址优先取 state 声明" "$(_xmg_proxy_server_host)" "203.0.113.7"
+
+cat > "$XMG_STATE_FILE" <<'EOF'
+PROXY_PUBLIC_HOST=[2001:db8::7]
+EOF
+xmg_state_load
+t_equals "state 公网地址去掉 IPv6 方括号" "$(_xmg_proxy_server_host)" "2001:db8::7"
+
 # --- 2. VLESS + XHTTP + TLS 链接 ---
 cat > "$XMG_STATE_FILE" <<'EOF'
 PROXY_VLESS_ENABLED=1
@@ -88,6 +115,7 @@ PROXY_REALITY_MODE=packet-up
 PROXY_REALITY_SNI=www.microsoft.com
 PROXY_REALITY_SHORT_ID=ab12
 PROXY_REALITY_PRIVATE_KEY=TESTKEY
+PROXY_REALITY_PUBLIC_KEY=HZhx5Hg7Zgv2lLe8Ivr3nC8v1FqPHvdKCmUIYcMli8I
 PROXY_REALITY_EXTERNAL_PORT=20002
 EOF
 xmg_state_load
@@ -98,7 +126,7 @@ _xmg_proxy_server_host() { printf '203.0.113.9'; }
 _RLINK="$(xmg_proxy_reality_link 2>/dev/null | grep '^vless://' || true)"
 t_contains "REALITY 链接使用外部映射端口" "$_RLINK" "@203.0.113.9:20002?"
 t_contains "REALITY 安全类型" "$_RLINK" "security=reality"
-t_contains "REALITY 携带公钥参数" "$_RLINK" "pbk="
+t_contains "REALITY 携带公钥参数" "$_RLINK" "pbk=HZhx5Hg7Zgv2lLe8Ivr3nC8v1FqPHvdKCmUIYcMli8I"
 t_contains "REALITY 携带 shortId" "$_RLINK" "sid=ab12"
 t_contains "REALITY 携带 spiderX" "$_RLINK" "spx=%2F"
 t_contains "REALITY 声明 XHTTP" "$_RLINK" "type=xhttp"
@@ -109,6 +137,21 @@ t_contains "REALITY 模式透传" "$_RLINK" "mode=packet-up"
 _xmg_proxy_server_host() { printf '2001:db8::1'; }
 _R6="$(xmg_proxy_reality_link 2>/dev/null | grep '^vless://' || true)"
 t_contains "IPv6 主机加方括号" "$_R6" "@[2001:db8::1]:20002?"
+
+# 公钥与私钥都缺失时，不得输出带 <PUBLIC_KEY> 占位符的假链接
+cat > "$XMG_STATE_FILE" <<'EOF'
+PROXY_REALITY_ENABLED=1
+PROXY_REALITY_PORT=8443
+PROXY_REALITY_UUID=11111111-2222-3333-4444-555555555555
+PROXY_REALITY_PATH=/xhttp
+PROXY_REALITY_MODE=auto
+PROXY_REALITY_SNI=www.microsoft.com
+EOF
+xmg_state_load
+_MISS_RC=0
+_MISS_OUT="$(xmg_proxy_reality_link 2>/dev/null)" || _MISS_RC=$?
+t_equals "缺少公钥时链接生成失败" "$_MISS_RC" "1"
+t_not_contains "缺公钥时不输出占位符链接" "$_MISS_OUT" "vless://"
 
 # --- 4. 恢复环境 ---
 if [ -n "$_SL_SAVED_HOME" ]; then export XMG_HOME="$_SL_SAVED_HOME"; else unset XMG_HOME; fi
