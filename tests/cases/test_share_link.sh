@@ -112,7 +112,7 @@ PROXY_REALITY_PORT=8443
 PROXY_REALITY_UUID=11111111-2222-3333-4444-555555555555
 PROXY_REALITY_PATH=/r p
 PROXY_REALITY_MODE=packet-up
-PROXY_REALITY_SNI=www.microsoft.com
+PROXY_REALITY_SNI=www.microsoft.com,www.bing.com
 PROXY_REALITY_SHORT_ID=ab12
 PROXY_REALITY_PRIVATE_KEY=TESTKEY
 PROXY_REALITY_PUBLIC_KEY=HZhx5Hg7Zgv2lLe8Ivr3nC8v1FqPHvdKCmUIYcMli8I
@@ -132,6 +132,8 @@ t_contains "REALITY 携带 spiderX" "$_RLINK" "spx=%2F"
 t_contains "REALITY 声明 XHTTP" "$_RLINK" "type=xhttp"
 t_contains "REALITY 路径编码" "$_RLINK" "path=%2Fr%20p"
 t_contains "REALITY 模式透传" "$_RLINK" "mode=packet-up"
+t_contains "多 serverNames 时客户端只取第一个 SNI" "$_RLINK" "sni=www.microsoft.com&fp"
+t_not_contains "链接不携带 serverNames 列表" "$_RLINK" "www.bing.com"
 
 # IPv6 地址必须加方括号，否则 host:port 解析歧义
 _xmg_proxy_server_host() { printf '2001:db8::1'; }
@@ -145,13 +147,29 @@ PROXY_REALITY_PORT=8443
 PROXY_REALITY_UUID=11111111-2222-3333-4444-555555555555
 PROXY_REALITY_PATH=/xhttp
 PROXY_REALITY_MODE=auto
-PROXY_REALITY_SNI=www.microsoft.com
+PROXY_REALITY_SNI=www.microsoft.com,www.bing.com
 EOF
 xmg_state_load
 _MISS_RC=0
 _MISS_OUT="$(xmg_proxy_reality_link 2>/dev/null)" || _MISS_RC=$?
 t_equals "缺少公钥时链接生成失败" "$_MISS_RC" "1"
 t_not_contains "缺公钥时不输出占位符链接" "$_MISS_OUT" "vless://"
+
+# 方案未启用时同样不应输出链接（否则客户端导入的是个不存在的节点）
+cat > "$XMG_STATE_FILE" <<'EOF'
+PROXY_REALITY_ENABLED=0
+PROXY_REALITY_PORT=8443
+PROXY_REALITY_UUID=11111111-2222-3333-4444-555555555555
+PROXY_REALITY_PATH=/xhttp
+PROXY_REALITY_MODE=auto
+PROXY_REALITY_SNI=www.microsoft.com
+PROXY_REALITY_PUBLIC_KEY=HZhx5Hg7Zgv2lLe8Ivr3nC8v1FqPHvdKCmUIYcMli8I
+EOF
+xmg_state_load
+_DIS_RC=0
+_DIS_OUT="$(xmg_proxy_reality_link 2>/dev/null)" || _DIS_RC=$?
+t_equals "REALITY 未启用时拒绝生成链接" "$_DIS_RC" "1"
+t_not_contains "未启用时不输出客户端链接" "$_DIS_OUT" "vless://"
 
 # --- 4. 恢复环境 ---
 if [ -n "$_SL_SAVED_HOME" ]; then export XMG_HOME="$_SL_SAVED_HOME"; else unset XMG_HOME; fi

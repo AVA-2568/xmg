@@ -252,7 +252,7 @@ xmg_proxy_apply() {
     # REALITY 自举：UUID / privateKey / shortId 缺失时自动补齐。
     # 必须在 schema 校验之前完成，否则校验会直接以「不能为空」失败。
     if [ "$(xmg_state_get PROXY_REALITY_ENABLED 0)" = "1" ]; then
-        local r_uuid="" r_pk="" r_pub="" r_sid="" _kp=""
+        local r_uuid="" r_pk="" r_pub="" r_sid="" _kp="" _uuid_generated=0
         r_uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
         [ -n "$r_uuid" ] || r_uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
         if [ -z "$r_uuid" ]; then
@@ -262,8 +262,12 @@ xmg_proxy_apply() {
             if [ -z "$r_uuid" ] && command -v openssl >/dev/null 2>&1; then
                 r_uuid="$(openssl rand -hex 16 2>/dev/null | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
             fi
+            [ -n "$r_uuid" ] && _uuid_generated=1
         fi
         [ -n "$r_uuid" ] && _xmg_stage PROXY_REALITY_UUID "$r_uuid"
+        if [ "$_uuid_generated" = "1" ]; then
+            xmg_info "已自动生成 REALITY UUID: $r_uuid（客户端链接使用同一值）"
+        fi
 
         r_pk="$(xmg_state_get PROXY_REALITY_PRIVATE_KEY "")"
         if [ -z "$r_pk" ]; then
@@ -626,16 +630,28 @@ _xmg_proxy_cert_self_signed() {
 xmg_proxy_reality_link() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
 
+    # 客户端链接只在服务端确实启用时才有意义，避免给出连不上的节点
+    if [ "$(xmg_state_get PROXY_REALITY_ENABLED 0)" != "1" ]; then
+        xmg_error "REALITY 未启用，没有可用的客户端链接"
+        return 1
+    fi
+
     local uuid="" port="" path="" mode="" sni="" pk="" sid="" pub="" host=""
     uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
-    [ -n "$uuid" ] || uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
     port="$(_xmg_proxy_client_port "$(xmg_state_get PROXY_REALITY_PORT 8443)" PROXY_REALITY_EXTERNAL_PORT)"
     path="$(xmg_state_get PROXY_REALITY_PATH "/xhttp")"
     mode="$(xmg_state_get PROXY_REALITY_MODE "auto")"
     sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
+    # serverNames 允许逗号分隔多值（服务端口径），客户端只能选一个 SNI
+    sni="${sni%%,*}"
+    sni="${sni#"${sni%%[![:space:]]*}"}"
+    sni="${sni%"${sni##*[![:space:]]}"}"
     pk="$(xmg_state_get PROXY_REALITY_PRIVATE_KEY "")"
     sid="$(xmg_state_get PROXY_REALITY_SHORT_ID "")"
-    [ -n "$uuid" ] || return 1
+    if [ -z "$uuid" ]; then
+        xmg_error "REALITY 已启用但缺少 UUID，先执行 xmg proxy apply --reality on 补全"
+        return 1
+    fi
 
     # 公钥优先取 state（apply 时已随密钥对落盘），旧数据再从私钥反推一次
     pub="$(xmg_state_get PROXY_REALITY_PUBLIC_KEY "")"
@@ -691,6 +707,10 @@ xmg_proxy_reality_link() {
 # ===== 客户端节点分享链接生成器 =====
 xmg_proxy_vless_link() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
+    if [ "$(xmg_state_get PROXY_VLESS_ENABLED 0)" != "1" ]; then
+        xmg_error "VLESS 未启用，没有可用的客户端链接"
+        return 1
+    fi
     local uuid domain path mode port
     uuid="$(xmg_state_get PROXY_VLESS_UUID)"
     domain="$(xmg_state_get PROXY_VLESS_DOMAIN)"
@@ -1088,7 +1108,7 @@ _xmg_read() {
 # ===== REALITY 配置向导 =====
 # REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
 xmg_proxy_reality_wizard() {
-    local r_port r_listen r_sni r_dest r_path r_mode r_ext r_public cur_listen def_sni def_dest
+    local r_port r_listen r_uuid r_sni r_dest r_path r_mode r_ext r_public cur_listen def_sni def_dest
 
     def_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
     def_dest="$(xmg_state_get PROXY_REALITY_DEST "${def_sni}:443")"
@@ -1106,6 +1126,7 @@ xmg_proxy_reality_wizard() {
 
     r_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_REALITY_PORT "8443")")"
     r_listen="$(_xmg_read "监听地址" "$cur_listen")"
+    r_uuid="$(_xmg_read "UUID(客户端必须一致，留空自动生成)" "$(xmg_state_get PROXY_REALITY_UUID "$(xmg_state_get PROXY_VLESS_UUID "")")")"
     r_sni="$(_xmg_read "serverName(伪装域名)" "$def_sni")"
     r_dest="$(_xmg_read "target(回落目标 host:port，旧名 dest)" "$def_dest")"
     r_path="$(_xmg_read "path" "$(xmg_state_get PROXY_REALITY_PATH "/xhttp")")"
@@ -1117,6 +1138,7 @@ xmg_proxy_reality_wizard() {
         --reality on \
         --reality-port "$r_port" \
         --reality-listen "$r_listen" \
+        --reality-uuid "$r_uuid" \
         --reality-sni "$r_sni" \
         --reality-dest "$r_dest" \
         --reality-path "$r_path" \

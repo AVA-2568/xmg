@@ -33,7 +33,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AVA-2568/xmg/main/install.sh
   - 215MB 极小内存直接放行安装并自适应抑制策略。
 - **代理方案配置 (`xmg proxy`)**（交互菜单 + 幂等 CLI）：
   - **VLESS + XHTTP + TLS**：严格遵循最新官方规范（`"network": "xhttp"`、`mode: "packet-up"`）；注入 `"rejectUnknownSni": true` 防源站探测；出站显式声明 `domainStrategy` 闭环内置 DoH；`connIdle: 60` 极速回收空闲套接字。
-  - **VLESS + XHTTP + REALITY**：免证书方案，按官方字段下发 `target`（旧名 `dest`）/ `serverNames` / `privateKey` / `shortIds`；`xmg proxy keygen` 生成密钥对，`apply` 时私钥与公钥一并落盘，`xmg proxy link reality` 输出标准 `vless://` 链接（`security=reality` + `pbk` / `sid` / `spx`）。
+  - **VLESS + XHTTP + REALITY**：免证书方案，按官方字段下发 `target`（旧名 `dest`）/ `serverNames` / `privateKey` / `shortIds`；UUID 可用 `--reality-uuid` 指定（留空自动生成并回显），客户端链接与之一致；`xmg proxy keygen` 生成密钥对，`apply` 时私钥与公钥一并落盘，`xmg proxy link reality` 输出标准 `vless://` 链接（`security=reality` + `pbk` / `sid` / `spx`）。
   - **SOCKS5**：公网或本地入口，`auth: password` 认证，支持绑定 `127.0.0.1` 本地安全转发或 `0.0.0.0` 公网暴露。
   - 三种入站可共存，端口冲突在校验阶段拦截；状态批处理，单一原子事务落盘。
   - 分享链接按 VLESS URI 规范生成：query 值完整百分号编码（path 含空格 / `?` / `&` / 中文不再截断），ACME 证书不附带 `allowInsecure`，仅自签证书才放宽校验。

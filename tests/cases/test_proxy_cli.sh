@@ -185,6 +185,7 @@ t_contains "status 正确展示 acme 证书来源" "$OUT_ACME" "证书: acme"
 xmg_state_set PROXY_VLESS_UUID "test-uuid-1111-2222"
 xmg_state_set PROXY_VLESS_DOMAIN "example.com"
 xmg_state_set PROXY_VLESS_PORT "443"
+xmg_state_set PROXY_VLESS_ENABLED "1"
 LINK_DOMAIN="$(xmg_proxy_vless_link 2>&1)"
 t_contains "普通域名直连链接正确生成" "$LINK_DOMAIN" "vless://test-uuid-1111-2222@example.com:443"
 
