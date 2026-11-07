@@ -23,7 +23,8 @@ if [ "${XMG_DETECT_SH_LOADED:-0}" = "1" ]; then
 fi
 XMG_DETECT_SH_LOADED=1
 
-# XMG_MENU_LABEL: 系统环境感知
+# 说明：detect.sh 只提供 CLI 与内部接口（xmg detect ...），刻意不注册菜单：
+# 环境信息已由 xmg doctor 与 xmg os 呈现，重复菜单入口只会让排查路径分叉。
 
 # ------------------------------------------------------------------
 # 虚拟化与容器类型探测

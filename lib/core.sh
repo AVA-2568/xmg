@@ -429,19 +429,9 @@ _xmg_core_ensure_xray_module() {
     fi
 }
 
-xmg_core_generate_dropin_content() {
-    _xmg_core_ensure_xray_module
-    xmg_xray_generate_dropin_content "$@"
-}
-
 xmg_core_patch_systemd_unit() {
     _xmg_core_ensure_xray_module
     xmg_xray_patch_systemd_unit "$@"
-}
-
-xmg_core_restore_systemd_unit() {
-    _xmg_core_ensure_xray_module
-    xmg_xray_restore_systemd_unit "$@"
 }
 
 # ===== 临时解压目录解析 =====

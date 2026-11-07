@@ -961,7 +961,6 @@ _xmg_read() {
     printf '%s' "$ans"
 }
 
-# XMG_MENU_LABEL: 代理方案
 # ===== REALITY 配置向导 =====
 # REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
 xmg_proxy_reality_wizard() {

@@ -77,7 +77,7 @@ t_equals "未安装内核时 version 返回非 0" \
 # ------------------------------------------------------------------
 # Drop-in Go 运行时参数：按机型（内存 + 有效核数）动态生成
 # ------------------------------------------------------------------
-_dropin="$(MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1 xmg_core_generate_dropin_content "/custom/xray/config.json" 2>/dev/null || true)"
+_dropin="$(MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1 xmg_xray_generate_dropin_content "/custom/xray/config.json" 2>/dev/null || true)"
 t_contains "215MB 机型 drop-in 注入 GOMEMLIMIT=64MiB" "$_dropin" 'Environment="GOMEMLIMIT=64MiB"'
 t_contains "215MB 机型 drop-in 注入 GOGC=60" "$_dropin" 'Environment="GOGC=60"'
 t_contains "drop-in 注入 GODEBUG=madvdontneed=1" "$_dropin" 'Environment="GODEBUG=madvdontneed=1"'
@@ -144,7 +144,7 @@ t_contains "降配到 64MB 后 drop-in 自动刷新 GOMEMLIMIT" "$_conf_content"
 t_contains "64MB 机型并发度收敛为 1" "$_conf_content" 'Environment="GOMAXPROCS=1"'
 
 # 移除覆盖
-xmg_core_restore_systemd_unit >/dev/null 2>&1
+xmg_xray_restore_systemd_unit >/dev/null 2>&1
 t_assert "drop-in 覆盖文件已移除" "[ ! -f '$_conf_file' ]"
 
 # 注意：不 unset XMG_TMP —— 文件头的 EXIT trap 会在退出时引用它，

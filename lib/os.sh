@@ -260,36 +260,6 @@ xmg_pkg_hint() {
     esac
 }
 
-# 刷新软件源索引
-xmg_pkg_update() {
-    case "$(xmg_pkg_mgr)" in
-        apk)
-            apk update
-            ;;
-        apt)
-            export DEBIAN_FRONTEND=noninteractive
-            export NEEDRESTART_MODE=a
-            export UCF_FORCE_CONFFOLD=1
-            apt-get -o DPkg::Lock::Timeout=60 update
-            ;;
-        dnf)
-            dnf makecache -y >/dev/null 2>&1 || dnf -y makecache
-            ;;
-        yum)
-            yum makecache -y >/dev/null 2>&1 || true
-            ;;
-        pacman)
-            pacman -Sy --noconfirm
-            ;;
-        zypper)
-            zypper --non-interactive refresh
-            ;;
-        *)
-            return 1
-            ;;
-    esac
-}
-
 # 安装软件包：xmg_pkg_install pkg1 pkg2 ...
 # 已安装的包在 apk/apt 下会被自动跳过，可安全重复调用
 xmg_pkg_install() {
@@ -345,24 +315,6 @@ xmg_pkg_clean() {
         pacman) pacman -Scc --noconfirm >/dev/null 2>&1 || true ;;
         zypper) zypper clean --all >/dev/null 2>&1 || true ;;
         *) return 1 ;;
-    esac
-}
-
-# 包是否已安装（仅支持 apk/apt 精确探测，其余返回 1）
-xmg_pkg_installed() {
-    local pkg="$1"
-    [ -n "$pkg" ] || return 1
-
-    case "$(xmg_pkg_mgr)" in
-        apk)
-            apk info -e "$pkg" >/dev/null 2>&1
-            ;;
-        apt)
-            dpkg -s "$pkg" >/dev/null 2>&1
-            ;;
-        *)
-            return 1
-            ;;
     esac
 }
 

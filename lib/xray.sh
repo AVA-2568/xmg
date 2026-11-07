@@ -95,10 +95,6 @@ xmg_xray_get_bin() {
     return 1
 }
 
-xmg_xray_is_systemd_available() {
-    xmg_init_is_systemd
-}
-
 # 当前 init 后端：systemd | openrc | sysvinit | none
 xmg_xray_init_backend() {
     xmg_os_detect

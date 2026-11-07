@@ -369,15 +369,6 @@ xmg_apt_wait_lock() {
     xmg_apt_unlock_and_repair
 }
 
-# 包装安全的包安装，自动带锁等待、配置合并保护和锁超时
-# 统一走 xmg_pkg_install，非 Debian 系自动切换到 apk/dnf/pacman
-xmg_apt_install() {
-    xmg_require_root
-    xmg_apt_wait_lock 15 || true
-
-    xmg_pkg_install "$@"
-}
-
 # ==================================================================
 # 服务控制兼容层
 # ==================================================================
