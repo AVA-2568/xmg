@@ -790,6 +790,48 @@ _xmg_read() {
 }
 
 # XMG_MENU_LABEL: 代理方案
+# ===== REALITY 配置向导 =====
+# REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
+xmg_proxy_reality_wizard() {
+    local r_port r_listen r_sni r_dest r_path r_mode cur_listen def_sni def_dest
+
+    def_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
+    def_dest="$(xmg_state_get PROXY_REALITY_DEST "${def_sni}:443")"
+
+    cur_listen="$(xmg_state_get PROXY_REALITY_LISTEN)"
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        if [ -z "$cur_listen" ] || [ "$cur_listen" = "0.0.0.0" ]; then
+            cur_listen="::"
+        fi
+    fi
+    [ -n "$cur_listen" ] || cur_listen="0.0.0.0"
+
+    xmg_info "REALITY 不用证书：对伪装站点做真实 TLS 握手，靠密钥区分客户端。"
+    xmg_info "建议 dest 与 serverName 保持同一站点，且该站点支持 TLS1.3。"
+
+    r_port="$(_xmg_read "监听端口" "$(xmg_state_get PROXY_REALITY_PORT "8443")")"
+    r_listen="$(_xmg_read "监听地址" "$cur_listen")"
+    r_sni="$(_xmg_read "serverName(伪装域名)" "$def_sni")"
+    r_dest="$(_xmg_read "dest(回落目标 host:port)" "$def_dest")"
+    r_path="$(_xmg_read "path" "$(xmg_state_get PROXY_REALITY_PATH "/xhttp")")"
+    r_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_REALITY_MODE "auto")")"
+
+    if ! xmg_proxy_apply \
+        --reality on \
+        --reality-port "$r_port" \
+        --reality-listen "$r_listen" \
+        --reality-sni "$r_sni" \
+        --reality-dest "$r_dest" \
+        --reality-path "$r_path" \
+        --reality-mode "$r_mode"; then
+        return 1
+    fi
+
+    echo
+    xmg_proxy_reality_link 2>/dev/null || true
+    return 0
+}
+
 xmg_proxy_menu() {
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     local choice="" d=""
@@ -799,12 +841,16 @@ xmg_proxy_menu() {
         echo
         echo "1. 配置 SOCKS5 方案"
         echo "2. 配置 VLESS + XHTTP + TLS 方案"
-        echo "3. 停用 SOCKS5"
-        echo "4. 停用 VLESS"
-        echo "5. 导出当前状态到文件"
-        echo "6. 申请证书 (acme.sh)"
-        echo "7. 一键生成自签名证书 (供 CDN Full 模式)"
-        echo "8. 查看客户端节点分享链接 (VLESS)"
+        echo "3. 配置 VLESS + XHTTP + REALITY 方案 (免证书)"
+        echo "4. 停用 SOCKS5"
+        echo "5. 停用 VLESS"
+        echo "6. 停用 REALITY"
+        echo "7. 导出当前状态到文件"
+        echo "8. 申请证书 (acme.sh)"
+        echo "9. 一键生成自签名证书 (供 CDN Full 模式)"
+        echo "10. 查看客户端节点分享链接 (VLESS)"
+        echo "11. 查看客户端节点分享链接 (REALITY)"
+        echo "12. 生成 REALITY 密钥对"
         echo "0. 返回"
         echo
         printf "请选择: "
@@ -892,14 +938,22 @@ xmg_proxy_menu() {
                 xmg_pause
                 ;;
             3)
-                xmg_proxy_disable socks || true
+                echo
+                xmg_proxy_reality_wizard || true
                 xmg_pause
                 ;;
             4)
-                xmg_proxy_disable vless || true
+                xmg_proxy_disable socks || true
                 xmg_pause
                 ;;
             5)
+                xmg_proxy_disable vless || true
+                ;;
+            6)
+                xmg_proxy_disable reality || true
+                xmg_pause
+                ;;
+            7)
                 # 导出文件里含密码明文：写 600 文件，只回显路径，绝不打到终端。
                 local dst="$XMG_ETC_DIR/xray/state.export.env"
                 mkdir -p "$(dirname "$dst")" 2>/dev/null || true
@@ -911,7 +965,7 @@ xmg_proxy_menu() {
                 fi
                 xmg_pause
                 ;;
-            6)
+            8)
                 # 仅手动触发，绝不在 apply 流程中自动执行（低配机型约束）
                 printf "请输入域名: " >&2
                 read -r d || return 0
@@ -920,18 +974,30 @@ xmg_proxy_menu() {
                 fi
                 xmg_pause
                 ;;
-            7)
+            9)
                 printf "请输入域名 (默认 %s): " "$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")" >&2
                 read -r d || return 0
                 [ -z "$d" ] && d="$(xmg_state_get PROXY_VLESS_DOMAIN "example.com")"
                 xmg_proxy_self_sign_cert "$d" || true
                 xmg_pause
                 ;;
-            8)
+            10)
                 clear
                 if ! xmg_proxy_vless_link; then
                     xmg_warn "VLESS 尚未配置或未提供有效域名/UUID"
                 fi
+                xmg_pause
+                ;;
+            11)
+                clear
+                if ! xmg_proxy_reality_link; then
+                    xmg_warn "REALITY 尚未配置或缺少 UUID/私钥"
+                fi
+                xmg_pause
+                ;;
+            12)
+                clear
+                xmg_proxy_reality_keygen || true
                 xmg_pause
                 ;;
             0)
