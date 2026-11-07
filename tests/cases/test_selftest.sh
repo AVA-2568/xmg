@@ -58,7 +58,7 @@ printf '{"inbounds":[]}\n' > "$T_OK/config.json"
 cat > "$T_OK/initd/xray" <<'INITD'
 #!/sbin/openrc-run
 # XMG 管理的 Xray OpenRC 服务脚本
-export GOMEMLIMIT=100MiB
+export GOMEMLIMIT=64MiB
 rc_ulimit="-n 1048576"
 INITD
 
@@ -87,7 +87,7 @@ _OK_OUT="$(PATH="$T_OK/binpath:$PATH" MOCK_INIT=openrc \
 _OK_RC=$?
 t_equals "模拟安装环境自检返回 0" "$_OK_RC" "0"
 t_contains "识别到 OpenRC 服务脚本" "$_OK_OUT" "OpenRC 服务脚本存在"
-t_contains "校验到内存抑制注入" "$_OK_OUT" "GOMEMLIMIT=100MiB"
+t_contains "校验到内存抑制注入" "$_OK_OUT" "GOMEMLIMIT=64MiB"
 t_contains "校验到 rc_ulimit 注入" "$_OK_OUT" "rc_ulimit"
 t_contains "校验到运行级注册" "$_OK_OUT" "已加入默认运行级"
 t_contains "校验到服务运行中" "$_OK_OUT" "服务运行中"

@@ -226,6 +226,15 @@ xmg_core_arch_slug() {
         armv6l)        printf 'arm32-v6' ;;
         i386|i486|i586|i686) printf '32' ;;
         s390x)         printf 's390x' ;;
+        armv5l|armv5tel)   printf 'arm32-v5' ;;
+        mips|mips32)       printf 'mips32' ;;
+        mipsel|mipsle)     printf 'mips32le' ;;
+        mips64)            printf 'mips64' ;;
+        mips64el|mips64le) printf 'mips64le' ;;
+        loongarch64)       printf 'loong64' ;;
+        ppc64)             printf 'ppc64' ;;
+        ppc64le)           printf 'ppc64le' ;;
+        riscv64)           printf 'riscv64' ;;
         *) return 1 ;;
     esac
 }
@@ -620,10 +629,16 @@ xmg_mem_available_mb() {
 }
 
 # 内存体检：低于阈值时告警并返回 1；无法读取时告警并返回 0（不阻断）；
-# 对 <= 256MB (extreme_low) 机器放行并提示 100MiB 内存抑制。
+# 对 <= 256MB (extreme_low) 机器放行并提示按机型计算的 Go 内存抑制。
 xmg_core_memcheck() {
     local threshold="${1:-$XMG_MEM_CHECK_MB}"
-    local mb=""
+    local mb="" procs=""
+    # memcheck 可能被独立调用（未经过 drop-in 生成），此时 xray.sh 尚未加载，
+    # 否则 GOMEMLIMIT/GOMAXPROCS 提示会退回硬编码兜底值。
+    _xmg_core_ensure_xray_module
+    if declare -F xmg_xray_gomaxprocs >/dev/null 2>&1; then
+        procs="$(xmg_xray_gomaxprocs 2>/dev/null || true)"
+    fi
 
     if ! mb="$(xmg_mem_available_mb)"; then
         xmg_warn "无法读取内存信息，跳过内存体检"
@@ -638,17 +653,17 @@ xmg_core_memcheck() {
     # 极低内存机器（<= 256MB，如 215MB）：
     # 当 profile 为 extreme_low 且未显式指定高于 256MB 的检查阈值时：
     # 不再报致命警告或强推 swap（容器环境往往无法创建 swap），
-    # 而是展示 extreme_low 极低内存模式，提示已自动应用 100MiB 内存抑制，允许继续安装。
+    # 而是展示 extreme_low 极低内存模式，提示已自动应用按机型计算的抑制参数，允许继续安装。
     if [ "$profile" = "extreme_low" ] && [ "$threshold" -le 256 ]; then
         xmg_info "检测到极低内存模式 (extreme_low，可用: ${mb}MB)"
-        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
+        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与并发限制 (GOMAXPROCS=${procs:-按机型自适应})，允许继续安装"
         return 0
     fi
 
     # 小内存机器（low 档 <= 512MB，如 331MB）：可用内存已达 128MB 以上且未显式指定超大阈值时放行
     if [ "$profile" = "low" ] && [ "$threshold" -le 256 ] && [ "$mb" -ge 128 ]; then
         xmg_info "检测到低配内存模式 (low，可用: ${mb}MB)"
-        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
+        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与并发限制 (GOMAXPROCS=${procs:-按机型自适应})，允许继续安装"
         return 0
     fi
 

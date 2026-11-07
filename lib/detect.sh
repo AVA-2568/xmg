@@ -162,43 +162,149 @@ xmg_detect_virt() {
 }
 
 # ------------------------------------------------------------------
-# 内存分档探测
-# 输出: extreme_low (<=256MB) | low (<=512MB) | mid (<=2048MB) | high (>2048MB)
+# 统一内存真源（kB）
+#   - 容器内 /proc/meminfo 是宿主值，必须取 min(MemTotal, cgroup 配额)
+#   - cgroup 路径开关与 system.sh 共用 XMG_CGROUP_MEMORY_*
+#   - MOCK_MEM_TOTAL_KB / MOCK_MEM_TOTAL_MB 命中时直接采信（测试注入）
+#   - 返回 0 表示探测失败
 # ------------------------------------------------------------------
-xmg_detect_mem_profile() {
-    local total_kb=""
+xmg_detect_mem_total_kb() {
+    local total_kb=0 k="" v="" rest=""
 
     if [ -n "${MOCK_MEM_TOTAL_KB:-}" ]; then
-        total_kb="$MOCK_MEM_TOTAL_KB"
+        total_kb="${MOCK_MEM_TOTAL_KB//[!0-9]/}"
+        case "$total_kb" in ''|*[!0-9]*) total_kb=0 ;; esac
+        printf '%s\n' "$total_kb"
+        return 0
     fi
 
-    if [ -z "$total_kb" ]; then
-        local meminfo_file="${XMG_MEMINFO_FILE:-/proc/meminfo}"
-        if [ -r "$meminfo_file" ]; then
-            local k="" v="" rest=""
-            while IFS=': ' read -r k v rest; do
-                if [ "$k" = "MemTotal" ]; then
-                    total_kb="${v//[!0-9]/}"
-                    break
-                fi
-            done < "$meminfo_file"
-        fi
+    if [ -n "${MOCK_MEM_TOTAL_MB:-}" ]; then
+        local mock_mb="${MOCK_MEM_TOTAL_MB//[!0-9]/}"
+        case "$mock_mb" in ''|*[!0-9]*) mock_mb=0 ;; esac
+        printf '%s\n' "$((mock_mb * 1024))"
+        return 0
     fi
 
-    if [ -z "$total_kb" ] && command -v free >/dev/null 2>&1; then
-        local free_out=""
+    local meminfo_file="${XMG_MEMINFO_FILE:-/proc/meminfo}"
+    if [ -r "$meminfo_file" ]; then
+        while IFS=': ' read -r k v rest; do
+            if [ "$k" = "MemTotal" ]; then
+                total_kb="${v//[!0-9]/}"
+                break
+            fi
+        done < "$meminfo_file"
+    fi
+    case "$total_kb" in ''|*[!0-9]*) total_kb=0 ;; esac
+
+    if [ "$total_kb" -eq 0 ] && command -v free >/dev/null 2>&1; then
+        local free_out="" fline=""
         free_out="$(free -k 2>/dev/null || true)"
-        local fline=""
         while IFS= read -r fline || [ -n "$fline" ]; do
             if [[ "$fline" =~ ^Mem:[[:space:]]+([0-9]+) ]]; then
-                total_kb="${BASH_REMATCH[1]:-}"
+                total_kb="${BASH_REMATCH[1]:-0}"
                 break
             fi
         done <<< "$free_out"
     fi
+    case "$total_kb" in ''|*[!0-9]*) total_kb=0 ;; esac
 
-    if [ -z "$total_kb" ] || ! [[ "$total_kb" =~ ^[0-9]+$ ]]; then
-        printf 'mid\n'
+    # cgroup v2 memory.max 优先，其次 v1 memory.limit_in_bytes；
+    # "max" / 超长哨兵值（v1 常见 9223372036854771712）视为未限额。
+    local cg_file="" cg_bytes="" cg_kb=0
+    for cg_file in "${XMG_CGROUP_MEMORY_MAX:-/sys/fs/cgroup/memory.max}" \
+                   "${XMG_CGROUP_MEMORY_LIMIT:-/sys/fs/cgroup/memory/memory.limit_in_bytes}"; do
+        [ -r "$cg_file" ] || continue
+        cg_bytes="$(cat "$cg_file" 2>/dev/null || true)"
+        case "$cg_bytes" in
+            ''|max|*[!0-9]*) continue ;;
+        esac
+        if [ "${#cg_bytes}" -gt 15 ]; then
+            continue
+        fi
+        cg_kb=$((cg_bytes / 1024))
+        if [ "$cg_kb" -gt 0 ] && { [ "$total_kb" -eq 0 ] || [ "$cg_kb" -lt "$total_kb" ]; }; then
+            total_kb="$cg_kb"
+        fi
+        break
+    done
+
+    printf '%s\n' "$total_kb"
+    return 0
+}
+
+xmg_detect_mem_total_mb() {
+    local kb=""
+    kb="$(xmg_detect_mem_total_kb)"
+    printf '%s\n' "$((kb / 1024))"
+    return 0
+}
+
+# ------------------------------------------------------------------
+# 有效 CPU 核数：cgroup CPU 配额优先，分数配额（0.5C）收敛为 1
+# ------------------------------------------------------------------
+xmg_detect_cpu_cores() {
+    if [ -n "${MOCK_CPU_CORES:-}" ]; then
+        case "$MOCK_CPU_CORES" in
+            ''|*[!0-9]*) ;;
+            *)
+                if [ "$MOCK_CPU_CORES" -ge 1 ]; then
+                    printf '%s\n' "$MOCK_CPU_CORES"
+                    return 0
+                fi
+                ;;
+        esac
+    fi
+
+    local quota="" period="" cores=0 quota_seen=0
+    local cpu_max="${XMG_CGROUP_CPU_MAX:-/sys/fs/cgroup/cpu.max}"
+    if [ -r "$cpu_max" ]; then
+        read -r quota period _ < "$cpu_max" 2>/dev/null || true
+        if [[ "$quota" =~ ^[0-9]+$ ]] && [[ "$period" =~ ^[0-9]+$ ]] && [ "$period" -gt 0 ]; then
+            cores=$((quota / period))
+            quota_seen=1
+        fi
+    fi
+
+    if [ "$quota_seen" -eq 0 ]; then
+        local quota_f="${XMG_CGROUP_CPU_QUOTA:-/sys/fs/cgroup/cpu/cpu.cfs_quota_us}"
+        local period_f="${XMG_CGROUP_CPU_PERIOD:-/sys/fs/cgroup/cpu/cpu.cfs_period_us}"
+        if [ -r "$quota_f" ] && [ -r "$period_f" ]; then
+            quota="$(cat "$quota_f" 2>/dev/null || true)"
+            period="$(cat "$period_f" 2>/dev/null || true)"
+            if [[ "$quota" =~ ^[0-9]+$ ]] && [ "$quota" -gt 0 ] && [[ "$period" =~ ^[0-9]+$ ]] && [ "$period" -gt 0 ]; then
+                cores=$((quota / period))
+                quota_seen=1
+            fi
+        fi
+    fi
+
+    if [ "$quota_seen" -eq 0 ]; then
+        if command -v nproc >/dev/null 2>&1; then
+            cores="$(nproc 2>/dev/null || printf 0)"
+        elif command -v getconf >/dev/null 2>&1; then
+            cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf 0)"
+        fi
+        case "$cores" in ''|*[!0-9]*) cores=0 ;; esac
+    fi
+
+    if [ "$cores" -lt 1 ]; then
+        cores=1
+    fi
+    printf '%s\n' "$cores"
+    return 0
+}
+
+# ------------------------------------------------------------------
+# 内存分档探测（基于统一真源）
+# 输出: extreme_low (<=256MB) | low (<=512MB) | mid (<=2048MB) | high (>2048MB)
+# ------------------------------------------------------------------
+xmg_detect_mem_profile() {
+    local total_kb=""
+    total_kb="$(xmg_detect_mem_total_kb)"
+
+    # 探测失败与 tune.sh 的 512MB 兜底保持一致，统一落在 low 档
+    if [ -z "$total_kb" ] || [ "$total_kb" -le 0 ]; then
+        printf 'low\n'
         return 0
     fi
 

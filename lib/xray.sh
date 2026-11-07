@@ -40,6 +40,19 @@ if [ "${XMG_OS_SH_LOADED:-0}" != "1" ]; then
     unset _XMG_XRAY_OSDIR _xmg_xray_os
 fi
 
+# 依赖 detect.sh（机型真源：内存/CPU 配额）。独立加载本模块时自动补齐。
+if [ "${XMG_DETECT_SH_LOADED:-0}" != "1" ]; then
+    _XMG_XRAY_DETDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _xmg_xray_det in "$_XMG_XRAY_DETDIR/detect.sh" "${XMG_LIB_DIR:-/opt/xmg/lib}/detect.sh"; do
+        if [ -r "$_xmg_xray_det" ]; then
+            # shellcheck source=/dev/null
+            source "$_xmg_xray_det"
+            break
+        fi
+    done
+    unset _XMG_XRAY_DETDIR _xmg_xray_det
+fi
+
 # ===== 依赖 common.sh 的路径变量 =====
 if [ -z "${XMG_HOME:-}" ]; then
     XMG_HOME="${XMG_HOME:-/opt/xmg}"
@@ -98,20 +111,37 @@ xmg_xray_print_version() {
     "$xray_bin" version 2>/dev/null | head -1 || true
 }
 
-# ===== Go 运行时内存抑制参数 =====
-# GOMEMLIMIT 必须小于物理内存：64MB 机器上写死 100MiB 等于没设，
-# 还会让 Go 运行时迟迟不归还内存，OOM 来得更早。
+# ===== Go 运行时机型参数 =====
+# 内存与 CPU 一律取 detect.sh 统一真源：容器内 /proc/meminfo 是宿主值，
+# 必须以 cgroup 限额收敛，否则 512MB 容器会被判成宿主机大内存档位。
 _xmg_xray_mem_total_mb() {
-    local kb="" f=""
-    # XMG_MEMINFO_FILE 与 core.sh 的内存体检同一开关，便于测试注入
-    f="${XMG_MEMINFO_FILE:-/proc/meminfo}"
-    if [ -r "$f" ]; then
-        kb="$(awk '/^MemTotal:/ {print $2; exit}' "$f" 2>/dev/null || true)"
+    local mb=0
+    if declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+        mb="$(xmg_detect_mem_total_mb 2>/dev/null || printf 0)"
     fi
-    case "$kb" in
-        ''|*[!0-9]*) printf '0' ;;
-        *)           printf '%d' $((kb / 1024)) ;;
-    esac
+    case "$mb" in ''|*[!0-9]*) mb=0 ;; esac
+    printf '%s\n' "$mb"
+}
+
+# 并发度：<=512MB 机型收敛为 1（协程栈膨胀风险），其余按有效核数，上限 4
+xmg_xray_gomaxprocs() {
+    local mb="" cores=1
+    mb="$(_xmg_xray_mem_total_mb)"
+    if declare -F xmg_detect_cpu_cores >/dev/null 2>&1; then
+        cores="$(xmg_detect_cpu_cores 2>/dev/null || printf 1)"
+    fi
+    case "$cores" in ''|*[!0-9]*) cores=1 ;; esac
+    if [ "$cores" -lt 1 ]; then
+        cores=1
+    fi
+    if [ "$mb" -eq 0 ] || [ "$mb" -le 512 ] || [ "$cores" -eq 1 ]; then
+        printf '1'
+        return 0
+    fi
+    if [ "$cores" -gt 4 ]; then
+        cores=4
+    fi
+    printf '%s' "$cores"
 }
 
 xmg_xray_gomemlimit() {
@@ -129,6 +159,20 @@ xmg_xray_gomemlimit() {
         printf '100MiB'
     else
         printf '150MiB'
+    fi
+}
+
+# 服务级 fd 上限：与 tune 模块共用 os.sh 的分档规则
+xmg_xray_nofile() {
+    local mb=""
+    mb="$(_xmg_xray_mem_total_mb)"
+    if [ "$mb" -le 0 ]; then
+        mb=512
+    fi
+    if declare -F xmg_nofile_for_mem_mb >/dev/null 2>&1; then
+        xmg_nofile_for_mem_mb "$mb"
+    else
+        printf '1048576'
     fi
 }
 
@@ -158,9 +202,10 @@ xmg_xray_generate_dropin_content() {
     fi
     [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || xray_bin="/usr/local/bin/xray"
 
-    local memlimit="" gogc=""
+    local memlimit="" gogc="" procs=""
     memlimit="$(xmg_xray_gomemlimit)"
     gogc="$(xmg_xray_gogc)"
+    procs="$(xmg_xray_gomaxprocs)"
 
     cat <<EOF
 # XMG 管理的 drop-in 覆盖文件
@@ -170,7 +215,7 @@ xmg_xray_generate_dropin_content() {
 User=root
 Environment="GOMEMLIMIT=$memlimit"
 Environment="GODEBUG=madvdontneed=1"
-Environment="GOMAXPROCS=1"
+Environment="GOMAXPROCS=$procs"
 EOF
     [ -n "$gogc" ] && printf 'Environment="GOGC=%s"\n' "$gogc"
     cat <<EOF
@@ -207,12 +252,13 @@ description="Xray Service"
 OPENRC_EOF
 
     # Go 运行时内存抑制：与 systemd 环境下的 drop-in 保持同一套取值
-    local memlimit="" gogc=""
+    local memlimit="" gogc="" procs=""
     memlimit="$(xmg_xray_gomemlimit)"
     gogc="$(xmg_xray_gogc)"
+    procs="$(xmg_xray_gomaxprocs)"
     printf 'export GOMEMLIMIT=%s\n' "$memlimit"
     printf 'export GODEBUG=madvdontneed=1\n'
-    printf 'export GOMAXPROCS=1\n'
+    printf 'export GOMAXPROCS=%s\n' "$procs"
     [ -n "$gogc" ] && printf 'export GOGC=%s\n' "$gogc"
     printf '\n'
 
@@ -220,7 +266,7 @@ OPENRC_EOF
     printf 'command_args="run -config %s"\n' "$cfg"
     printf '%s\n' 'command_user="root"'
     printf '%s\n' 'pidfile="/run/xray.pid"'
-    printf '%s\n' 'rc_ulimit="-n 1048576"'
+    printf 'rc_ulimit="-n %s"\n' "$(xmg_xray_nofile)"
     printf '%s\n\n' "$supervisor_block"
 
     # 依赖写软依赖 use net：LXC/容器里 networking 服务常常没运行，
@@ -344,12 +390,12 @@ AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 Environment="GOMEMLIMIT=$(xmg_xray_gomemlimit)"
 Environment="GODEBUG=madvdontneed=1"
-Environment="GOMAXPROCS=1"
+Environment="GOMAXPROCS=$(xmg_xray_gomaxprocs)"
 ExecStart=$xray_bin run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}
 Restart=on-failure
 RestartPreventExitStatus=23
 LimitNPROC=10000
-LimitNOFILE=1000000
+LimitNOFILE=$(xmg_xray_nofile)
 
 [Install]
 WantedBy=multi-user.target
@@ -375,9 +421,11 @@ EOF_UNIT
     mkdir -p "$dropin_dir"
 
     local target_cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
-    # 检查 drop-in 是否已经指向 XMG 路径且已包含 GOMEMLIMIT
-    if [ -f "$dropin_file" ] && grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=" "$dropin_file" 2>/dev/null; then
-        xmg_info "drop-in 覆盖已存在且已应用 100MiB 内存抑制，无需修改"
+    local expected=""
+    expected="$(xmg_xray_generate_dropin_content "$target_cfg")"
+    # 与当前机型期望内容比对：机型（内存/CPU 配额）变化后自动刷新，不再「存在即跳过」
+    if [ -f "$dropin_file" ] && [ "$(cat "$dropin_file" 2>/dev/null || true)" = "$expected" ]; then
+        xmg_info "drop-in 覆盖已与当前机型参数一致 (GOMEMLIMIT=$(xmg_xray_gomemlimit) / GOMAXPROCS=$(xmg_xray_gomaxprocs))，无需修改"
         return 0
     fi
 
@@ -391,7 +439,7 @@ EOF_UNIT
     xmg_xray_generate_dropin_content "$target_cfg" > "$dropin_file"
 
     if grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=" "$dropin_file" 2>/dev/null; then
-        xmg_info "drop-in 覆盖已创建，已应用 GOMEMLIMIT=100MiB / GOMAXPROCS=1"
+        xmg_info "drop-in 覆盖已按当前机型刷新 (GOMEMLIMIT=$(xmg_xray_gomemlimit) / GOMAXPROCS=$(xmg_xray_gomaxprocs))"
     else
         xmg_warn "drop-in 覆盖文件写入失败"
         return 1

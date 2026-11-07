@@ -49,18 +49,18 @@ _OPENRC_SCRIPT="$(MOCK_INIT=openrc bash -c '
     source "$XMG_LIB_DIR/os.sh"
     source "$XMG_LIB_DIR/common.sh"
     source "$XMG_LIB_DIR/xray.sh"
-    xmg_xray_generate_openrc_content "/opt/xmg/xray/config.json" "/usr/local/bin/xray"
+    MOCK_MEM_TOTAL_KB=4194304 MOCK_CPU_CORES=4 xmg_xray_generate_openrc_content "/opt/xmg/xray/config.json" "/usr/local/bin/xray"
     rm -rf "$XMG_HOME"
 ' 2>/dev/null)"
 
 t_contains "OpenRC 脚本声明 openrc-run 解释器" "$_OPENRC_SCRIPT" "#!/sbin/openrc-run"
 t_contains "OpenRC 脚本注入 GOMEMLIMIT" "$_OPENRC_SCRIPT" "export GOMEMLIMIT="
-t_contains "OpenRC 脚本注入 GOMAXPROCS" "$_OPENRC_SCRIPT" "export GOMAXPROCS=1"
+t_contains "4核/4GB 机型 OpenRC GOMAXPROCS 动态为 4" "$_OPENRC_SCRIPT" "export GOMAXPROCS=4"
 t_contains "OpenRC 脚本使用 XMG 配置路径" "$_OPENRC_SCRIPT" "run -config /opt/xmg/xray/config.json"
 t_contains "OpenRC 脚本设置 nofile 上限" "$_OPENRC_SCRIPT" "rc_ulimit="
 t_contains "OpenRC 脚本声明 net 软依赖（容器内可用）" "$_OPENRC_SCRIPT" "use net"
 
-# 内存抑制必须随物理内存分档：64MB 机器上写死 100MiB 等于没设
+# 内存抑制必须随物理内存分档：64MB 机器上写死固定堆上限等于没设
 T_MEMINFO="$(TMPDIR=/tmp mktemp -d)/meminfo"
 printf 'MemTotal:          61440 kB\n' > "$T_MEMINFO"
 _MEM_ENV="$(XMG_MEMINFO_FILE="$T_MEMINFO" bash -c '
@@ -72,6 +72,16 @@ _MEM_ENV="$(XMG_MEMINFO_FILE="$T_MEMINFO" bash -c '
 ' 2>/dev/null)"
 t_contains "64MB 机器 GOMEMLIMIT 降到 32MiB" "$_MEM_ENV" "limit=32MiB"
 t_contains "64MB 机器注入更激进的 GOGC" "$_MEM_ENV" "gogc=40"
+
+# fd 上限同样按内存分档：64MB 机器不该开 100 万 fd
+_NOFILE_64="$(XMG_MEMINFO_FILE="$T_MEMINFO" bash -c '
+    XMG_LIB_DIR="'"$SRC"'/lib"; XMG_HOME="$(mktemp -d)"
+    export XMG_LIB_DIR XMG_HOME XMG_MEMINFO_FILE
+    source "$XMG_LIB_DIR/os.sh"; source "$XMG_LIB_DIR/common.sh"; source "$XMG_LIB_DIR/tune.sh"
+    printf "%s" "$XMG_TUNE_NOFILE"
+    rm -rf "$XMG_HOME"
+' 2>/dev/null)"
+t_equals "64MB 机器 nofile 收敛为 32768" "$_NOFILE_64" "32768"
 rm -f "$T_MEMINFO"
 t_not_contains "OpenRC 脚本不使用 need net 硬依赖" "$_OPENRC_SCRIPT" "need net"
 
@@ -110,6 +120,32 @@ t_equals "aarch64 架构映射为 arm64-v8a" \
         rm -rf /tmp/xmg-arch2-$$
     ' 2>/dev/null)" \
     "arm64-v8a"
+
+t_equals "mips64 架构映射为 mips64" \
+    "$(bash -c '
+        mkdir -p /tmp/xmg-arch3-$$/bin
+        printf "#!/bin/sh\necho mips64\n" > /tmp/xmg-arch3-$$/bin/uname
+        chmod +x /tmp/xmg-arch3-$$/bin/uname
+        PATH="/tmp/xmg-arch3-$$/bin:$PATH"
+        export PATH
+        source "'"$SRC"'/lib/core.sh"
+        xmg_core_arch_slug
+        rm -rf /tmp/xmg-arch3-$$
+    ' 2>/dev/null)" \
+    "mips64"
+
+t_equals "riscv64 架构映射为 riscv64" \
+    "$(bash -c '
+        mkdir -p /tmp/xmg-arch4-$$/bin
+        printf "#!/bin/sh\necho riscv64\n" > /tmp/xmg-arch4-$$/bin/uname
+        chmod +x /tmp/xmg-arch4-$$/bin/uname
+        PATH="/tmp/xmg-arch4-$$/bin:$PATH"
+        export PATH
+        source "'"$SRC"'/lib/core.sh"
+        xmg_core_arch_slug
+        rm -rf /tmp/xmg-arch4-$$
+    ' 2>/dev/null)" \
+    "riscv64"
 
 # --- 6. 防火墙 iptables 后端（dry-run 回显规则序列，跨平台可验证） ---
 TMP_FW2="$(mktemp -d)"

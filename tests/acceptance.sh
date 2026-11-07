@@ -237,12 +237,12 @@ else
             chk "systemd unit 已注册" \
                 "[ -f /etc/systemd/system/xray.service ] || [ -f /lib/systemd/system/xray.service ]"
             chk "drop-in 注入 GOMEMLIMIT" \
-                "grep -q 'GOMEMLIMIT=100MiB' /etc/systemd/system/xray.service.d/20-xmg.conf"
+                "grep -q 'GOMEMLIMIT=' /etc/systemd/system/xray.service.d/20-xmg.conf"
             chk "已设置开机自启" "systemctl is-enabled xray"
             ;;
         openrc)
             chk "OpenRC 脚本已生成" "[ -f /etc/init.d/xray ]"
-            chk "脚本含 GOMEMLIMIT" "grep -q 'GOMEMLIMIT=100MiB' /etc/init.d/xray"
+            chk "脚本含 GOMEMLIMIT" "grep -q 'GOMEMLIMIT=' /etc/init.d/xray"
             chk "脚本含 rc_ulimit" "grep -q 'rc_ulimit' /etc/init.d/xray"
             chk "已加入运行级" "rc-update show | grep -qw xray"
             ;;

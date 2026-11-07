@@ -191,6 +191,32 @@ printf 'Name: bash\nCapEff:\t000001ffffffffff\n' > "$XMG_TMP/status_priv"
 XMG_PROC_STATUS_FILE="$XMG_TMP/status_priv" XMG_PROC_MOUNTS_FILE="$XMG_TMP/mounts_rw" xmg_detect_container_restricted
 t_equals "满特权环境返回 0" "$?" "0"
 
+# --- 6. 统一内存真源（cgroup 配额）与有效核数 ---
+printf 'MemTotal:       67108864 kB\n' > "$XMG_TMP/meminfo_big"
+printf '536870912\n' > "$XMG_TMP/cg_mem_max_v2"
+printf '268435456\n' > "$XMG_TMP/cg_mem_limit_v1"
+printf '50000 100000\n' > "$XMG_TMP/cpu_max_05c"
+printf '400000 100000\n' > "$XMG_TMP/cpu_max_4c"
+printf '200000\n' > "$XMG_TMP/cpu_quota_v1"
+printf '100000\n' > "$XMG_TMP/cpu_period_v1"
+
+t_assert "定义统一内存真源函数" declare -F xmg_detect_mem_total_kb
+t_assert "定义有效核数函数" declare -F xmg_detect_cpu_cores
+t_equals "cgroup v2 512MB 限额收敛宿主 64GB 内存" \
+    "$(XMG_MEMINFO_FILE="$XMG_TMP/meminfo_big" XMG_CGROUP_MEMORY_MAX="$XMG_TMP/cg_mem_max_v2" XMG_CGROUP_MEMORY_LIMIT="$XMG_TMP/nonexistent" xmg_detect_mem_total_kb)" "524288"
+t_equals "容器 512MB 限额下档位为 low" \
+    "$(XMG_MEMINFO_FILE="$XMG_TMP/meminfo_big" XMG_CGROUP_MEMORY_MAX="$XMG_TMP/cg_mem_max_v2" XMG_CGROUP_MEMORY_LIMIT="$XMG_TMP/nonexistent" xmg_detect_mem_profile)" "low"
+t_equals "cgroup v1 256MB 限额收敛" \
+    "$(XMG_MEMINFO_FILE="$XMG_TMP/meminfo_big" XMG_CGROUP_MEMORY_MAX="$XMG_TMP/nonexistent" XMG_CGROUP_MEMORY_LIMIT="$XMG_TMP/cg_mem_limit_v1" xmg_detect_mem_total_kb)" "262144"
+t_equals "0.5C cpu.max 收敛为 1 核" \
+    "$(XMG_CGROUP_CPU_MAX="$XMG_TMP/cpu_max_05c" XMG_CGROUP_CPU_QUOTA="$XMG_TMP/nonexistent" xmg_detect_cpu_cores)" "1"
+t_equals "4 核 cpu.max 识别为 4" \
+    "$(XMG_CGROUP_CPU_MAX="$XMG_TMP/cpu_max_4c" XMG_CGROUP_CPU_QUOTA="$XMG_TMP/nonexistent" xmg_detect_cpu_cores)" "4"
+t_equals "cgroup v1 CPU 配额识别为 2 核" \
+    "$(XMG_CGROUP_CPU_MAX="$XMG_TMP/nonexistent" XMG_CGROUP_CPU_QUOTA="$XMG_TMP/cpu_quota_v1" XMG_CGROUP_CPU_PERIOD="$XMG_TMP/cpu_period_v1" xmg_detect_cpu_cores)" "2"
+t_equals "MOCK_CPU_CORES 覆盖宿主探测" "$(MOCK_CPU_CORES=8 xmg_detect_cpu_cores)" "8"
+t_equals "内存探测失败统一回退 low 档" "$(MOCK_MEM_TOTAL_KB=0 xmg_detect_mem_profile)" "low"
+
 # --- 清理临时环境 ---
 rm -rf "$XMG_TMP"
 unset XMG_TMP _res

@@ -37,25 +37,19 @@ fi
 
 # XMG_MENU_LABEL: 系统与网络调优
 
-# ===== 默认配置 =====
-XMG_TUNE_SYSCTL_NET_CONF="${XMG_TUNE_SYSCTL_NET_CONF:-/etc/sysctl.d/99-xmg-tune.conf}"
-XMG_TUNE_SYSCTL_BBR_CONF="${XMG_TUNE_SYSCTL_BBR_CONF:-/etc/sysctl.d/99-xmg-bbr.conf}"
-XMG_TUNE_SYSCTL_SWAP_CONF="${XMG_TUNE_SYSCTL_SWAP_CONF:-/etc/sysctl.d/99-xmg-swap.conf}"
-XMG_TUNE_LIMITS_CONF="${XMG_TUNE_LIMITS_CONF:-/etc/security/limits.d/99-xmg-nofile.conf}"
-XMG_TUNE_SYSTEMD_LIMITS_CONF="${XMG_TUNE_SYSTEMD_LIMITS_CONF:-/etc/systemd/system.conf.d/99-xmg-limits.conf}"
-XMG_TUNE_RESOLVED_CONF="${XMG_TUNE_RESOLVED_CONF:-/etc/systemd/resolved.conf.d/xmg-dns.conf}"
-XMG_TUNE_MODULES_LOAD_CONF="${XMG_TUNE_MODULES_LOAD_CONF:-/etc/modules-load.d/xmg-bbr.conf}"
-XMG_TUNE_NOFILE="${XMG_TUNE_NOFILE:-1048576}"
-XMG_TUNE_SWAPFILE="${XMG_TUNE_SWAPFILE:-/swapfile}"
-XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-${XMG_HOME:-/var/lib/xmg}/backups}"
-
-# DNS 默认预设（境外优先：本面板多部署于海外服务器，阿里 DNS 直连延迟高）
-XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
-XMG_TUNE_DOT_DEFAULT="${XMG_TUNE_DOT_DEFAULT:-1.1.1.1 1.0.0.1}"
-export XMG_TUNE_DNS_DEFAULT XMG_TUNE_DOT_DEFAULT
-
-# ===== 自包含加载依赖 (common.sh + detect.sh) =====
+# ===== 自包含加载依赖 =====
+# 机型真源必须先于默认配置加载：nofile 分档直接消费统一内存口径
 _XMG_TUNE_LIBDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if ! declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+    if [ -f "$_XMG_TUNE_LIBDIR/detect.sh" ]; then
+        # shellcheck source=lib/detect.sh
+        source "$_XMG_TUNE_LIBDIR/detect.sh"
+    elif [ -f "${XMG_LIB_DIR:-/opt/xmg/lib}/detect.sh" ]; then
+        # shellcheck source=lib/detect.sh
+        source "${XMG_LIB_DIR:-/opt/xmg/lib}/detect.sh"
+    fi
+fi
+
 if ! declare -F xmg_info >/dev/null 2>&1; then
     if [ -f "$_XMG_TUNE_LIBDIR/common.sh" ]; then
         # shellcheck source=lib/common.sh
@@ -66,15 +60,39 @@ if ! declare -F xmg_info >/dev/null 2>&1; then
     fi
 fi
 
-if ! declare -F xmg_detect_mem_profile >/dev/null 2>&1; then
-    if [ -f "$_XMG_TUNE_LIBDIR/detect.sh" ]; then
-        # shellcheck source=lib/detect.sh
-        source "$_XMG_TUNE_LIBDIR/detect.sh"
-    elif [ -f "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh" ]; then
-        # shellcheck source=lib/detect.sh
-        source "${XMG_LIB_DIR:-$XMG_HOME/lib}/detect.sh"
+# ===== 默认配置 =====
+XMG_TUNE_SYSCTL_NET_CONF="${XMG_TUNE_SYSCTL_NET_CONF:-/etc/sysctl.d/99-xmg-tune.conf}"
+XMG_TUNE_SYSCTL_BBR_CONF="${XMG_TUNE_SYSCTL_BBR_CONF:-/etc/sysctl.d/99-xmg-bbr.conf}"
+XMG_TUNE_SYSCTL_SWAP_CONF="${XMG_TUNE_SYSCTL_SWAP_CONF:-/etc/sysctl.d/99-xmg-swap.conf}"
+XMG_TUNE_LIMITS_CONF="${XMG_TUNE_LIMITS_CONF:-/etc/security/limits.d/99-xmg-nofile.conf}"
+XMG_TUNE_SYSTEMD_LIMITS_CONF="${XMG_TUNE_SYSTEMD_LIMITS_CONF:-/etc/systemd/system.conf.d/99-xmg-limits.conf}"
+XMG_TUNE_RESOLVED_CONF="${XMG_TUNE_RESOLVED_CONF:-/etc/systemd/resolved.conf.d/xmg-dns.conf}"
+XMG_TUNE_MODULES_LOAD_CONF="${XMG_TUNE_MODULES_LOAD_CONF:-/etc/modules-load.d/xmg-bbr.conf}"
+# 未显式指定时按统一内存真源分档推导（os.sh 的 xmg_nofile_for_mem_mb 为分档规则）
+if [ -z "${XMG_TUNE_NOFILE:-}" ]; then
+    _xmg_tune_mb=0
+    if declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+        _xmg_tune_mb="$(xmg_detect_mem_total_mb 2>/dev/null || printf 0)"
     fi
+    case "$_xmg_tune_mb" in ''|*[!0-9]*) _xmg_tune_mb=0 ;; esac
+    # 探测失败与 detect.sh 统一回退 512MB (low 档)，避免 nofile 被放大到百万级
+    if [ "$_xmg_tune_mb" -le 0 ]; then
+        _xmg_tune_mb=512
+    fi
+    if declare -F xmg_nofile_for_mem_mb >/dev/null 2>&1; then
+        XMG_TUNE_NOFILE="$(xmg_nofile_for_mem_mb "$_xmg_tune_mb")"
+    else
+        XMG_TUNE_NOFILE="1048576"
+    fi
+    unset _xmg_tune_mb
 fi
+XMG_TUNE_SWAPFILE="${XMG_TUNE_SWAPFILE:-/swapfile}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-${XMG_HOME:-/var/lib/xmg}/backups}"
+
+# DNS 默认预设（境外优先：本面板多部署于海外服务器，阿里 DNS 直连延迟高）
+XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
+XMG_TUNE_DOT_DEFAULT="${XMG_TUNE_DOT_DEFAULT:-1.1.1.1 1.0.0.1}"
+export XMG_TUNE_DNS_DEFAULT XMG_TUNE_DOT_DEFAULT
 
 # ===== 依赖 common.sh 的兜底 =====
 
@@ -124,29 +142,19 @@ fi
 
 # ===== 通用辅助 =====
 
-# 读取总内存（MB）。探测失败时按 512MB 处理（保守档位）
+# 读取总内存（MB）：统一委托 detect.sh 的机型真源（含 cgroup 配额）。
+# 探测失败时按 512MB 处理（保守档位）。
 xmg_tune_mem_total_mb() {
-    if [ -n "${MOCK_MEM_TOTAL_MB:-}" ]; then
-        echo "$MOCK_MEM_TOTAL_MB"
+    local mb=0
+    if declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+        mb="$(xmg_detect_mem_total_mb 2>/dev/null || printf 0)"
+    fi
+    case "$mb" in ''|*[!0-9]*) mb=0 ;; esac
+    if [ "$mb" -le 0 ]; then
+        printf '512\n'
         return 0
     fi
-
-    local key=""
-    local value=""
-
-    while read -r key value _; do
-        case "$key" in
-            MemTotal:)
-                case "$value" in
-                    ''|*[!0-9]*) break ;;
-                esac
-                echo $((value / 1024))
-                return 0
-                ;;
-        esac
-    done < "${XMG_MEMINFO_FILE:-/proc/meminfo}" 2>/dev/null
-
-    echo 512
+    printf '%s\n' "$mb"
 }
 
 # 读取总 Swap（MB）
@@ -480,7 +488,7 @@ EOF
     elif xmg_init_is_openrc; then
         # OpenRC 无全局 DefaultLimit*，服务级上限由各自 init 脚本 rc_ulimit 控制；
         # XMG 生成的 xray / xmg-firewall 服务脚本已内建 rc_ulimit=-n 1048576
-        xmg_info "OpenRC 环境：XMG 生成的 Xray 服务脚本已内建 rc_ulimit（nofile=1048576）"
+        xmg_info "OpenRC 环境：XMG 生成的 Xray 服务脚本已内建 rc_ulimit（nofile=$XMG_TUNE_NOFILE）"
     fi
 }
 
@@ -524,11 +532,19 @@ xmg_tune_net_optimize() {
             tw_buckets=32768
             ;;
         high|*)
-            conntrack_max=262144
+            # >2GB 不再一刀切：连接跟踪表按实际内存线性放大，
+            # 下限沿用 mid 档 131072，上限 262144（约 76MB，避免表本身吃掉内存）
+            conntrack_max=$((mem_mb * 64))
+            if [ "$conntrack_max" -lt 131072 ]; then
+                conntrack_max=131072
+            fi
+            if [ "$conntrack_max" -gt 262144 ]; then
+                conntrack_max=262144
+            fi
+            tw_buckets=$((conntrack_max / 8))
             buf_max=33554432
             backlog=16384
             syn_backlog=8192
-            tw_buckets=32768
             ;;
     esac
 

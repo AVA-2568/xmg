@@ -66,6 +66,18 @@ NET_CONF_HIGH="$(cat "$XMG_TUNE_SYSCTL_NET_CONF" 2>/dev/null || true)"
 t_contains "高配机 swappiness 保持 10" "$NET_CONF_HIGH" "vm.swappiness = 10"
 t_not_contains "高配机不写入 extreme_low 专用的低 tcp_mem" "$NET_CONF_HIGH" "net.ipv4.tcp_mem = 3072 4096 6144"
 
+# 2.3.1 high 档按实际内存连续缩放，消除 >2GB 一刀切
+export MOCK_MEM_TOTAL_MB=3072
+xmg_tune_net_optimize >/dev/null 2>&1
+NET_CONF_3G="$(cat "$XMG_TUNE_SYSCTL_NET_CONF" 2>/dev/null || true)"
+t_contains "3GB 机型 tw_buckets 按内存缩放为 24576" "$NET_CONF_3G" "net.ipv4.tcp_max_tw_buckets = 24576"
+
+export MOCK_MEM_TOTAL_MB=8192
+xmg_tune_net_optimize >/dev/null 2>&1
+NET_CONF_8G="$(cat "$XMG_TUNE_SYSCTL_NET_CONF" 2>/dev/null || true)"
+t_contains "8GB 机型缩放到上限 32768" "$NET_CONF_8G" "net.ipv4.tcp_max_tw_buckets = 32768"
+export MOCK_MEM_TOTAL_MB=4096
+
 # ==================================================================
 # 3. 验证 xmg_tune_sysctl_apply 退出码截断防溢出
 # ==================================================================

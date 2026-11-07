@@ -656,6 +656,28 @@ xmg_svc_reload_manager() {
     return 0
 }
 
+# fd 上限按物理内存分档：64MB 机器开 100 万 fd 既无意义，
+# 也可能超过内核 nr_open 导致 rc_ulimit 直接失败。
+xmg_nofile_for_mem_mb() {
+    local mb="${1:-0}"
+    case "$mb" in
+        ''|*[!0-9]*) mb=0 ;;
+    esac
+    if [ "$mb" -le 0 ]; then
+        printf '1048576'
+    elif [ "$mb" -le 96 ]; then
+        printf '32768'
+    elif [ "$mb" -le 256 ]; then
+        printf '65536'
+    elif [ "$mb" -le 512 ]; then
+        printf '131072'
+    elif [ "$mb" -le 2048 ]; then
+        printf '524288'
+    else
+        printf '1048576'
+    fi
+}
+
 # 内存概览：GNU free 支持 -h，BusyBox free 只到 -m（-h 直接报错、无输出）
 xmg_mem_free_show() {
     if free -h >/dev/null 2>&1; then

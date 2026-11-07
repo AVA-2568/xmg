@@ -76,6 +76,19 @@ _st_warn() {
     printf '  [WARN] %s\n' "$*"
 }
 
+# 提取实际注入值：GOMEMLIMIT 由机型动态计算，自检不得写死具体数值
+_st_gomemlimit_value() {
+    local file="$1" line=""
+    [ -r "$file" ] || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+        if [[ "$line" =~ GOMEMLIMIT=([^[:space:]\"]+) ]]; then
+            printf 'GOMEMLIMIT=%s' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "$file"
+    return 1
+}
+
 _st_section() {
     printf '\n[%s]\n' "$*"
 }
@@ -254,10 +267,11 @@ _st_check_service() {
         fi
 
         local dropin="${XMG_SYSTEMD_DIR:-/etc/systemd/system}/${svc}.service.d/20-xmg.conf"
-        if [ -f "$dropin" ] && grep -q 'GOMEMLIMIT=100MiB' "$dropin" 2>/dev/null; then
-            _st_pass "内存抑制已注入: GOMEMLIMIT=100MiB"
+        local dropin_limit=""
+        if dropin_limit="$(_st_gomemlimit_value "$dropin")"; then
+            _st_pass "内存抑制已注入: $dropin_limit"
         else
-            _st_warn "未检测到 XMG drop-in 覆盖（内存抑制未生效）"
+            _st_warn "未检测到 GOMEMLIMIT 注入（内存抑制未生效）"
         fi
 
         if xmg_svc_is_enabled "$svc"; then
@@ -269,10 +283,11 @@ _st_check_service() {
         local initd="${XMG_INITD_DIR:-/etc/init.d}/${svc}"
         if [ -f "$initd" ]; then
             _st_pass "OpenRC 服务脚本存在: $initd"
-            if grep -q 'GOMEMLIMIT=' "$initd" 2>/dev/null; then
-                _st_pass "内存抑制已注入: $(sed -n 's/.*GOMEMLIMIT=\([^[:space:]]*\).*/GOMEMLIMIT=\1/p' "$initd" | head -n 1)"
+            local initd_limit=""
+            if initd_limit="$(_st_gomemlimit_value "$initd")"; then
+                _st_pass "内存抑制已注入: $initd_limit"
             else
-                _st_warn "OpenRC 脚本未包含 GOMEMLIMIT"
+                _st_warn "未检测到 GOMEMLIMIT 注入（内存抑制未生效）"
             fi
             if grep -q 'rc_ulimit' "$initd" 2>/dev/null; then
                 _st_pass "nofile 上限已注入: rc_ulimit"
