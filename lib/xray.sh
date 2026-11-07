@@ -98,6 +98,51 @@ xmg_xray_print_version() {
     "$xray_bin" version 2>/dev/null | head -1 || true
 }
 
+# ===== Go 运行时内存抑制参数 =====
+# GOMEMLIMIT 必须小于物理内存：64MB 机器上写死 100MiB 等于没设，
+# 还会让 Go 运行时迟迟不归还内存，OOM 来得更早。
+_xmg_xray_mem_total_mb() {
+    local kb="" f=""
+    # XMG_MEMINFO_FILE 与 core.sh 的内存体检同一开关，便于测试注入
+    f="${XMG_MEMINFO_FILE:-/proc/meminfo}"
+    if [ -r "$f" ]; then
+        kb="$(awk '/^MemTotal:/ {print $2; exit}' "$f" 2>/dev/null || true)"
+    fi
+    case "$kb" in
+        ''|*[!0-9]*) printf '0' ;;
+        *)           printf '%d' $((kb / 1024)) ;;
+    esac
+}
+
+xmg_xray_gomemlimit() {
+    local mb=""
+    mb="$(_xmg_xray_mem_total_mb)"
+    if [ "$mb" -le 0 ]; then
+        printf '100MiB'
+    elif [ "$mb" -le 96 ]; then
+        printf '32MiB'
+    elif [ "$mb" -le 192 ]; then
+        printf '48MiB'
+    elif [ "$mb" -le 384 ]; then
+        printf '64MiB'
+    elif [ "$mb" -le 1024 ]; then
+        printf '100MiB'
+    else
+        printf '150MiB'
+    fi
+}
+
+# 返回空串表示不注入（Go 默认 GOGC=100）：低内存档才需要更激进的回收
+xmg_xray_gogc() {
+    local mb=""
+    mb="$(_xmg_xray_mem_total_mb)"
+    if [ "$mb" -gt 0 ] && [ "$mb" -le 192 ]; then
+        printf '40'
+    elif [ "$mb" -gt 0 ] && [ "$mb" -le 384 ]; then
+        printf '60'
+    fi
+}
+
 # ===== 生成 drop-in 覆盖内容 =====
 xmg_xray_generate_dropin_content() {
     local cfg="${1:-${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}}"
@@ -113,15 +158,22 @@ xmg_xray_generate_dropin_content() {
     fi
     [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || xray_bin="/usr/local/bin/xray"
 
+    local memlimit="" gogc=""
+    memlimit="$(xmg_xray_gomemlimit)"
+    gogc="$(xmg_xray_gogc)"
+
     cat <<EOF
 # XMG 管理的 drop-in 覆盖文件
 # 此文件优先级高于官方的 10-donot_touch_single_conf.conf
 # 请勿手动编辑，由 XMG 自动管理
 [Service]
 User=root
-Environment="GOMEMLIMIT=100MiB"
+Environment="GOMEMLIMIT=$memlimit"
 Environment="GODEBUG=madvdontneed=1"
 Environment="GOMAXPROCS=1"
+EOF
+    [ -n "$gogc" ] && printf 'Environment="GOGC=%s"\n' "$gogc"
+    cat <<EOF
 ExecStart=
 ExecStart=$xray_bin run -config $cfg
 EOF
@@ -152,13 +204,17 @@ respawn_max=0'
 # XMG 管理的 Xray OpenRC 服务脚本
 # 由 xmg 自动生成，请勿手工编辑；重新执行 xmg xray 相关操作会覆盖本文件
 description="Xray Service"
-
-# Go 运行时内存抑制：与 systemd 环境下的 drop-in 保持一致
-export GOMEMLIMIT=100MiB
-export GODEBUG=madvdontneed=1
-export GOMAXPROCS=1
-
 OPENRC_EOF
+
+    # Go 运行时内存抑制：与 systemd 环境下的 drop-in 保持同一套取值
+    local memlimit="" gogc=""
+    memlimit="$(xmg_xray_gomemlimit)"
+    gogc="$(xmg_xray_gogc)"
+    printf 'export GOMEMLIMIT=%s\n' "$memlimit"
+    printf 'export GODEBUG=madvdontneed=1\n'
+    printf 'export GOMAXPROCS=1\n'
+    [ -n "$gogc" ] && printf 'export GOGC=%s\n' "$gogc"
+    printf '\n'
 
     printf 'command="%s"\n' "$xray_bin"
     printf 'command_args="run -config %s"\n' "$cfg"
@@ -167,10 +223,12 @@ OPENRC_EOF
     printf '%s\n' 'rc_ulimit="-n 1048576"'
     printf '%s\n\n' "$supervisor_block"
 
+    # 依赖写软依赖 use net：LXC/容器里 networking 服务常常没运行，
+    # 硬依赖会让 OpenRC 直接拒绝启动（宿主机已配好网卡，进程本身不需要该服务）
     cat <<'OPENRC_EOF'
 depend() {
-    need net
-    after firewall
+    use net
+    after net firewall
 }
 OPENRC_EOF
 
@@ -284,7 +342,7 @@ User=root
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
-Environment="GOMEMLIMIT=100MiB"
+Environment="GOMEMLIMIT=$(xmg_xray_gomemlimit)"
 Environment="GODEBUG=madvdontneed=1"
 Environment="GOMAXPROCS=1"
 ExecStart=$xray_bin run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}
@@ -318,7 +376,7 @@ EOF_UNIT
 
     local target_cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
     # 检查 drop-in 是否已经指向 XMG 路径且已包含 GOMEMLIMIT
-    if [ -f "$dropin_file" ] && grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=100MiB" "$dropin_file" 2>/dev/null; then
+    if [ -f "$dropin_file" ] && grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=" "$dropin_file" 2>/dev/null; then
         xmg_info "drop-in 覆盖已存在且已应用 100MiB 内存抑制，无需修改"
         return 0
     fi
@@ -332,7 +390,7 @@ EOF_UNIT
 
     xmg_xray_generate_dropin_content "$target_cfg" > "$dropin_file"
 
-    if grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=100MiB" "$dropin_file" 2>/dev/null; then
+    if grep -q "$target_cfg" "$dropin_file" 2>/dev/null && grep -q "GOMEMLIMIT=" "$dropin_file" 2>/dev/null; then
         xmg_info "drop-in 覆盖已创建，已应用 GOMEMLIMIT=100MiB / GOMAXPROCS=1"
     else
         xmg_warn "drop-in 覆盖文件写入失败"

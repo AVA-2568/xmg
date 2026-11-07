@@ -641,14 +641,14 @@ xmg_core_memcheck() {
     # 而是展示 extreme_low 极低内存模式，提示已自动应用 100MiB 内存抑制，允许继续安装。
     if [ "$profile" = "extreme_low" ] && [ "$threshold" -le 256 ]; then
         xmg_info "检测到极低内存模式 (extreme_low，可用: ${mb}MB)"
-        xmg_info "已自动应用 100MiB 内存抑制 (GOMEMLIMIT=100MiB) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
+        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
         return 0
     fi
 
     # 小内存机器（low 档 <= 512MB，如 331MB）：可用内存已达 128MB 以上且未显式指定超大阈值时放行
     if [ "$profile" = "low" ] && [ "$threshold" -le 256 ] && [ "$mb" -ge 128 ]; then
         xmg_info "检测到低配内存模式 (low，可用: ${mb}MB)"
-        xmg_info "已自动应用 100MiB 内存抑制 (GOMEMLIMIT=100MiB) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
+        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与单核限制 (GOMAXPROCS=1)，允许继续安装"
         return 0
     fi
 
