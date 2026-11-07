@@ -655,6 +655,9 @@ _xmg_warp_register() {
     pubkey="$(echo "$keys" | awk '{print $2}')"
 
     local resp=""
+    # 临时文件必须在两个分支外声明：mock 分支也会走到失败诊断，
+    # 之前声明在 else 内，mock 失败时 set -u 会直接 unbound variable。
+    local tmp_body="" tmp_err=""
     if [ -n "${XMG_MOCK_WARP_API_RESP:-}" ]; then
         resp="$XMG_MOCK_WARP_API_RESP"
     else
@@ -678,10 +681,9 @@ _xmg_warp_register() {
             attempts=("" "-6")
         fi
 
-        local tmp_body tmp_err
+        local last_http="000" last_err=""
         tmp_body="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.json")"
         tmp_err="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.err")"
-        local last_http="000" last_err=""
 
         for fam_opt in "${attempts[@]}"; do
             local curl_args=()
@@ -709,8 +711,6 @@ _xmg_warp_register() {
                 fi
             done
         done
-
-        rm -f "$tmp_body" "$tmp_err" 2>/dev/null || true
     fi
 
     if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
@@ -748,8 +748,14 @@ _xmg_warp_register() {
         xmg_warn "  1. 外部导入: 在本地电脑或未受限设备生成凭据，执行: xmg warp import <account.json>"
         xmg_warn "  2. 手动放置: 将有效凭据文件直接保存至 $XMG_WARP_ACCOUNT_FILE"
         xmg_warn "------------------------------------------------------------"
+        if [ -n "$tmp_body" ]; then rm -f "$tmp_body" 2>/dev/null || true; fi
+        if [ -n "$tmp_err" ]; then rm -f "$tmp_err" 2>/dev/null || true; fi
         return 1
     fi
+
+    # 提取注册凭据前先清理临时文件（成功路径不再需要响应体）
+    if [ -n "$tmp_body" ]; then rm -f "$tmp_body" 2>/dev/null || true; fi
+    if [ -n "$tmp_err" ]; then rm -f "$tmp_err" 2>/dev/null || true; fi
 
     # 提取注册凭据
     local dev_id="" token="" addr_v4="" addr_v6="" peer_pub="" peer_ep_v4="" peer_ep_v6="" client_id=""
@@ -836,10 +842,6 @@ EOF
 
     xmg_info "WARP 账号注册成功 (分配虚拟 IPv4: $addr_v4, 鉴权保留字段: [$r0, $r1, $r2])"
     return 0
-}
-
-xmg_warp_register_account() {
-    _xmg_warp_register 0
 }
 
 # ===== 导入已有 WARP 凭据 (突破机房 IP 注册受限) =====
@@ -1058,14 +1060,6 @@ _xmg_warp_backup_config() {
     echo "$bak_file"
 }
 
-# ===== 辅助: 判断是否为外部已有非标准配置 =====
-# ===== 辅助: 判断是否需要无损增量保护 (只要文件存在，永远无损增量，绝不覆盖用户现有节点) =====
-_xmg_warp_is_external_config() {
-    local cfg="$1"
-    [ -f "$cfg" ] || return 1
-    return 0
-}
-
 # ===== 辅助: 从 account.json 提取账号变量 =====
 _xmg_warp_get_account_vars() {
     [ -f "$XMG_WARP_ACCOUNT_FILE" ] || return 1
@@ -1120,39 +1114,32 @@ _xmg_warp_get_account_vars() {
     return 0
 }
 
-# ===== 辅助: 纯 Bash 模式处理外部配置 (无 jq 回退) =====
-_xmg_warp_patch_external_bash() {
-    local action="$1" mode="$2" cfg="$3" out="$4" warp_json="$5"
-    if [ "$action" = "enable" ]; then
-        if [ "$mode" = "routing" ]; then
-            awk -v w="$warp_json" '
-                /"outbounds"[[:space:]]*:[[:space:]]*\[/ {
-                    print; in_out=1; next
-                }
-                in_out && /\]/ {
-                    printf "    ,\n%s\n  ]\n", w; in_out=0; next
-                }
-                { print }
-            ' "$cfg" > "$out"
-        else
-            awk -v w="$warp_json" '
-                /"outbounds"[[:space:]]*:[[:space:]]*\[/ {
-                    print; printf "    %s,\n", w; next
-                }
-                /"tag"[[:space:]]*:[[:space:]]*"warp-out"/ { skip=1 }
-                skip && /\}/ { skip=0; next }
-                !skip { print }
-            ' "$cfg" > "$out"
-        fi
-    elif [ "$action" = "disable" ]; then
-        awk '
-            /"tag"[[:space:]]*:[[:space:]]*"warp-out"/ { skip=1 }
-            /"outboundTag"[[:space:]]*:[[:space:]]*"warp-out"/ { skip_rule=1 }
-            skip && /\}/ { skip=0; next }
-            skip_rule && /\}/ { skip_rule=0; next }
-            !skip && !skip_rule { print }
-        ' "$cfg" > "$out"
+# ===== 无 jq 时的配置合并 =====
+# XMG 托管配置（XMG_XRAY_CONFIG）由渲染器重建：WARP 出站与分流规则本来就在
+# render.sh 里实现（纯 Bash），比 awk 手写 JSON 更可靠。
+# 外部自定义配置无法在不解析 JSON 的前提下安全合并，直接报错，绝不写坏配置。
+# 返回: 0=已渲染  1=渲染失败  2=非托管配置/渲染器不可用
+_xmg_warp_render_managed_config() {
+    local cfg="$1" out="$2"
+    # 只认 XMG 自己的配置路径：XMG_XRAY_CONFIG 可被用户指向任意文件，
+    # 用它做判据会把外部配置误当托管配置，重渲染后用户节点全丢。
+    local managed="${XMG_HOME:-/opt/xmg}/xray/config.json"
+    if [ "$cfg" != "$managed" ]; then
+        return 2
     fi
+    declare -F xmg_render_config >/dev/null 2>&1 || return 2
+
+    local s_on="" v_on=""
+    if declare -p XMG_STATE_STAGE >/dev/null 2>&1; then
+        s_on="${XMG_STATE_STAGE[PROXY_SOCKS_ENABLED]:-}"
+        v_on="${XMG_STATE_STAGE[PROXY_VLESS_ENABLED]:-}"
+    fi
+    [ -n "$s_on" ] || s_on="$(xmg_state_get PROXY_SOCKS_ENABLED 0)"
+    [ -n "$v_on" ] || v_on="$(xmg_state_get PROXY_VLESS_ENABLED 0)"
+
+    xmg_render_config "$s_on" "$v_on" > "$out" 2>/dev/null || return 1
+    [ -s "$out" ] || return 1
+    return 0
 }
 
 # ===== 启用 Xray 原生 WireGuard 出站 =====
@@ -1227,7 +1214,7 @@ xmg_warp_enable() {
         fi
         [[ "$ssh_p" =~ ^[0-9]+$ ]] && [ "$ssh_p" -gt 0 ] && [ "$ssh_p" -le 65535 ] || ssh_p=22
 
-        if command -v jq >/dev/null 2>&1; then
+        if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
             local jq_file="${xray_cfg}.tmp.$.jq"
             if [ "$mode" = "routing" ]; then
                 local v6_fallback_rule=""
@@ -1375,8 +1362,20 @@ EOF_GLOBAL_JQ
                 rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
             fi
         else
-            _xmg_warp_patch_external_bash "enable" "$mode" "$xray_cfg" "$tmp_cfg" "$warp_json"
-            [ -s "$tmp_cfg" ] && merged_ok=1
+            # 无 jq：XMG 托管配置交给纯 Bash 渲染器重建，外部配置直接报错
+            local _rrc=0
+            _xmg_warp_render_managed_config "$xray_cfg" "$tmp_cfg" || _rrc=$?
+            if [ "$_rrc" -eq 0 ]; then
+                merged_ok=1
+            else
+                rm -f "$tmp_cfg" 2>/dev/null || true
+                if [ "$_rrc" -eq 2 ]; then
+                    xmg_error "当前配置不是 XMG 托管配置，WARP 无损注入需要 jq；请安装 jq 后重试"
+                else
+                    xmg_error "渲染 XMG 托管配置失败，取消应用"
+                fi
+                return 1
+            fi
         fi
 
         if [ "$merged_ok" -eq 1 ]; then
@@ -1458,7 +1457,22 @@ EOF_GLOBAL_JQ
             xmg_error "重启 $s_name 服务失败，正在自动回滚 WARP 配置..."
             if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
                 cp -f "$bak" "$xray_cfg" 2>/dev/null || true
+                if [ -n "${alt_cfg:-}" ] && [ "$alt_cfg" != "$xray_cfg" ]; then
+                    cp -f "$bak" "$alt_cfg" 2>/dev/null || true
+                fi
                 _warp_restart_xray 2>/dev/null || true
+            fi
+            # 状态/env 必须与配置一起回退：否则 state 声称已启用，下一次 proxy apply
+            # 会按 state 把 warp-out 重新渲染回来，形成"回滚了但又生效"的鬼状态。
+            if [ -f "$XMG_WARP_ENV_FILE" ]; then
+                sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+            fi
+            echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+            if declare -F xmg_state_stage >/dev/null 2>&1; then
+                xmg_state_stage WARP_ENABLED 0
+                if declare -F xmg_state_commit_draft >/dev/null 2>&1; then
+                    xmg_state_commit_draft >/dev/null 2>&1 || true
+                fi
             fi
             return 1
         fi
@@ -1573,7 +1587,7 @@ xmg_warp_disable() {
         local tmp_cfg="${xray_cfg}.tmp.$.json"
         local removed_ok=0
 
-        if command -v jq >/dev/null 2>&1; then
+        if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
             local jq_file="${xray_cfg}.tmp.$.jq"
             cat > "$jq_file" << 'EOF_DISABLE_JQ'
 (.outbounds = [ (.outbounds // [])[] | select(.tag != "warp-out") ]) |
@@ -1588,8 +1602,20 @@ EOF_DISABLE_JQ
                 rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
             fi
         else
-            _xmg_warp_patch_external_bash "disable" "" "$xray_cfg" "$tmp_cfg" ""
-            [ -s "$tmp_cfg" ] && removed_ok=1
+            # 无 jq：托管配置按状态重渲染（WARP_ENABLED=0 已 stage）；外部配置报错
+            local _rrc=0
+            _xmg_warp_render_managed_config "$xray_cfg" "$tmp_cfg" || _rrc=$?
+            if [ "$_rrc" -eq 0 ]; then
+                removed_ok=1
+            else
+                rm -f "$tmp_cfg" 2>/dev/null || true
+                if [ "$_rrc" -eq 2 ]; then
+                    xmg_error "当前配置不是 XMG 托管配置，移除 WARP 出站需要 jq；请安装 jq 后重试"
+                else
+                    xmg_error "渲染 XMG 托管配置失败，取消停用"
+                fi
+                return 1
+            fi
         fi
 
         if [ "$removed_ok" -eq 1 ]; then

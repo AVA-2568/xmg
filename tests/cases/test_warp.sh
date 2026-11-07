@@ -474,3 +474,42 @@ t_equals "纯 Bash clean_ipv6 正确去除两端及内部空白" "$CLEAN_V6_SPAC
 # 测试 JSON 纯 Bash 提取接口与 account.json 异常保留字段提取
 T_JSON_STR='{"private_key": "MOCK_KEY", "reserved": [ 12 ,  34 , 56 ]}'
 t_equals "纯 Bash _xmg_warp_json_val 提取私钥" "$(_xmg_warp_json_val "$T_JSON_STR" "private_key")" "MOCK_KEY"
+
+# 26. 无 jq 场景：托管配置必须由渲染器重建，不能产出非法 JSON
+#     （旧实现用 awk 拼接嵌套 JSON，输出损坏；渲染器纯 Bash 且与正式配置同源）
+_MANAGED_CFG="$XMG_HOME/xray/config.json"
+mkdir -p "$(dirname "$_MANAGED_CFG")" 2>/dev/null || true
+export XMG_XRAY_CONFIG="$_MANAGED_CFG"
+
+_NJ_RC=0
+XMG_WARP_NO_JQ=1 xmg_warp_enable global >/dev/null 2>&1 || _NJ_RC=$?
+t_equals "无 jq 启用托管配置返回 0" "$_NJ_RC" "0"
+
+_NJ_CFG="$(cat "$_MANAGED_CFG" 2>/dev/null || true)"
+t_contains "无 jq 渲染结果含 warp-out" "$_NJ_CFG" '"tag": "warp-out"'
+t_equals "无 jq 渲染 warp-out 唯一" "$(printf '%s' "$_NJ_CFG" | grep -o '"tag": "warp-out"' | wc -l | tr -d ' ')" "1"
+t_contains "无 jq 渲染结果含 direct 出站" "$_NJ_CFG" '"tag": "direct"'
+
+if command -v jq >/dev/null 2>&1; then
+    t_assert "无 jq 渲染结果仍是合法 JSON" jq -e ".outbounds" "$_MANAGED_CFG"
+    t_equals "无 jq 渲染后 warp-out 位于首位" "$(jq -r '.outbounds[0].tag' "$_MANAGED_CFG" 2>/dev/null)" "warp-out"
+fi
+
+_NJ_DIS_RC=0
+XMG_WARP_NO_JQ=1 xmg_warp_disable >/dev/null 2>&1 || _NJ_DIS_RC=$?
+t_equals "无 jq 停用托管配置返回 0" "$_NJ_DIS_RC" "0"
+_NJ_AFTER="$(cat "$_MANAGED_CFG" 2>/dev/null || true)"
+t_not_contains "无 jq 停用后 warp-out 已被移除" "$_NJ_AFTER" '"tag": "warp-out"'
+if command -v jq >/dev/null 2>&1; then
+    t_assert "无 jq 停用后仍是合法 JSON" jq -e ".outbounds" "$_MANAGED_CFG"
+fi
+
+# 27. 外部自定义配置且无 jq：必须明确报错，绝不能写坏用户配置
+_EXT_CFG="$XMG_TMP/external_config.json"
+printf '%s\n' '{"inbounds":[],"outbounds":[{"tag":"direct","protocol":"freedom"}]}' > "$_EXT_CFG"
+_EXT_BEFORE="$(cat "$_EXT_CFG")"
+export XMG_XRAY_CONFIG="$_EXT_CFG"
+_EXT_RC=0
+XMG_WARP_NO_JQ=1 xmg_warp_enable global >/dev/null 2>&1 || _EXT_RC=$?
+t_equals "外部配置无 jq 时启用被拒绝" "$_EXT_RC" "1"
+t_equals "外部配置无 jq 时原文件不被改写" "$(cat "$_EXT_CFG")" "$_EXT_BEFORE"

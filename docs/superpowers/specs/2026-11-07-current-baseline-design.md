@@ -81,7 +81,17 @@ vless://<uuid>@<host>:<port>?<query>#<remark>
 5. **IPv6**：authority 部分自动加方括号。
 6. **NAT**：方案级外部端口优先，未声明时回落到全局；仍未声明则使用监听端口并告警，`xmg doctor` 在 NAT 机型输出 `[提示]`。
 
-已知限制：CDN 链接固定 443（Cloudflare 常规入口）；直连链接的 authority 使用域名，若域名开启 CDN 代理，需改用仅 DNS 的子域或直接用 IP。
+已知限制：CDN 链接固定 443（Cloudflare 常规入口）；直连链接的 authority 使用域名，若域名开启 Cloudflare 代理说明本意就是 CDN，直连应改用仅 DNS 的子域。
+
+---
+
+## 4.1 WARP 出站
+
+- 账号：内置 Cloudflare 注册（多 API 版本回退）+ `xmg warp import` 外部凭据导入；`reserved` 由 `client_id` 解码补齐。
+- 出站：`protocol: wireguard`，`noKernelTun`，`mtu 1280`，`keepAlive 25`；全局模式置顶为默认出站，分流模式按 AI/流媒体域名清单命中。
+- 配置合并：优先用 jq 做无损增量；**无 jq 时仅 XMG 托管配置（`$XMG_HOME/xray/config.json`）可交由渲染器重建**，外部自定义配置会明确报错，绝不写出非法 JSON。
+- 单栈适配：纯 IPv6 + 全局模式自动把 `queryStrategy` / `domainStrategy` 放开为 `UseIP`，停用时收回。
+- 失败回滚：重启失败会同时还原配置、`warp.env` 与 state，避免「状态说已启用、配置已回滚」的鬼状态。
 
 ---
 
@@ -129,7 +139,6 @@ vless://<uuid>@<host>:<port>?<query>#<remark>
 
 ## 8. 后续待决
 
-1. 直连链接 authority 是否改为公网 IP（当前用域名，CDN 代理开启时语义不符）。
+1. 直连链接 authority 是否改为公网 IP（当前用域名；域名开启 Cloudflare 代理即视为 CDN 场景，直连应使用仅 DNS 的子域）。
 2. 单入站旧配置（全局 `--external-port`）与新方案级端口并存的生命周期策略。
-3. `detect.sh` 是否需要菜单入口（当前仅 CLI，标签保留）。
-4. 失效函数清理：`xmg_apt_install`、`xmg_core_generate_dropin_content`、`xmg_core_restore_systemd_unit`、`xmg_pkg_update`、`xmg_pkg_installed`、`xmg_warp_register_account`、`_xmg_warp_is_external_config`、`xmg_xray_is_systemd_available`。
+3. `detect.sh` 是否需要菜单入口（当前仅 CLI，已移除无效标签）。
