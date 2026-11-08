@@ -664,30 +664,16 @@ _xmg_render_config_bash() {
     fi
     printf '  ]'
 
-    if [ "$warp_on" = "1" ] && [ "$warp_mode" = "global" ]; then
+    # global 模式不生成 routing：
+    #   默认出站就是 warp-out（outbounds 第一位），无需任何规则；
+    #   旧版在这里插了一条 {"tcp/22" -> direct}，它没有 inboundTag 约束，
+    #   会把所有经代理访问 22 端口的流量强制用宿主机真实 IP 直连（流量泄漏），
+    #   而且宿主 SSH 压根不经过 Xray，这条规则保护不了任何东西。
+    if [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
         printf ',\n'
         printf '  "routing": {\n'
         printf '    "domainStrategy": "IPIfNonMatch",\n'
         printf '    "rules": [\n'
-        printf '      {\n'
-        printf '        "outboundTag": "direct",\n'
-        printf '        "network": "tcp",\n'
-        printf '        "port": "22"\n'
-        printf '      }\n'
-        printf '    ]\n'
-        printf '  }\n'
-    elif [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
-        printf ',\n'
-        printf '  "routing": {\n'
-        printf '    "domainStrategy": "IPIfNonMatch",\n'
-        printf '    "rules": [\n'
-        # 与 jq 渲染路径对齐：SSH 22 必须先于域名规则命中，
-        # 否则「22 端口 + 命中 warp 域名列表」的流量会被分流到 warp-out
-        printf '      {\n'
-        printf '        "outboundTag": "direct",\n'
-        printf '        "network": "tcp",\n'
-        printf '        "port": "22"\n'
-        printf '      },\n'
         printf '      {\n'
         printf '        "type": "field",\n'
         printf '        "outboundTag": "warp-out",\n'
@@ -988,11 +974,6 @@ xmg_render_config() {
         "rules": (
           [
             {
-              "outboundTag": "direct",
-              "network": "tcp",
-              "port": "22"
-            },
-            {
               "type": "field",
               "outboundTag": "warp-out",
               "domain": [
@@ -1063,17 +1044,7 @@ xmg_render_config() {
           "tag": "blocked",
           "settings": {}
         }
-      ] |
-      .routing = {
-        "domainStrategy": "IPIfNonMatch",
-        "rules": [
-          {
-            "outboundTag": "direct",
-            "network": "tcp",
-            "port": "22"
-          }
-        ]
-      }
+      ]
     end
   else
     .outbounds = [

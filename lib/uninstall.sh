@@ -175,15 +175,18 @@ xmg_uninstall_cleanup_systemd_artifacts() {
         rmdir "$dropin_dir" 2>/dev/null || true
     fi
 
-    # 2. 清理 xmg-warp.service 及其自启链接
-    local warp_svc="${sys_dir}/xmg-warp.service"
-    local warp_wants="${sys_dir}/multi-user.target.wants/xmg-warp.service"
-    if [ -L "$warp_wants" ] || [ -e "$warp_wants" ]; then
-        rm -f "$warp_wants" 2>/dev/null && xmg_info "已清理 xmg-warp 自启软链接" || true
-    fi
-    if [ -f "$warp_svc" ] || [ -L "$warp_svc" ]; then
-        rm -f "$warp_svc" 2>/dev/null && xmg_info "已清理 xmg-warp 服务单元" || true
-    fi
+    # 2. 清理 xmg-warp / xmg-firewall 服务单元及其自启链接
+    local svc_name="" svc_path="" svc_wants=""
+    for svc_name in xmg-warp xmg-firewall; do
+        svc_path="${sys_dir}/${svc_name}.service"
+        svc_wants="${sys_dir}/multi-user.target.wants/${svc_name}.service"
+        if [ -L "$svc_wants" ] || [ -e "$svc_wants" ]; then
+            rm -f "$svc_wants" 2>/dev/null && xmg_info "已清理 ${svc_name} 自启软链接" || true
+        fi
+        if [ -f "$svc_path" ] || [ -L "$svc_path" ]; then
+            rm -f "$svc_path" 2>/dev/null && xmg_info "已清理 ${svc_name} 服务单元" || true
+        fi
+    done
 
     # 3. 触发 systemd 重新加载配置
     if command -v systemctl &>/dev/null; then

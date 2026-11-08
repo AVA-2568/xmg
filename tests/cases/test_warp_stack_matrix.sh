@@ -140,6 +140,27 @@ done
 unset XMG_CONFIG_TEMPLATE
 
 # ------------------------------------------------------------------
+# 2.5 22 端口不得被强制直连
+#     旧版在 routing 里插 {"tcp/22" -> direct}，没有 inboundTag 约束，
+#     会把所有经代理访问 22 端口的流量改成用宿主机真实 IP 直连（流量泄漏）。
+#     宿主 SSH 压根不经过 Xray，这条规则保护不了任何东西。
+# ------------------------------------------------------------------
+XMG_STATE_STAGE[WARP_MODE]=global
+_mx_cfg="$(xmg_render_config 0 0 2>/dev/null)"
+t_equals "global 模式不生成 routing 段" \
+    "$(printf '%s' "$_mx_cfg" | jq -r 'if .routing then "HAS" else "NONE" end')" "NONE"
+t_equals "global 模式默认出站是 warp-out" \
+    "$(printf '%s' "$_mx_cfg" | jq -r '.outbounds[0].tag')" "warp-out"
+
+XMG_STATE_STAGE[WARP_MODE]=routing
+_mx_cfg="$(xmg_render_config 0 0 2>/dev/null)"
+t_equals "routing 模式不含 tcp/22 强制直连规则" \
+    "$(printf '%s' "$_mx_cfg" | jq '[.routing.rules[]? | select(.port == "22" and .outboundTag == "direct")] | length')" "0"
+t_equals "routing 模式仍保留域名分流规则" \
+    "$(printf '%s' "$_mx_cfg" | jq '[.routing.rules[]? | select(.outboundTag == "warp-out")] | length')" "1"
+XMG_STATE_STAGE[WARP_MODE]=global
+
+# ------------------------------------------------------------------
 # 3. 仅 v4 隧道：allowedIPs 必须收敛，不能声明 ::/0
 # ------------------------------------------------------------------
 XMG_STATE_STAGE[WARP_IPV6]=""

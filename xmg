@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-2.2.5}"
+XMG_VERSION="${XMG_VERSION:-2.2.6}"
 
 xmg_usage() {
     cat <<EOF
@@ -112,11 +112,52 @@ if [ ! -d "$XMG_LIB_DIR" ]; then
     exit 1
 fi
 
+# 核心模块缺失时的自愈
+#   升级的组件替换若被中断（断电、Ctrl-C、OOM），会留下没有 lib 的安装，
+#   此时任何子命令都跑不起来，而命令入口还在 —— 用户只能手工救。
+#   这里优先从「替换时留下的旧目录」还原，其次从最近一次升级备份还原。
+xmg_self_heal_lib() {
+    [ -r "$XMG_LIB_DIR/common.sh" ] && return 0
+
+    local cand="" latest=""
+    for cand in "$XMG_HOME"/.lib.old.*; do
+        [ -d "$cand" ] && [ -r "$cand/common.sh" ] && latest="$cand"
+    done
+    if [ -n "$latest" ]; then
+        if mv "$latest" "$XMG_LIB_DIR" 2>/dev/null && [ -r "$XMG_LIB_DIR/common.sh" ]; then
+            echo "警告: 检测到中断的升级，已从 $latest 还原 lib" >&2
+            return 0
+        fi
+    fi
+
+    local bk="${XMG_BACKUP_DIR:-${XMG_HOME}/backups}"
+    latest=""
+    if [ -d "$bk" ]; then
+        for cand in "$bk"/update_*/lib; do
+            [ -d "$cand" ] && [ -r "$cand/common.sh" ] && latest="$cand"
+        done
+    fi
+    if [ -n "$latest" ]; then
+        if cp -a "$latest" "$XMG_LIB_DIR" 2>/dev/null && [ -r "$XMG_LIB_DIR/common.sh" ]; then
+            echo "警告: 检测到中断的升级，已从备份 $latest 还原 lib" >&2
+            return 0
+        fi
+    fi
+    return 1
+}
+
 xmg_require_core_file() {
     local f="$1"
 
     if [ ! -r "$XMG_LIB_DIR/$f" ]; then
+        if [ "$f" = "common.sh" ]; then
+            xmg_self_heal_lib || true
+        fi
+    fi
+
+    if [ ! -r "$XMG_LIB_DIR/$f" ]; then
         echo "错误: 缺少核心模块: $XMG_LIB_DIR/$f" >&2
+        echo "若刚执行过升级，可尝试从 ${XMG_BACKUP_DIR:-${XMG_HOME}/backups}/update_* 手工还原 lib" >&2
         exit 1
     fi
 }

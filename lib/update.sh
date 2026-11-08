@@ -227,39 +227,64 @@ xmg_update_apply_atomic() {
     [ -d "$XMG_HOME/templates" ] && cp -r "$XMG_HOME/templates" "$backup_dir/templates" 2>/dev/null || true
     [ -f "$XMG_HOME/xmg.files" ] && cp "$XMG_HOME/xmg.files" "$backup_dir/xmg.files" 2>/dev/null || true
 
-    # 6. 原子目录切换与回滚
+    # 6. 逐组件原子切换
+    #    不用「全部移走 → 全部移入」：那是 8 个中断窗口，任一次被打断都会留下
+    #    「lib 已移走、新的还没来」的不可用安装。改成每个组件「移旧 → 移新 →
+    #    失败立即就地还原」，窗口缩到单组件、且失败可自愈。
     local switch_ok=1
+    local comp="" old="" new="" comp_failed=""
 
-    # 移出当前目录为旧备份临时态
-    [ -d "$XMG_HOME/lib" ] && mv "$XMG_HOME/lib" "$XMG_HOME/.lib.old.$$" 2>/dev/null || true
-    [ -d "$XMG_HOME/bin" ] && mv "$XMG_HOME/bin" "$XMG_HOME/.bin.old.$$" 2>/dev/null || true
-    [ -d "$XMG_HOME/templates" ] && mv "$XMG_HOME/templates" "$XMG_HOME/.templates.old.$$" 2>/dev/null || true
-    [ -f "$XMG_HOME/xmg.files" ] && mv "$XMG_HOME/xmg.files" "$XMG_HOME/.xmg.files.old.$$" 2>/dev/null || true
+    for comp in lib bin templates xmg.files; do
+        old="$XMG_HOME/.${comp}.old.$$"
+        new="$staging_dir/$comp"
 
-    # 移入 staging
-    mv "$staging_dir/lib" "$XMG_HOME/lib" 2>/dev/null || switch_ok=0
-    mv "$staging_dir/bin" "$XMG_HOME/bin" 2>/dev/null || switch_ok=0
-    if [ -d "$staging_dir/templates" ]; then
-        mv "$staging_dir/templates" "$XMG_HOME/templates" 2>/dev/null || switch_ok=0
-    fi
-    if [ -f "$staging_dir/xmg.files" ]; then
-        mv "$staging_dir/xmg.files" "$XMG_HOME/xmg.files" 2>/dev/null || switch_ok=0
-    fi
+        # 上游没提供该组件时跳过，绝不动线上现有内容
+        if [ ! -e "$new" ]; then
+            continue
+        fi
 
-    # 若切换失败，立即触发原子回滚
+        # 空 templates 会覆盖掉线上可用的模板，宁可保留旧版
+        if [ "$comp" = "templates" ] && [ -d "$new" ] && [ -z "$(ls -A "$new" 2>/dev/null)" ]; then
+            xmg_warn "上游包 templates 为空，保留现有模板不替换"
+            continue
+        fi
+
+        if [ -e "$XMG_HOME/$comp" ] && ! mv "$XMG_HOME/$comp" "$old" 2>/dev/null; then
+            switch_ok=0
+            comp_failed="$comp"
+            break
+        fi
+
+        if ! mv "$new" "$XMG_HOME/$comp" 2>/dev/null; then
+            [ -e "$old" ] && mv "$old" "$XMG_HOME/$comp" 2>/dev/null
+            switch_ok=0
+            comp_failed="$comp"
+            break
+        fi
+
+        rm -rf "$old" 2>/dev/null || true
+    done
+
     if [ "$switch_ok" -ne 1 ]; then
-        xmg_error "原子替换失败，正在触发完整自动回滚..."
-        rm -rf "$XMG_HOME/lib" "$XMG_HOME/bin" "$XMG_HOME/templates" "$XMG_HOME/xmg.files" 2>/dev/null || true
-        [ -d "$XMG_HOME/.lib.old.$$" ] && mv "$XMG_HOME/.lib.old.$$" "$XMG_HOME/lib" 2>/dev/null || true
-        [ -d "$XMG_HOME/.bin.old.$$" ] && mv "$XMG_HOME/.bin.old.$$" "$XMG_HOME/bin" 2>/dev/null || true
-        [ -d "$XMG_HOME/.templates.old.$$" ] && mv "$XMG_HOME/.templates.old.$$" "$XMG_HOME/templates" 2>/dev/null || true
-        [ -f "$XMG_HOME/.xmg.files.old.$$" ] && mv "$XMG_HOME/.xmg.files.old.$$" "$XMG_HOME/xmg.files" 2>/dev/null || true
+        xmg_error "组件 $comp_failed 替换失败"
+        # 已切换过的组件按备份全量还原，避免留下「一半新一半旧」
+        if [ -d "$backup_dir" ]; then
+            xmg_warn "正在从 $backup_dir 全量还原..."
+            for comp in lib bin templates xmg.files; do
+                if [ -e "$backup_dir/$comp" ]; then
+                    rm -rf "$XMG_HOME/$comp" 2>/dev/null || true
+                    cp -a "$backup_dir/$comp" "$XMG_HOME/$comp" 2>/dev/null || true
+                fi
+            done
+            xmg_info "已还原到升级前状态"
+        else
+            xmg_error "未找到可用备份，请手工检查 $XMG_HOME"
+        fi
         rm -rf "$staging_dir" 2>/dev/null || true
         return 1
     fi
 
-    # 清理暂存态与旧临时目录
-    rm -rf "$XMG_HOME/.lib.old.$$" "$XMG_HOME/.bin.old.$$" "$XMG_HOME/.templates.old.$$" "$XMG_HOME/.xmg.files.old.$$" "$staging_dir" 2>/dev/null || true
+    rm -rf "$staging_dir" 2>/dev/null || true
 
     # 同步配置模板到 etc/xray
     if [ -d "$XMG_HOME/templates" ]; then

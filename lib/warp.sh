@@ -1398,14 +1398,7 @@ xmg_warp_enable() {
 (.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
 (.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
 (.routing.rules = (
-  [
-    {
-      "outboundTag": "direct",
-      "network": "tcp",
-      "port": "$ssh_p"
-    }
-  ] +
-  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.port // "") != "$ssh_p") ] + [
+  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and ((.port // "") | tostring) != "$ssh_p") ] + [
     {
       "type": "field",
       "outboundTag": "warp-out",
@@ -1497,18 +1490,14 @@ EOF_ROUTING_JQ
     else . end
   ]
 )) |
-(.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
-(.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
-(.routing.rules = (
-  [
-    {
-      "outboundTag": "direct",
-      "network": "tcp",
-      "port": "$ssh_p"
-    }
-  ] +
-  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and (.port // "") != "$ssh_p") ]
-))
+(.routing = (.routing // {})) |
+(if (.routing.rules // null) != null then
+   .routing.rules = (
+     [ (.routing.rules // [])[] |
+       select((.outboundTag // "") != "warp-out" and ((.port // "") | tostring) != "$ssh_p") ]
+   )
+ else . end) |
+(if ((.routing.rules // []) | length) == 0 then del(.routing) else . end)
 EOF_GLOBAL_JQ
             fi
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then

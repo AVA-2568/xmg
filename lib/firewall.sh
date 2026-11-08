@@ -711,6 +711,40 @@ _xmg_fw_ensure_ssh_allowed() {
     return 0
 }
 
+# systemd 侧的规则重放单元
+#   OpenRC 靠 /etc/init.d/xmg-firewall + rc-update 持久化；
+#   systemd + iptables 后端此前完全没有对应物：主机重启后 XMG 链与 INPUT 跳转全部消失，
+#   而 enabled 标记还在，xmg firewall status 仍报「已启用」，实际没有任何入站过滤。
+xmg_fw_ipt_write_systemd() {
+    local unit_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
+    [ -d "$unit_dir" ] || return 1
+
+    local xmg_bin="${XMG_LINK:-${XMG_BIN_DIR:-/opt/xmg/bin}/xmg}"
+    [ -x "$xmg_bin" ] || xmg_bin="/usr/local/bin/xmg"
+    [ -x "$xmg_bin" ] || return 1
+
+    cat > "$unit_dir/xmg-firewall.service" 2>/dev/null <<EOF || return 1
+[Unit]
+Description=XMG firewall rules (iptables)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$xmg_bin firewall reload
+ExecStop=$xmg_bin firewall flush
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    if declare -F xmg_svc_reload_manager >/dev/null 2>&1; then
+        xmg_svc_reload_manager
+    fi
+    return 0
+}
+
 xmg_firewall_enable() {
     xmg_require_root
 
@@ -751,6 +785,14 @@ xmg_firewall_enable() {
             xmg_svc_enable xmg-firewall >/dev/null 2>&1 \
                 && xmg_info "xmg-firewall 已加入 default 运行级（开机自动重放规则）" \
                 || xmg_warn "注册开机自启失败: rc-update add xmg-firewall default"
+        elif xmg_init_use_systemd_units; then
+            if xmg_fw_ipt_write_systemd; then
+                systemctl enable xmg-firewall >/dev/null 2>&1 \
+                    && xmg_info "xmg-firewall.service 已加入开机自启（重启后自动重放规则）" \
+                    || xmg_warn "注册开机自启失败: systemctl enable xmg-firewall"
+            else
+                xmg_warn "无法写入 xmg-firewall.service，重启后规则不会自动恢复"
+            fi
         fi
         xmg_info "防火墙已启用"
         xmg_fw_ipt_status

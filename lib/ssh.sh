@@ -293,8 +293,16 @@ xmg_ssh_set_conf() {
     if xmg_ssh_supports_include; then
         mkdir -p "$(dirname "$XMG_SSH_DROPIN_CONF")"
         touch "$XMG_SSH_DROPIN_CONF"
-        # 删除本文件内同 key 旧行
-        sed -i "/^[[:space:]]*${key}[[:space:]]/Id" "$XMG_SSH_DROPIN_CONF"
+        # 删除本文件内同 key 旧行（大小写不敏感）
+        # 用 grep -v 重写而非 `sed -i .../Id`：I 修饰符是 GNU 扩展，
+        # BusyBox sed 不认，Alpine 上会报错并留下重复行，sshd 取第一条 → 改端口不生效
+        if [ -s "$XMG_SSH_DROPIN_CONF" ]; then
+            local _dropin_tmp="${XMG_SSH_DROPIN_CONF}.tmp.$$"
+            grep -viE "^[[:space:]]*${key}[[:space:]]" "$XMG_SSH_DROPIN_CONF" > "$_dropin_tmp" 2>/dev/null || true
+            # cat 回写而非 mv：保留原文件的 inode 与权限位
+            cat "$_dropin_tmp" > "$XMG_SSH_DROPIN_CONF" 2>/dev/null || true
+            rm -f "$_dropin_tmp" 2>/dev/null || true
+        fi
         printf '%s %s\n' "$key" "$value" >> "$XMG_SSH_DROPIN_CONF"
         xmg_info "已写入 $XMG_SSH_DROPIN_CONF: $key $value"
         return 0
