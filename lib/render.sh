@@ -177,6 +177,17 @@ _xmg_render_norm_int() {
     case "$val" in
         ''|*[!0-9]*) printf '%s' "$def"; return 0 ;;
     esac
+
+    # 先剥前导零再判长度：$((10#...)) 在超长数字上会回绕，
+    # 18446744073709552059 会变成 443 从而绕过区间检查
+    while [ "${#val}" -gt 1 ] && [ "${val#0}" != "$val" ]; do
+        val="${val#0}"
+    done
+    if [ "${#val}" -gt 10 ]; then
+        printf '%s' "$def"
+        return 0
+    fi
+
     val="$((10#$val))"
     if [ "$val" -lt "$min" ] || [ "$val" -gt "$max" ]; then
         printf '%s' "$def"

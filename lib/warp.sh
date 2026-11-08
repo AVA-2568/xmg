@@ -198,9 +198,18 @@ _xmg_is_valid_ipv6() {
     local ip="${1:-}"
     [ -n "$ip" ] || return 1
 
+    # 先剥 CIDR 后缀：wgcf 风格凭据写的是 ".../128"，
+    # 不剥会被判非法，导致每次 auto 都重注册覆盖账号，很快撞 CF 429
+    ip="${ip%%/*}"
+
     case "$ip" in
         *[!0-9a-fA-F:.]*) return 1 ;;
         *:::*) return 1 ;;
+    esac
+
+    # "1::2::3" 这类双 :: 非法，但不会被上面的 ::: 模式命中
+    case "$ip" in
+        *::*::*) return 1 ;;
     esac
 
     local has_dc=0
@@ -211,7 +220,6 @@ _xmg_is_valid_ipv6() {
     local -a parts=()
     local IFS=':'
     read -r -a parts <<< "$ip"
-    unset IFS
 
     local nz=0 p=""
     for p in "${parts[@]}"; do
@@ -219,7 +227,7 @@ _xmg_is_valid_ipv6() {
     done
 
     if [ "$has_dc" -eq 1 ]; then
-        # "::" 至少压缩一组，非空组最多 7 个
+        # "::" 至少压缩一组，非空组最多 7 个；尾随冒号（...:1f2a:）会多出空段
         [ "$nz" -le 7 ] && return 0
         return 1
     fi
@@ -936,11 +944,21 @@ EOF
     chmod 600 "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
 
     mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
+    # 保留原有的启用标记：register 会被 auto_apply 在 enable 之前调用，
+    # 整体重写会把 WARP_ENABLED/WARP_MODE 一并抹掉，导致配置里 warp-out 还在
+    # 而 status（只读 warp.env）报「未启用」
+    local _keep_flag="" _keep_mode=""
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        _keep_flag="$(grep -E '^WARP_ENABLED=' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -n 1 || true)"
+        _keep_mode="$(grep -E '^WARP_MODE=' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -n 1 || true)"
+    fi
     cat > "$XMG_WARP_ENV_FILE" <<EOF
 WARP_DEV_ID="$dev_id"
 WARP_ADDR_V4="$addr_v4"
 WARP_ADDR_V6="$addr_v6"
 EOF
+    [ -n "$_keep_flag" ] && printf '%s\n' "$_keep_flag" >> "$XMG_WARP_ENV_FILE"
+    [ -n "$_keep_mode" ] && printf '%s\n' "$_keep_mode" >> "$XMG_WARP_ENV_FILE"
     chmod 600 "$XMG_WARP_ENV_FILE" 2>/dev/null || true
 
     xmg_info "WARP 账号注册成功 (分配虚拟 IPv4: $addr_v4, 鉴权保留字段: [$r0, $r1, $r2])"
@@ -1738,11 +1756,10 @@ xmg_warp_disable() {
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
     xmg_info "正在停用 Xray 原生 WireGuard (WARP) 出站..."
 
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
+    # warp.env 的写入放到配置真正移除成功之后：
+    # 提前写 0 会让下面的失败分支（jq 解析失败、渲染失败、内核校验失败）
+    # 留下「warp.env=0 而配置里 warp-out 还在」的反向漂移 —— status 只读
+    # warp.env，会报「已停用」，而流量实际仍全部走 WARP。
 
     if declare -F xmg_state_stage >/dev/null 2>&1; then
         xmg_state_stage WARP_ENABLED 0
@@ -1851,6 +1868,13 @@ EOF_DISABLE_JQ
             fi
         fi
     fi
+    # 走到这里说明配置已确实移除（或本来就没有），此刻才写停用标记
+    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+    fi
+    echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
+
     xmg_info "Xray WARP 出站已关闭 (warp-out 已停用，已恢复直连出站)"
     return 0
 }

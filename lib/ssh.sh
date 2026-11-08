@@ -123,46 +123,62 @@ xmg_ssh_backup_file() {
     cp -a -- "$file" "$dir/$(basename "$file").$(date '+%Y%m%d-%H%M%S').bak"
 }
 
-# 在主配置与它 Include 的 drop-in 里按 sshd 语义查找键值
-#   此前回退分支只 grep 主配置，而 Debian/Ubuntu 默认把 Port 写在
-#   /etc/ssh/sshd_config.d/*.conf 里，主配置只有一行 Include：
-#   防火墙会据此只放行 22，默认 DROP 一开就失联；fail2ban 也会监控错端口。
-#   sshd 的 Include 支持通配符，相对路径以 /etc/ssh 为基准。
+# 按 sshd 语义在配置树里查找键值：主配置顺序读，Include 在出现位置就地展开，
+# 首个命中即返回。
+#   不能用「先查主配置、再查 drop-in」：sshd 是流式读取，主配置里写在 Include
+#   之后的 Port 已被 drop-in 覆盖，取它会得到与真实监听不符的端口，
+#   防火墙据此只放行旧端口 → 默认 DROP 一开即失联。
 _xmg_ssh_conf_lookup() {
     local key="$1"
     local main="${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}"
-    local line="" pat="" f="" val=""
+    [ -r "$main" ] || return 1
+    _xmg_ssh_conf_lookup_in "$main" "$key" 0
+}
+
+# $3 = 递归深度，防止 Include 成环
+_xmg_ssh_conf_lookup_in() {
+    local file="$1" key="$2" depth="${3:-0}"
+    local line="" pat="" f="" val="" k=""
     local -a inc=()
 
-    [ -r "$main" ] || return 1
+    [ "$depth" -le 8 ] || return 1
+    [ -r "$file" ] || return 1
 
-    val="$(awk -v k="$key" 'tolower($1) == tolower(k) {print $2; exit}' "$main" 2>/dev/null)"
-    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
-
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
         line="${line#"${line%%[![:space:]]*}"}"
         case "$line" in
-            [Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]*) ;;
-            *) continue ;;
+            ''|'#'*) continue ;;
         esac
-        pat="${line#*[[:space:]]}"
-        pat="${pat%%[[:space:]]*}"
-        case "$pat" in
-            ''|'# '*) continue ;;
-            /*) ;;
-            *) pat="/etc/ssh/$pat" ;;
-        esac
-        # 需要通配符展开，故意不加引号
-        # shellcheck disable=SC2086
-        for f in $pat; do
-            [ -r "$f" ] && inc+=("$f")
-        done
-    done < "$main"
 
-    for f in "${inc[@]}"; do
-        val="$(awk -v k="$key" 'tolower($1) == tolower(k) {print $2; exit}' "$f" 2>/dev/null)"
-        [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
-    done
+        case "$line" in
+            [Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]]*)
+                pat="${line#*[[:space:]]}"
+                pat="${pat%%[[:space:]]*}"
+                case "$pat" in
+                    '') continue ;;
+                    /*) ;;
+                    [A-Za-z]:[\\/]*) ;;   # 盘符路径（Git Bash 等环境），不拼 /etc/ssh
+                    *) pat="/etc/ssh/$pat" ;;
+                esac
+                # 需要通配符展开，故意不加引号
+                # shellcheck disable=SC2086
+                for f in $pat; do
+                    [ -r "$f" ] || continue
+                    val="$(_xmg_ssh_conf_lookup_in "$f" "$key" $((depth + 1)) 2>/dev/null || true)"
+                    [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+                done
+                continue
+                ;;
+        esac
+
+        k="${line%%[[:space:]]*}"
+        if [ "${k,,}" = "${key,,}" ]; then
+            val="${line#*[[:space:]]}"
+            val="${val%%[[:space:]]*}"
+            [ -n "$val" ] && { printf '%s\n' "$val"; return 0; }
+        fi
+    done < "$file"
+
     return 1
 }
 
@@ -427,27 +443,36 @@ _xmg_ssh_port_listening() {
 }
 
 # 还原 SSH 端口配置并重启（change_port 失败路径专用）
-#   drop-in 原本不存在时要删掉，否则残留的 Port 行会继续生效
+#   drop-in 原本不存在时要删掉，否则残留的 Port 行会继续生效。
+#   每个文件单独校验，任一失败都不假装成功 —— 回滚失败时用户只剩当前会话，
+#   必须给出可执行的急救指令。
 _xmg_ssh_restore_conf() {
     local bak_dropin="$1" bak_main="$2"
-    local ok=0
+    local ok=1
 
     if [ -n "$bak_dropin" ] && [ -f "$bak_dropin" ]; then
-        cp -a "$bak_dropin" "$XMG_SSH_DROPIN_CONF" 2>/dev/null && ok=1
+        cp -a "$bak_dropin" "$XMG_SSH_DROPIN_CONF" 2>/dev/null || ok=0
     elif [ -f "$XMG_SSH_DROPIN_CONF" ]; then
-        rm -f "$XMG_SSH_DROPIN_CONF" 2>/dev/null && ok=1
+        rm -f "$XMG_SSH_DROPIN_CONF" 2>/dev/null || ok=0
     fi
 
     if [ -n "$bak_main" ] && [ -f "$bak_main" ]; then
-        cp -a "$bak_main" "$XMG_SSH_CONFIG" 2>/dev/null && ok=1
+        cp -a "$bak_main" "$XMG_SSH_CONFIG" 2>/dev/null || ok=0
     fi
 
-    if [ "$ok" -eq 1 ]; then
-        xmg_ssh_apply >/dev/null 2>&1 || true
-        xmg_warn "已还原 SSH 端口配置并尝试重启 sshd"
-    else
-        xmg_error "回滚失败：未找到可用备份，请立即手动检查 $XMG_SSH_CONFIG"
+    if [ "$ok" -ne 1 ]; then
+        xmg_error "回滚未完全成功：部分配置文件未能还原"
+        xmg_error "请勿断开当前会话！立即检查 $XMG_SSH_CONFIG 并手工重启 sshd"
+        return 1
     fi
+
+    if ! xmg_ssh_apply >/dev/null 2>&1; then
+        xmg_error "配置已还原，但 sshd 未能启动"
+        xmg_error "请勿断开当前会话！执行: systemctl start ssh（或 rc-service sshd start）"
+        return 1
+    fi
+
+    xmg_warn "已还原 SSH 端口配置并重启 sshd"
     return 0
 }
 
@@ -504,13 +529,25 @@ xmg_ssh_change_port() {
             || true
     fi
 
-    # 改前留底：drop-in 与主配置都要备份，失败路径要原样还原
+    # 改前留底：drop-in 与主配置都要备份。
+    # 备份失败必须中止 —— 没有备份就改端口，失败时无从回滚；
+    # 而把 bak 置空会让回滚退化成「删掉 drop-in」，等于静默恢复密码登录。
     local bak_dropin="" bak_main=""
     if [ -f "$XMG_SSH_DROPIN_CONF" ]; then
-        bak_dropin="$(mktemp)" && cp -a "$XMG_SSH_DROPIN_CONF" "$bak_dropin" 2>/dev/null || bak_dropin=""
+        bak_dropin="$(mktemp)" || bak_dropin=""
+        if [ -z "$bak_dropin" ] || ! cp -a "$XMG_SSH_DROPIN_CONF" "$bak_dropin" 2>/dev/null; then
+            rm -f "$bak_dropin" 2>/dev/null || true
+            xmg_error "备份 $XMG_SSH_DROPIN_CONF 失败，已中止（无备份不可改端口）"
+            return 1
+        fi
     fi
     if [ -f "$XMG_SSH_CONFIG" ]; then
-        bak_main="$(mktemp)" && cp -a "$XMG_SSH_CONFIG" "$bak_main" 2>/dev/null || bak_main=""
+        bak_main="$(mktemp)" || bak_main=""
+        if [ -z "$bak_main" ] || ! cp -a "$XMG_SSH_CONFIG" "$bak_main" 2>/dev/null; then
+            rm -f "$bak_main" "$bak_dropin" 2>/dev/null || true
+            xmg_error "备份 $XMG_SSH_CONFIG 失败，已中止（无备份不可改端口）"
+            return 1
+        fi
     fi
 
     if ! xmg_ssh_set_conf Port "$port"; then
@@ -521,9 +558,20 @@ xmg_ssh_change_port() {
 
     if ! xmg_ssh_apply; then
         xmg_error "sshd 未能以新端口启动，正在回滚"
-        _xmg_ssh_restore_conf "$bak_dropin" "$bak_main"
+        _xmg_ssh_restore_conf "$bak_dropin" "$bak_main" || true
         rm -f "$bak_dropin" "$bak_main" 2>/dev/null || true
         return 1
+    fi
+
+    # 无法自动重启的环境（容器/无 init）不做监听验证：sshd 根本没重载，
+    # 验证必然失败并把正确配置回滚掉。改为提示人工验证。
+    if ! xmg_init_use_systemd_units && ! xmg_svc_supported; then
+        rm -f "$bak_dropin" "$bak_main" 2>/dev/null || true
+        echo
+        xmg_info "SSH 端口配置已写入: $port"
+        xmg_warn "本环境无法自动重启 sshd，配置尚未生效"
+        xmg_warn "请手动重启后验证: ssh -p $port user@host"
+        return 0
     fi
 
     # 重启成功不等于端口真的在听：端口被占用或绑定失败时 sshd 可能已退出
@@ -531,19 +579,21 @@ xmg_ssh_change_port() {
     _xmg_ssh_port_listening "$port" || lrc=$?
     if [ "$lrc" -eq 1 ]; then
         xmg_error "新端口 $port 未进入监听，正在回滚 SSH 端口配置"
-        _xmg_ssh_restore_conf "$bak_dropin" "$bak_main"
+        _xmg_ssh_restore_conf "$bak_dropin" "$bak_main" || true
         rm -f "$bak_dropin" "$bak_main" 2>/dev/null || true
         return 1
-    elif [ "$lrc" -eq 2 ]; then
-        xmg_warn "未找到 ss/netstat，无法自动确认新端口是否在监听"
-        xmg_warn "请立即新开终端验证: ssh -p $port 用户@主机"
     fi
 
     rm -f "$bak_dropin" "$bak_main" 2>/dev/null || true
 
     echo
-    xmg_info "SSH 端口已修改为: $port（已确认监听）"
-    xmg_warn "请勿关闭当前会话！新开终端测试: ssh -p $port user@host"
+    if [ "$lrc" -eq 2 ]; then
+        xmg_info "SSH 端口已修改为: $port"
+        xmg_warn "未找到 ss/netstat，未能确认监听状态；请立即新开终端验证: ssh -p $port user@host"
+    else
+        xmg_info "SSH 端口已修改为: $port（已确认监听）"
+        xmg_warn "请勿关闭当前会话！新开终端测试: ssh -p $port user@host"
+    fi
     xmg_warn "确认新端口可登录后，可删除旧端口放行规则"
 }
 

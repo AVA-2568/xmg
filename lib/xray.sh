@@ -80,6 +80,16 @@ xmg_xray_binary_exists() {
 }
 
 xmg_xray_get_bin() {
+    # override / 显式路径优先：doctor、selftest 等只读模块都走这里，
+    # 若排在 PATH 之后，自定义安装路径与测试桩都会被判定为「内核未安装」
+    if [ -n "${XMG_XRAY_BIN_OVERRIDE:-}" ] && [ -x "$XMG_XRAY_BIN_OVERRIDE" ]; then
+        printf '%s\n' "$XMG_XRAY_BIN_OVERRIDE"
+        return 0
+    fi
+    if [ -n "${XMG_XRAY_BIN:-}" ] && [ -x "$XMG_XRAY_BIN" ]; then
+        printf '%s\n' "$XMG_XRAY_BIN"
+        return 0
+    fi
     if xmg_cmd_exists xray; then
         command -v xray
         return 0

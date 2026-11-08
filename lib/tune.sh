@@ -635,7 +635,11 @@ xmg_tune_net_optimize() {
         xmg_warn "部分内核参数未能应用，配置已落盘；换支持的内核或重启后会自动重试"
     fi
 
-    xmg_tune_write_limits
+    # 菜单路径是 set +e，不检查返回码就会在 limits 写入失败后继续打「优化完成」
+    if ! xmg_tune_write_limits; then
+        xmg_warn "nofile limits 未生效，其余网络参数已应用"
+        return 1
+    fi
 
     xmg_info "内核网络参数优化完成（档位: $profile）"
     xmg_info "配置文件: $XMG_TUNE_SYSCTL_NET_CONF"

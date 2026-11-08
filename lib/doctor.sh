@@ -850,6 +850,13 @@ xmg_doctor_run() {
         xmg_color_init
     fi
 
+    # 体检要读入站开关、端口、证书路径，而 state.env 不会自动进内存。
+    # 必须在主 shell 加载：放进 $(...) 采集函数里只影响子 shell，
+    # 证书那一段照样读不到 PROXY_VLESS_CERT_FILE。
+    if declare -F xmg_state_load >/dev/null 2>&1; then
+        xmg_state_load >/dev/null 2>&1 || true
+    fi
+
     local c_reset="${XMG_C_RESET:-}"
     local c_bold="${XMG_C_BOLD:-}"
     local c_green="${XMG_C_GREEN:-}"

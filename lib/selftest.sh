@@ -330,7 +330,13 @@ _st_check_ports() {
     # state.env 不会自动进内存：不加载的话下面所有 xmg_state_get 都拿默认值 0，
     # 断言永远走到「未启用任何入站」分支，端口没监听也照样全绿。
     if declare -F xmg_state_load >/dev/null 2>&1; then
-        xmg_state_load >/dev/null 2>&1 || true
+        if ! xmg_state_load >/dev/null 2>&1; then
+            # 有配置却读不到状态，说明状态层缺失或权限不足
+            # （state 目录 700），端口断言已退化为空断言，必须明确报出来
+            if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ]; then
+                _st_warn "state.env 不可读，端口检查已跳过（非 root 运行或状态文件缺失）"
+            fi
+        fi
     fi
 
     local socks_on="" vless_on="" reality_on="" port="" checked=0

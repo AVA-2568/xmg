@@ -144,10 +144,14 @@ xmg_uninstall_remove_command_link() {
 xmg_uninstall_remove_xmg_home() {
     xmg_uninstall_check_safe_home "${XMG_HOME:-}" || return 1
     if [ -d "$XMG_HOME" ]; then
-        # 最后一道保险：目录必须带 XMG 特征，避免 XMG_HOME 被误设/注入后删掉别人的数据
+        # 最后一道保险：目录必须带 XMG 特征，避免 XMG_HOME 被误设/注入后删掉别人的数据。
+        # 注意不能 return 1：入口是 set -Eeuo pipefail，非 0 会截断整个卸载，
+        # 把 systemd drop-in、OpenRC 脚本、挂在 INPUT 上的 DROP 链全部留在机器上，
+        # 而命令入口已经删了 —— 用户既回不去也清不干净。这里只跳过主目录。
         if [ ! -d "$XMG_HOME/lib" ] && [ ! -x "$XMG_HOME/bin/xmg" ] && [ ! -f "$XMG_HOME/xmg.files" ]; then
-            xmg_error "拒绝删除: $XMG_HOME 不像 XMG 安装目录（缺少 lib/ 与 bin/xmg）"
-            return 1
+            xmg_warn "跳过主目录删除: $XMG_HOME 不像 XMG 安装目录（缺少 lib/、bin/xmg 或 xmg.files）"
+            xmg_warn "请确认 XMG_HOME 是否被误设；其余组件（服务、防火墙、命令入口）将继续清理"
+            return 0
         fi
         xmg_info "正在删除 XMG 统一目录: $XMG_HOME"
         rm -rf "$XMG_HOME" && xmg_info "已删除: $XMG_HOME" || xmg_warn "删除 $XMG_HOME 失败"

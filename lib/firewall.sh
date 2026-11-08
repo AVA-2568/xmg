@@ -691,9 +691,14 @@ _xmg_fw_ensure_ssh_allowed() {
         if ufw status 2>/dev/null | grep -qE "^${ssh_port}/tcp[[:space:]]+ALLOW"; then
             return 0
         fi
+        # 同端口存在 DENY 时，allow 不一定能覆盖（最终顺序由 ufw 决定），先删再放行
+        ufw delete deny "${ssh_port}/tcp" >/dev/null 2>&1 || true
         if ufw allow "${ssh_port}/tcp" comment 'XMG SSH guard' >/dev/null 2>&1; then
-            xmg_info "已自动放行当前 SSH 端口 ${ssh_port}/tcp，避免启用后锁死"
-            return 0
+            # 复核：命令返回 0 不等于最终规则真的放行
+            if ufw status 2>/dev/null | grep -qE "^${ssh_port}/tcp[[:space:]]+ALLOW"; then
+                xmg_info "已自动放行当前 SSH 端口 ${ssh_port}/tcp，避免启用后锁死"
+                return 0
+            fi
         fi
         xmg_error "自动放行 SSH 端口 ${ssh_port}/tcp 失败，已中止启用（防止失联）"
         return 1
@@ -712,11 +717,11 @@ xmg_firewall_enable() {
     xmg_warn "启用防火墙可能导致当前 SSH 连接断开，请确认 SSH 端口已经放行"
     xmg_warn "建议先执行“放行 SSH/HTTP/HTTPS”，再启用防火墙"
 
-    # 放行必须在任何默认拒绝策略生效之前完成，后端无关
-    _xmg_fw_ensure_ssh_allowed || return 1
-
     if xmg_firewall_is_ufw; then
+        # 守卫必须在 ufw 本体就绪之后：未装 ufw 时所有 ufw 调用都是 127，
+        # 会把「本机还没装防火墙」误报成「放行 SSH 失败」并挡住安装引导
         xmg_firewall_need_ufw
+        _xmg_fw_ensure_ssh_allowed || return 1
         xmg_firewall_fix_ipv6
 
         if xmg_confirm "确认启用 UFW 并设置默认策略为 deny incoming / allow outgoing?"; then
@@ -731,6 +736,7 @@ xmg_firewall_enable() {
     fi
 
     xmg_fw_ipt_ensure_tools || return 1
+    _xmg_fw_ensure_ssh_allowed || return 1
 
     if xmg_confirm "确认启用 iptables 防火墙 (默认拒绝入站 / 放通已配置端口)?"; then
         mkdir -p "$XMG_FW_RULES_DIR" || return 1

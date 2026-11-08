@@ -1095,7 +1095,11 @@ xmg_proxy_acme_issue() {
         xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || return 4
         xmg_state_stage PROXY_VLESS_CERT_FILE "$XMG_ACME_CERT_FILE" || return 4
         xmg_state_stage PROXY_VLESS_KEY_FILE "$XMG_ACME_KEY_FILE" || return 4
-        xmg_state_commit_draft || return 4
+        # 与 self_sign_cert 同源：apply 事务内只 stage，统一由结尾的
+        # xmg_state_commit 提交，否则校验失败时会留下 state 已改、config 未改
+        if [ "${XMG_PROXY_TXN:-0}" != "1" ]; then
+            xmg_state_commit_draft || return 4
+        fi
         xmg_info "ACME 正规证书已就绪: $XMG_ACME_CERT_FILE（执行 apply 后生效）"
         return 0
     fi
