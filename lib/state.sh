@@ -981,6 +981,10 @@ _xmg_xray_reload() {
     fi
 
     if ! xmg_svc_supported && ! xmg_init_use_systemd_units; then
+        # 不能静默当作「无需重启」：配置此时已原子替换，WireGuard 出站等只在进程
+        # 启动时建立，用户不重启核心就会看到「提示成功、实际没变化」
+        xmg_warn "当前环境未检测到可用的服务管理器，配置已写入但不会自动生效。"
+        xmg_warn "请手动重启 Xray 使其生效: xmg xray restart 或 systemctl restart ${XMG_XRAY_SERVICE:-xray}"
         return 0
     fi
 

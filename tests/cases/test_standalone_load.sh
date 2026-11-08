@@ -109,3 +109,64 @@ _RES_F2B="$(bash -c '
 t_contains "fail2ban jail 配置含自定义端口" "$_RES_F2B" "port = ssh,2222"
 t_contains "fail2ban jail 配置含 systemd 后端" "$_RES_F2B" "backend = systemd"
 t_contains "fail2ban jail 配置含 auto 后端" "$_RES_F2B" "backend = auto"
+
+# --- 5. warp.sh 独立加载：加载期零污染，调用期能拿到硬重启 ---
+# xmg warp enable/disable 走的是 warp 分支，只加载 warp.sh。
+# 若拿不到 xmg_xray_restart_hard，就只剩裸 xmg_svc_restart_verified：
+# 少了 unit 自愈与 daemon-reload，WireGuard 出站换了配置却不换进程，
+# 表现为「命令提示成功、实际要手动重启核心」。
+# 但 xray.sh 不能在加载期 source：它会引入优先级更高的 xmg_xray_get_bin，
+# 把 selftest 的内核探测从 xmg_xray_binary（认 override）改道而失准。
+_RES_WARP="$(bash -c '
+    SRC="'"$SRC"'"
+    XMG_HOME="$(mktemp -d)"
+    XMG_LIB_DIR="$SRC/lib"
+    XMG_ETC_DIR="$XMG_HOME/etc"
+    export XMG_HOME XMG_LIB_DIR XMG_ETC_DIR
+    source "$XMG_LIB_DIR/warp.sh"
+
+    declare -F _warp_load_xray_lib       >/dev/null || exit 30
+    declare -F _warp_restart_xray        >/dev/null || exit 31
+    declare -F _warp_can_manage_service  >/dev/null || exit 32
+    declare -F _warp_warn_manual_restart >/dev/null || exit 33
+    declare -F xmg_warp_enable           >/dev/null || exit 34
+    declare -F xmg_warp_disable          >/dev/null || exit 35
+
+    # 加载期不得引入 xray.sh
+    declare -F xmg_xray_restart_hard >/dev/null && exit 36
+    declare -F xmg_xray_get_bin      >/dev/null && exit 37
+
+    # 调用期必须能按需拿到
+    _warp_load_xray_lib >/dev/null 2>&1 || exit 38
+    declare -F xmg_xray_restart_hard >/dev/null || exit 39
+
+    echo "WARP_OK"
+    rm -rf "$XMG_HOME" 2>/dev/null || true
+    exit 0
+')"
+_WARP_RC=$?
+t_equals "warp.sh 独立加载：加载期不引入 xray.sh、调用期可拿到硬重启" "$_WARP_RC" "0"
+t_contains "warp.sh 按需加载链路可用" "$_RES_WARP" "WARP_OK"
+
+# --- 6. state.sh 独立加载：提交路径自带重启与自愈，不依赖 xray.sh ---
+# state.sh 刻意不 source xray.sh：那会引入优先级更高的 xmg_xray_get_bin，
+# 把 selftest 的内核探测从 xmg_xray_binary（认 override）改道而失准。
+# 它自身已完成 unit 自愈 + daemon-reload + stop-wait-start + 失败日志。
+_RES_STATE="$(bash -c '
+    SRC="'"$SRC"'"
+    XMG_HOME="$(mktemp -d)"
+    XMG_LIB_DIR="$SRC/lib"
+    XMG_ETC_DIR="$XMG_HOME/etc"
+    export XMG_HOME XMG_LIB_DIR XMG_ETC_DIR
+    source "$XMG_LIB_DIR/state.sh"
+
+    declare -F _xmg_xray_reload >/dev/null || exit 40
+    declare -F xmg_svc_restart_verified >/dev/null || exit 41
+    declare -F xmg_xray_binary >/dev/null || exit 42
+    echo "STATE_OK"
+    rm -rf "$XMG_HOME" 2>/dev/null || true
+    exit 0
+')"
+_STATE_RC=$?
+t_equals "state.sh 独立加载自带重启与自愈" "$_STATE_RC" "0"
+t_contains "state.sh 独立加载后 reload 链路可用" "$_RES_STATE" "STATE_OK"

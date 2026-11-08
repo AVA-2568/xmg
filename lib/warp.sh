@@ -37,6 +37,23 @@ if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
     unset _xmg_os_f
 fi
 
+# 注意：xray.sh 必须「按需」加载，不能在模块加载期 source。
+#   xray.sh 加载时会定型 XMG_INITD_DIR / XMG_XRAY_OPENRC_SCRIPT，并引入优先级
+#   更高的 xmg_xray_get_bin；一旦在加载期引入，selftest 的内核探测就会从
+#   xmg_xray_binary（认 XMG_XRAY_BIN_OVERRIDE）改走 get_bin 而失准。
+_warp_load_xray_lib() {
+    declare -F xmg_xray_restart_hard >/dev/null 2>&1 && return 0
+    local _f=""
+    for _f in "${XMG_LIB_DIR:-/opt/xmg/lib}/xray.sh" "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/xray.sh"; do
+        if [ -r "$_f" ]; then
+            # shellcheck source=/dev/null
+            source "$_f"
+            declare -F xmg_xray_restart_hard >/dev/null 2>&1 && return 0
+        fi
+    done
+    return 1
+}
+
 # XMG_MENU_LABEL: WARP 网络增强
 
 # ===== 默认配置与路径 =====
@@ -1262,6 +1279,9 @@ xmg_warp_enable() {
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
+    # 把实际生效路径交给 xray.sh 的硬重启：否则 unit 自愈会按默认路径回写，
+    # 服务被拉起后读的是另一份配置，表现为「改了却没生效，必须手工重启」
+    [ -n "$xray_cfg" ] && export XMG_XRAY_CONFIG="$xray_cfg"
 
     if [ -f "$xray_cfg" ]; then
         # ===== 增量无损合成: 100% 保留现有所有 inbounds/节点/证书/路由，仅注入/置顶 warp-out =====
@@ -1517,7 +1537,7 @@ EOF_GLOBAL_JQ
     fi
 
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
-    if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && _warp_can_manage_service; then
         xmg_svc_stop xmg-warp >/dev/null 2>&1 || true
         xmg_svc_disable xmg-warp >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xmg-warp.service 2>/dev/null || true
@@ -1528,9 +1548,12 @@ EOF_GLOBAL_JQ
 
     # 7. 无论服务当前是否在运行，都要走一次硬重启（停→启→验证 active）
     #    WARP 出站只在进程启动时建立，配置变了必须换进程；服务已停时也要拉起
-    if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
+    if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
-        if ! _warp_restart_xray 2>/dev/null; then
+        if ! _warp_can_manage_service; then
+            # 无服务管理器不能回滚：配置本身是好的，只是本环境无法托管进程
+            _warp_warn_manual_restart "生效"
+        elif ! _warp_restart_xray 2>/dev/null; then
             xmg_error "重启 $s_name 服务失败，正在自动回滚 WARP 配置..."
             if [ -n "${bak:-}" ] && [ -f "$bak" ]; then
                 cp -f "$bak" "$xray_cfg" 2>/dev/null || true
@@ -1552,8 +1575,9 @@ EOF_GLOBAL_JQ
                 fi
             fi
             return 1
+        else
+            xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
         fi
-        xmg_info "已成功重启 $s_name 服务并确认运行健康 (active)"
     fi
 
     xmg_info "Xray WARP 出站已成功启用 (出站标签: warp-out, 模式: $mode)"
@@ -1563,13 +1587,32 @@ EOF_GLOBAL_JQ
 }
 
 # WARP 变更后重启 Xray
-# 优先用 xray.sh 的硬重启（含注册文件自愈）；未加载时退回服务抽象层
+# 优先用 xray.sh 的硬重启（含注册文件自愈）；拿不到时退回服务抽象层
 _warp_restart_xray() {
-    if declare -F xmg_xray_restart_hard >/dev/null 2>&1; then
+    if _warp_load_xray_lib; then
         xmg_xray_restart_hard && return 0
         return 1
     fi
     xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8
+}
+
+# 当前环境能否托管服务生命周期（容器 / 无 init 的手工部署会返回假）
+_warp_can_manage_service() {
+    xmg_svc_supported 2>/dev/null || xmg_init_use_systemd_units 2>/dev/null
+}
+
+# 配置已落盘但无法自动重启时必须明确告知
+#   WireGuard 出站只在进程启动时建立，不换进程 = 配置不生效。
+#   静默跳过会让用户以为「启用成功」却始终没网，只能自己猜到手要重启核心。
+_warp_warn_manual_restart() {
+    local action="${1:-生效}"
+    local svc="${XMG_XRAY_SERVICE:-xray}"
+    xmg_warn "配置已写入，但当前环境未检测到可用的服务管理器，无法自动重启 ${svc} 使配置${action}。"
+    xmg_warn "请手动执行以下任一命令完成${action}："
+    xmg_warn "  xmg xray restart"
+    xmg_warn "  systemctl restart ${svc}      # systemd"
+    xmg_warn "  rc-service ${svc} restart     # OpenRC"
+    return 0
 }
 
 # WARP 让单栈机获得双栈出口后，DNS / 出站策略要跟着放开
@@ -1655,6 +1698,9 @@ xmg_warp_disable() {
     local xray_cfg=""
     xray_cfg="$(_xmg_warp_find_xray_config)"
     xmg_info "定位到生效的 Xray 主配置文件: $xray_cfg"
+    # 把实际生效路径交给 xray.sh 的硬重启：否则 unit 自愈会按默认路径回写，
+    # 服务被拉起后读的是另一份配置，表现为「改了却没生效，必须手工重启」
+    [ -n "$xray_cfg" ] && export XMG_XRAY_CONFIG="$xray_cfg"
 
     if [ -f "$xray_cfg" ]; then
         local bak=""
@@ -1732,9 +1778,11 @@ EOF_DISABLE_JQ
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
 
-        if [ "${XMG_TEST_MODE:-0}" != "1" ] && { xmg_svc_supported || xmg_init_use_systemd_units; }; then
+        if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
             local s_name="${XMG_XRAY_SERVICE:-xray}"
-            if _warp_restart_xray >/dev/null 2>&1; then
+            if ! _warp_can_manage_service; then
+                _warp_warn_manual_restart "关停"
+            elif _warp_restart_xray >/dev/null 2>&1; then
                 xmg_info "已成功重启 $s_name 服务应用变更"
             else
                 xmg_warn "$s_name 重启失败，请执行 xmg xray restart 确认状态"
@@ -1792,7 +1840,7 @@ xmg_warp_uninstall() {
     fi
 
     # 3. 清理历史遗留 wireproxy 与 wg-quick 服务
-    if xmg_svc_supported || xmg_init_use_systemd_units; then
+    if _warp_can_manage_service; then
         xmg_svc_stop xmg-warp >/dev/null 2>&1 || true
         xmg_svc_disable xmg-warp >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/xmg-warp.service 2>/dev/null || true
