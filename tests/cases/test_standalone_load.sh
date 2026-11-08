@@ -22,7 +22,7 @@ _RES_PROXY="$(bash -c '
     # 执行 status 不崩且输出正确
     status_out="$(xmg_proxy_status)" || exit 13
     echo "$status_out"
-    rm -rf "$XMG_HOME"
+    rm -rf "$XMG_HOME" 2>/dev/null || true
 ')"
 _PROXY_RC=$?
 t_equals "proxy.sh 独立加载并执行 status 成功" "$_PROXY_RC" "0"
@@ -47,7 +47,7 @@ _RES_CORE="$(bash -c '
     # 执行 status 不崩且读取通道正常
     status_out="$(xmg_core_status)" || exit 22
     echo "$status_out"
-    rm -rf "$XMG_HOME"
+    rm -rf "$XMG_HOME" 2>/dev/null || true
 ')"
 _CORE_RC=$?
 t_equals "core.sh 独立加载并执行 status 成功" "$_CORE_RC" "0"

@@ -19,7 +19,9 @@ DETECT_CONTENT="$(cat "$SRC/lib/detect.sh")"
 DOCTOR_CONTENT="$(cat "$SRC/lib/doctor.sh")"
 
 t_contains "tune.sh 头部声明规范标签" "$TUNE_CONTENT" "# XMG_MENU_LABEL: 系统与网络调优"
-t_contains "detect.sh 头部声明规范标签" "$DETECT_CONTENT" "# XMG_MENU_LABEL: 系统环境感知"
+# detect.sh 是基础能力层，只被其它模块调用、没有独立交互入口；
+# menu.sh 会扫描 lib/*.sh 的标签自动生成菜单项，给它加标签反而多出一个点不动的项
+t_not_contains "detect.sh 作为基础模块不参与菜单（无标签）" "$DETECT_CONTENT" "# XMG_MENU_LABEL:"
 t_contains "doctor.sh 头部声明规范标签" "$DOCTOR_CONTENT" "# XMG_MENU_LABEL: 系统健康体检"
 
 # ==================================================================

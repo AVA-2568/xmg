@@ -917,9 +917,11 @@ xmg_state_validate_config() {
 
     local logdir="${XMG_XRAY_LOG_DIR:-${XMG_LOG_DIR:-/opt/xmg/log}/xray}"
     mkdir -p "$logdir" 2>/dev/null || true
-    chmod 777 "$logdir" 2>/dev/null || true
+    # 与 commit / render 保持一致的 750 / 640：
+    # 777 允许任意本地用户删除目录里的文件并换成符号链接，Xray 以 root 追加写入即被劫持
+    chmod 750 "$logdir" 2>/dev/null || true
     touch "$logdir/error.log" 2>/dev/null || true
-    chmod 666 "$logdir/error.log" 2>/dev/null || true
+    chmod 640 "$logdir/error.log" 2>/dev/null || true
 
     local err_out=""
     if ! err_out="$("$bin" run -test -format json -c "$cfg" 2>&1)"; then

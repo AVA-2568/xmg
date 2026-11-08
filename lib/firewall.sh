@@ -672,11 +672,48 @@ xmg_firewall_allow_custom_port() {
     xmg_info "已放行 ${port}/${proto}"
 }
 
+# 启用防火墙前确保当前 SSH 端口已放行 —— 两种后端共用
+#   这是最后一道防呆：默认 deny/DROP 一旦生效而 SSH 端口没放行，当前会话断开即失联。
+#   UFW 后端此前完全没有这一步，只有 iptables 分支做了。
+_xmg_fw_ensure_ssh_allowed() {
+    local ssh_port=""
+    if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
+        ssh_port="$(xmg_ssh_get_port 2>/dev/null || true)"
+    elif declare -F xmg_ssh_effective >/dev/null 2>&1; then
+        ssh_port="$(xmg_ssh_effective port 2>/dev/null || true)"
+    fi
+    case "$ssh_port" in
+        ''|*[!0-9]*) ssh_port="22" ;;
+    esac
+    [ "$ssh_port" -ge 1 ] 2>/dev/null && [ "$ssh_port" -le 65535 ] 2>/dev/null || ssh_port=22
+
+    if xmg_firewall_is_ufw; then
+        if ufw status 2>/dev/null | grep -qE "^${ssh_port}/tcp[[:space:]]+ALLOW"; then
+            return 0
+        fi
+        if ufw allow "${ssh_port}/tcp" comment 'XMG SSH guard' >/dev/null 2>&1; then
+            xmg_info "已自动放行当前 SSH 端口 ${ssh_port}/tcp，避免启用后锁死"
+            return 0
+        fi
+        xmg_error "自动放行 SSH 端口 ${ssh_port}/tcp 失败，已中止启用（防止失联）"
+        return 1
+    fi
+
+    if ! xmg_fw_allow_list | grep -qE "^${ssh_port}/(tcp|udp)$"; then
+        xmg_fw_allow_add "$ssh_port" tcp || return 1
+        xmg_info "已自动放行当前 SSH 端口 ${ssh_port}/tcp，避免启用后锁死"
+    fi
+    return 0
+}
+
 xmg_firewall_enable() {
     xmg_require_root
 
     xmg_warn "启用防火墙可能导致当前 SSH 连接断开，请确认 SSH 端口已经放行"
     xmg_warn "建议先执行“放行 SSH/HTTP/HTTPS”，再启用防火墙"
+
+    # 放行必须在任何默认拒绝策略生效之前完成，后端无关
+    _xmg_fw_ensure_ssh_allowed || return 1
 
     if xmg_firewall_is_ufw; then
         xmg_firewall_need_ufw
@@ -694,19 +731,6 @@ xmg_firewall_enable() {
     fi
 
     xmg_fw_ipt_ensure_tools || return 1
-
-    # 关键防呆：启用前必须至少放行当前 SSH 端口
-    local ssh_port=""
-    if declare -F xmg_ssh_effective >/dev/null 2>&1; then
-        ssh_port="$(xmg_ssh_effective port 2>/dev/null || true)"
-    fi
-    case "$ssh_port" in
-        ''|*[!0-9]*) ssh_port="22" ;;
-    esac
-    if ! xmg_fw_allow_list | grep -qE "^${ssh_port}/(tcp|udp)$"; then
-        xmg_fw_allow_add "$ssh_port" tcp
-        xmg_info "已自动放行当前 SSH 端口 ${ssh_port}/tcp，避免启用后锁死"
-    fi
 
     if xmg_confirm "确认启用 iptables 防火墙 (默认拒绝入站 / 放通已配置端口)?"; then
         mkdir -p "$XMG_FW_RULES_DIR" || return 1

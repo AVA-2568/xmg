@@ -461,13 +461,27 @@ EOF
 
 # 写入 nofile limits：PAM limits + systemd DefaultLimitNOFILE
 xmg_tune_write_limits() {
-    cat > "$XMG_TUNE_LIMITS_CONF" <<EOF
+    local write_ok=1
+
+    # Alpine 默认没有 /etc/security；目录不建就直接 cat 会失败，
+    # 而下面还会照常打印「已写入」，调用方（set -Eeuo pipefail）则在此静默中止
+    if mkdir -p "$(dirname "$XMG_TUNE_LIMITS_CONF")" 2>/dev/null; then
+        cat > "$XMG_TUNE_LIMITS_CONF" 2>/dev/null <<EOF || write_ok=0
 # XMG: nofile limits（由 xmg tune 生成）
 * soft nofile $XMG_TUNE_NOFILE
 * hard nofile $XMG_TUNE_NOFILE
 root soft nofile $XMG_TUNE_NOFILE
 root hard nofile $XMG_TUNE_NOFILE
 EOF
+    else
+        write_ok=0
+    fi
+
+    if [ "$write_ok" -ne 1 ]; then
+        xmg_error "写入 $XMG_TUNE_LIMITS_CONF 失败（目录不可写或磁盘满），nofile limits 未生效"
+        return 1
+    fi
+
     # Alpine/OpenRC 没有 PAM，limits.d 根本不会被读取，不能对外宣称"已生效"
     if xmg_init_is_openrc; then
         xmg_warn "$XMG_TUNE_LIMITS_CONF 已写入，但 Alpine/OpenRC 无 PAM，该文件不会生效"

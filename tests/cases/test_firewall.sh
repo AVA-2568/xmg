@@ -21,7 +21,7 @@ _RES_FW_LOAD="$(bash -c '
     declare -F xmg_firewall_allow_custom_port >/dev/null || exit 12
     declare -F xmg_firewall_fix_ipv6 >/dev/null || exit 13
     declare -F xmg_info >/dev/null || exit 14
-    rm -rf "$XMG_HOME"
+    rm -rf "$XMG_HOME" 2>/dev/null || true
 ')"
 _LOAD_RC=$?
 t_equals "firewall.sh 独立加载自包含测试成功" "$_LOAD_RC" "0"

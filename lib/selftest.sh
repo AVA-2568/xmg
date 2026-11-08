@@ -327,9 +327,16 @@ _st_check_ports() {
         return 0
     fi
 
-    local socks_on="" vless_on="" port="" checked=0
+    # state.env 不会自动进内存：不加载的话下面所有 xmg_state_get 都拿默认值 0，
+    # 断言永远走到「未启用任何入站」分支，端口没监听也照样全绿。
+    if declare -F xmg_state_load >/dev/null 2>&1; then
+        xmg_state_load >/dev/null 2>&1 || true
+    fi
+
+    local socks_on="" vless_on="" reality_on="" port="" checked=0
     socks_on="$(xmg_state_get PROXY_SOCKS_ENABLED "0" 2>/dev/null || echo 0)"
     vless_on="$(xmg_state_get PROXY_VLESS_ENABLED "0" 2>/dev/null || echo 0)"
+    reality_on="$(xmg_state_get PROXY_REALITY_ENABLED "0" 2>/dev/null || echo 0)"
 
     if [ "$socks_on" = "1" ]; then
         port="$(xmg_state_get PROXY_SOCKS_PORT "1080" 2>/dev/null || echo 1080)"
@@ -348,6 +355,16 @@ _st_check_ports() {
             _st_pass "VLESS 端口 $port 处于 LISTEN"
         else
             _st_fail "VLESS 端口 $port 未监听"
+        fi
+    fi
+
+    if [ "$reality_on" = "1" ]; then
+        port="$(xmg_state_get PROXY_REALITY_PORT "8443" 2>/dev/null || echo 8443)"
+        checked=$((checked + 1))
+        if _st_port_listening "$port"; then
+            _st_pass "REALITY 端口 $port 处于 LISTEN"
+        else
+            _st_fail "REALITY 端口 $port 未监听"
         fi
     fi
 

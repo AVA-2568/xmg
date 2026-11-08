@@ -180,6 +180,11 @@ _xmg_stage_onoff() {
 
 # ===== apply =====
 xmg_proxy_apply() {
+    # 事务标记：apply 全程只 stage，不中途落盘。
+    # 子函数（自签证书兜底等）据此跳过 commit_draft，统一由结尾的
+    # xmg_state_commit 提交；否则校验失败时 state 已被写脏。
+    local XMG_PROXY_TXN=1
+
     declare -F xmg_state_init >/dev/null 2>&1 && xmg_state_init
     xmg_proxy_parse_args "$@" || return 2
     _xmg_stage_reset
@@ -1139,7 +1144,11 @@ xmg_proxy_self_sign_cert() {
             xmg_state_stage PROXY_VLESS_CERT_SOURCE "user" || true
             xmg_state_stage PROXY_VLESS_CERT_FILE "$cert" || true
             xmg_state_stage PROXY_VLESS_KEY_FILE "$key" || true
-            xmg_state_commit_draft || true
+            # apply 事务内只 stage：提前落盘会让「校验失败不落盘」的承诺失效，
+            # 留下 config 回滚了但 state 已改的幽灵状态。独立调用（菜单）才提交。
+            if [ "${XMG_PROXY_TXN:-0}" != "1" ]; then
+                xmg_state_commit_draft || true
+            fi
             xmg_info "自签名证书已生成就绪: $cert"
             xmg_info "提示：请在 Cloudflare 后台 SSL/TLS 模式选择 Full（完全）"
             return 0

@@ -118,6 +118,17 @@ xmg_monitor_loop() {
                 *)
                     ;;
             esac
+        else
+            # read -t 超时返回 >128（正常刷新）；其余非 0 是 EOF——
+            # stdin 关闭（Ctrl-D、</dev/null、cron、SSH 断链）时 read 立即失败，
+            # 不退出就会变成无间隔重绘，0.5 核机器上直接打满 CPU
+            local _rc=$?
+            if [ "$_rc" -le 128 ]; then
+                xmg_monitor_show_cursor
+                xmg_monitor_clear
+                trap - EXIT
+                return 0
+            fi
         fi
     done
 }

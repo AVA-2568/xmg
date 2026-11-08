@@ -40,6 +40,9 @@ XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
 XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
 
 # ===== 危险路径检测与拦截 =====
+# 仅做字符串比较挡不住 /opt/..、/tmp/../ 这类写法：
+# 尾斜杠能去掉，但 ".." 原样留在路径里，rm -rf 会按内核语义作用到上级目录。
+# 所以必须先规范化，再比对；解析不出真实目录时宁可拒绝。
 xmg_uninstall_check_safe_home() {
     local target
     if [ "$#" -gt 0 ]; then
@@ -54,6 +57,21 @@ xmg_uninstall_check_safe_home() {
     fi
 
     local norm="$target"
+    local real=""
+
+    # readlink -f 会消掉 ".." 与软链接；只有解析出真实存在的目录才采信
+    if real="$(readlink -f -- "$norm" 2>/dev/null)" && [ -n "$real" ] && [ -d "$real" ]; then
+        norm="$real"
+    else
+        # 无法规范化时，含 ".." 的路径一律拒绝（宁可误杀，不可误删）
+        case "/$norm/" in
+            */../*)
+                xmg_error "卸载安全拦截: 路径含 '..' 且无法规范化: '$target'"
+                return 1
+                ;;
+        esac
+    fi
+
     while [ "${norm: -1}" = "/" ] && [ "$norm" != "/" ]; do
         norm="${norm%/}"
     done
@@ -75,6 +93,9 @@ xmg_uninstall_check_safe_home() {
             ;;
     esac
 
+    # 注意：目录特征校验不能放在这里 —— 卸载过程中 bin/lib 会被逐步清理，
+    # 中途再次调用本函数时会误判为「非 XMG 目录」。特征校验下沉到
+    # xmg_uninstall_remove_xmg_home（真正 rm -rf 之前那一刻）。
     return 0
 }
 
@@ -123,6 +144,11 @@ xmg_uninstall_remove_command_link() {
 xmg_uninstall_remove_xmg_home() {
     xmg_uninstall_check_safe_home "${XMG_HOME:-}" || return 1
     if [ -d "$XMG_HOME" ]; then
+        # 最后一道保险：目录必须带 XMG 特征，避免 XMG_HOME 被误设/注入后删掉别人的数据
+        if [ ! -d "$XMG_HOME/lib" ] && [ ! -x "$XMG_HOME/bin/xmg" ] && [ ! -f "$XMG_HOME/xmg.files" ]; then
+            xmg_error "拒绝删除: $XMG_HOME 不像 XMG 安装目录（缺少 lib/ 与 bin/xmg）"
+            return 1
+        fi
         xmg_info "正在删除 XMG 统一目录: $XMG_HOME"
         rm -rf "$XMG_HOME" && xmg_info "已删除: $XMG_HOME" || xmg_warn "删除 $XMG_HOME 失败"
     else

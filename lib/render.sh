@@ -169,6 +169,22 @@ _xmg_render_get_val() {
     fi
 }
 
+# 数值归一：前导零在 JSON 里非法（RFC 8259 禁止 00443），且 bash 会按八进制解析。
+# state 侧允许带填充写法，渲染侧必须先归一，否则纯 Bash 路径产出的配置无法被内核解析。
+_xmg_render_norm_int() {
+    local val="${1:-}" def="${2:-0}" min="${3:-1}" max="${4:-65535}"
+
+    case "$val" in
+        ''|*[!0-9]*) printf '%s' "$def"; return 0 ;;
+    esac
+    val="$((10#$val))"
+    if [ "$val" -lt "$min" ] || [ "$val" -gt "$max" ]; then
+        printf '%s' "$def"
+        return 0
+    fi
+    printf '%s' "$val"
+}
+
 # ===== DNS 服务器列表（按宿主机可用协议族下发）=====
 #   双栈 / 探测失败（未知） -> IPv4 主 + IPv6 备，v4 被阻断时仍有退路
 #   纯 IPv6                -> 仅 IPv6
@@ -351,9 +367,9 @@ _xmg_render_config_bash() {
     local warp_reserved="${26:-$(_xmg_render_get_val WARP_RESERVED "[0,0,0]")}"
 
     # 数字保底
-    [[ "$bufsz" =~ ^[0-9]+$ ]] && [ "$bufsz" -gt 0 ] || bufsz=4
-    [[ "$socks_port" =~ ^[0-9]+$ ]] && [ "$socks_port" -gt 0 ] && [ "$socks_port" -le 65535 ] || socks_port=1080
-    [[ "$vless_port" =~ ^[0-9]+$ ]] && [ "$vless_port" -gt 0 ] && [ "$vless_port" -le 65535 ] || vless_port=443
+    bufsz="$(_xmg_render_norm_int "$bufsz" 4 1 4096)"
+    socks_port="$(_xmg_render_norm_int "$socks_port" 1080 1 65535)"
+    vless_port="$(_xmg_render_norm_int "$vless_port" 443 1 65535)"
 
     [ -n "$error_log" ] || error_log="/opt/xmg/log/xray/error.log"
     local default_listen="0.0.0.0"
@@ -382,7 +398,7 @@ _xmg_render_config_bash() {
     if [ "$is_ipv6_only" = "true" ] && [ "$reality_listen" = "0.0.0.0" ]; then
         reality_listen="::"
     fi
-    [[ "$reality_port" =~ ^[0-9]+$ ]] && [ "$reality_port" -gt 0 ] && [ "$reality_port" -le 65535 ] || reality_port=8443
+    reality_port="$(_xmg_render_norm_int "$reality_port" 8443 1 65535)"
     [ -n "$reality_path" ] || reality_path="/xhttp"
     [ -n "$reality_mode" ] || reality_mode="auto"
     [ -n "$reality_dest" ] || reality_dest="www.microsoft.com:443"
@@ -654,6 +670,13 @@ _xmg_render_config_bash() {
         printf '  "routing": {\n'
         printf '    "domainStrategy": "IPIfNonMatch",\n'
         printf '    "rules": [\n'
+        # 与 jq 渲染路径对齐：SSH 22 必须先于域名规则命中，
+        # 否则「22 端口 + 命中 warp 域名列表」的流量会被分流到 warp-out
+        printf '      {\n'
+        printf '        "outboundTag": "direct",\n'
+        printf '        "network": "tcp",\n'
+        printf '        "port": "22"\n'
+        printf '      },\n'
         printf '      {\n'
         printf '        "type": "field",\n'
         printf '        "outboundTag": "warp-out",\n'
@@ -777,7 +800,7 @@ xmg_render_config() {
     if [ "$is_ipv6_only" = "true" ] && [ "$reality_listen" = "0.0.0.0" ]; then
         reality_listen="::"
     fi
-    [[ "$reality_port" =~ ^[0-9]+$ ]] && [ "$reality_port" -gt 0 ] && [ "$reality_port" -le 65535 ] || reality_port=8443
+    reality_port="$(_xmg_render_norm_int "$reality_port" 8443 1 65535)"
     [ -n "$reality_path" ] || reality_path="/xhttp"
     [ -n "$reality_mode" ] || reality_mode="auto"
     [ -n "$reality_dest" ] || reality_dest="www.microsoft.com:443"
@@ -795,9 +818,9 @@ xmg_render_config() {
     # 提取全局 policy bufferSize 与端口保底
     local bufsz
     bufsz="$(_xmg_render_get_val XMG_BUFFER_SIZE "4")"
-    [[ "$bufsz" =~ ^[0-9]+$ ]] && [ "$bufsz" -gt 0 ] || bufsz=4
-    [[ "$socks_port" =~ ^[0-9]+$ ]] && [ "$socks_port" -gt 0 ] && [ "$socks_port" -le 65535 ] || socks_port=1080
-    [[ "$vless_port" =~ ^[0-9]+$ ]] && [ "$vless_port" -gt 0 ] && [ "$vless_port" -le 65535 ] || vless_port=443
+    bufsz="$(_xmg_render_norm_int "$bufsz" 4 1 4096)"
+    socks_port="$(_xmg_render_norm_int "$socks_port" 1080 1 65535)"
+    vless_port="$(_xmg_render_norm_int "$vless_port" 443 1 65535)"
 
     # 提取日志参数
     local logdir error_log

@@ -190,6 +190,42 @@ _xmg_warp_clean_ipv6() {
     fi
 }
 
+# 严格校验 IPv6 字面量（字符集 + 组数）
+#   历史脏数据会把 endpoint 端口拼在地址末尾（...:77fa:2408），这类地址字符集合法、
+#   只有组数超标。旧判定用 ":[0-9]+$" 抓它，会把末组恰好全为数字的合法地址
+#   （如 ...:9602:1234）一起误杀，导致每次 enable 都重注册、很快撞 CF 429。
+_xmg_is_valid_ipv6() {
+    local ip="${1:-}"
+    [ -n "$ip" ] || return 1
+
+    case "$ip" in
+        *[!0-9a-fA-F:.]*) return 1 ;;
+        *:::*) return 1 ;;
+    esac
+
+    local has_dc=0
+    case "$ip" in
+        *::*) has_dc=1 ;;
+    esac
+
+    local -a parts=()
+    local IFS=':'
+    read -r -a parts <<< "$ip"
+    unset IFS
+
+    local nz=0 p=""
+    for p in "${parts[@]}"; do
+        [ -n "$p" ] && nz=$((nz + 1))
+    done
+
+    if [ "$has_dc" -eq 1 ]; then
+        # "::" 至少压缩一组，非空组最多 7 个
+        [ "$nz" -le 7 ] && return 0
+        return 1
+    fi
+    [ "$nz" -eq 8 ]
+}
+
 _xmg_warp_clean_ipv4() {
     local raw="$1"
     if [ -z "$raw" ]; then
@@ -695,10 +731,10 @@ _xmg_warp_register() {
         cur_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true)"
         cur_cid="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
 
-        # 自愈校验 1: 若内网 IPv6 损坏（含中括号、端口或非 IPv6 格式），自动标记受损重新注册
+        # 自愈校验 1: 若内网 IPv6 损坏（含中括号、或地址末尾被拼上端口），自动重新注册
+        #   注意不能用 ":[0-9]+$" 判定端口污染 —— 合法 IPv6 末组也常是全数字
         if [ -n "$cur_v6" ]; then
-            local test_clean_v6="$(_xmg_warp_clean_ipv6 "$cur_v6")"
-            if [ -z "$test_clean_v6" ] || [[ "$cur_v6" =~ \[ ]] || [[ "$cur_v6" =~ :[0-9]+$ ]]; then
+            if [[ "$cur_v6" =~ \[ ]] || ! _xmg_is_valid_ipv6 "$cur_v6"; then
                 xmg_warn "检测到旧 WARP 凭据内网 IP 受损或被历史 Endpoint 污染，自动重新注册纯净凭据..."
                 force=1
             fi
@@ -1235,7 +1271,17 @@ _xmg_warp_render_managed_config() {
 xmg_warp_enable() {
     local mode="${1:-global}"
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
-    
+
+    # 模式必须先归一：任意字符串都会被当作 global 注入，但非法值会原样写进
+    # state.env，之后每次 xmg proxy apply 都在校验阶段被判非法，只能手改文件恢复。
+    case "$mode" in
+        global|routing) ;;
+        *)
+            xmg_error "非法 WARP 模式: '$mode'（仅支持 global / routing）"
+            return 2
+            ;;
+    esac
+
     if [ "$mode" = "routing" ]; then
         xmg_info "正在启用 Xray 原生 WireGuard (WARP) 出站【流媒体与 AI 智能分流模式】..."
     else
@@ -1266,14 +1312,9 @@ xmg_warp_enable() {
     # 3. 导出出站片段供兼容使用
     xmg_warp_export_xray_outbound "$XMG_WARP_XRAY_OUTBOUND" || return 1
 
-    # 4. 更新 warp.env 保持环境兼容
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-        sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
-    echo "WARP_MODE=$mode" >> "$XMG_WARP_ENV_FILE"
+    # 4. warp.env 的写入推迟到配置注入成功之后
+    #    提前写会让 xmg warp status（只读 warp.env）在注入失败时报「已启用」，
+    #    而配置文件里根本没有 warp-out
 
     # 5. 定位当前生效的 Xray 主配置
     local xray_cfg=""
@@ -1515,7 +1556,10 @@ EOF_GLOBAL_JQ
         fi
 
         # 仅同步状态草稿记录，绝对不调用全量重新渲染覆写的 xmg_state_commit
-        if [ -f "${XMG_STATE_FILE:-}" ] && declare -F xmg_state_commit_draft >/dev/null 2>&1; then
+        # 不再用 "-f $XMG_STATE_FILE" 做守卫：首装即启 WARP 时 state.env 还不存在，
+        # 跳过落盘会让下一次 xmg proxy apply 按默认值把 warp-out 静默撤掉。
+        # commit_draft 自身会创建目录与文件。
+        if declare -F xmg_state_commit_draft >/dev/null 2>&1; then
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
     else
@@ -1535,6 +1579,15 @@ EOF_GLOBAL_JQ
             [ "$_tc_set" -eq 1 ] && unset XMG_XRAY_CONFIG_TESTCMD XMG_XRAY_RELOAD_TESTCMD
         fi
     fi
+
+    # 4.5 配置已成功落盘，此刻才把启用状态写进 warp.env（兼容副本）
+    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+        sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+    fi
+    echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
+    echo "WARP_MODE=$mode" >> "$XMG_WARP_ENV_FILE"
 
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && _warp_can_manage_service; then
@@ -1722,7 +1775,12 @@ EOF_DISABLE_JQ
                 rm -f "$jq_file" 2>/dev/null || true
                 removed_ok=1
             else
+                # 不能静默继续：往下走会写 state=0 并打印「已关闭」，
+                # 而配置里的 warp-out 还在，用户以为已直连、实际仍全部走 WARP
                 rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
+                xmg_error "解析 Xray 配置失败（文件可能已损坏或为空），已取消停用 WARP"
+                xmg_warn "请先执行 xray run -test -c $xray_cfg 检查配置，再重试"
+                return 1
             fi
         else
             # 无 jq：托管配置按状态重渲染（WARP_ENABLED=0 已 stage）；外部配置报错
@@ -1772,9 +1830,13 @@ EOF_DISABLE_JQ
             xmg_info "已从 Xray 配置中无损移除 warp-out 出站与相关分流规则 (原有所有节点与配置毫发无损)"
         else
             rm -f "$tmp_cfg" 2>/dev/null || true
+            xmg_error "移除 warp-out 未成功，已保留原有状态（不写 state，避免状态谎报）"
+            return 1
         fi
 
-        if [ -f "${XMG_STATE_FILE:-}" ] && declare -F xmg_state_commit_draft >/dev/null 2>&1; then
+        # 首装时 state.env 可能尚不存在；commit_draft 自身会建目录与文件，
+        # 跳过落盘会让下一次 proxy apply 按默认值把 WARP 重新渲染回来
+        if declare -F xmg_state_commit_draft >/dev/null 2>&1; then
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
 

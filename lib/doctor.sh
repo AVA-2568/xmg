@@ -499,10 +499,16 @@ _xmg_doctor_get_listening_ports() {
 
     # 仅检测 Xray 自身的业务入站端口，避免将宿主机 SSH (22) 等端口误报为 Xray 端口
     local candidate_ports=()
-    local socks_on="0" vless_on="0"
+    local socks_on="0" vless_on="0" reality_on="0"
     if declare -F xmg_state_get >/dev/null 2>&1; then
+        # state.env 不会自动进内存，不加载则一律读到默认值 0，
+        # 体检会把「已配置 REALITY」误报成「未配置入站」
+        if declare -F xmg_state_load >/dev/null 2>&1; then
+            xmg_state_load >/dev/null 2>&1 || true
+        fi
         socks_on="$(xmg_state_get PROXY_SOCKS_ENABLED "0")"
         vless_on="$(xmg_state_get PROXY_VLESS_ENABLED "0")"
+        reality_on="$(xmg_state_get PROXY_REALITY_ENABLED "0")"
         if [ "$vless_on" = "1" ]; then
             local vp
             vp="$(xmg_state_get PROXY_VLESS_PORT "443")"
@@ -513,10 +519,15 @@ _xmg_doctor_get_listening_ports() {
             sp="$(xmg_state_get PROXY_SOCKS_PORT "1080")"
             [ -n "$sp" ] && candidate_ports+=("$sp")
         fi
+        if [ "$reality_on" = "1" ]; then
+            local rp
+            rp="$(xmg_state_get PROXY_REALITY_PORT "8443")"
+            [ -n "$rp" ] && candidate_ports+=("$rp")
+        fi
     fi
 
     # 若未启用任何代理入站方案
-    if [ "$socks_on" != "1" ] && [ "$vless_on" != "1" ]; then
+    if [ "$socks_on" != "1" ] && [ "$vless_on" != "1" ] && [ "$reality_on" != "1" ]; then
         # 兼容兜底：若 Xray 运行中且 443 处于监听（默认预设），展示 443
         local xray_st=""
         xray_st="$(_xmg_doctor_get_xray_status 2>/dev/null || true)"
