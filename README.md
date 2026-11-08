@@ -154,6 +154,8 @@ PASS=44  FAIL=0  SKIP=1   (alpine / openrc / iptables)
   - NAT64：内置 RFC 7050 主动探测（`ipv4only.arpa`），识别到 NAT64 时不按纯 IPv6 处理
   - NAT 端口映射：外部公网端口无法从本机可靠探测，用 `--external-port` 显式声明后用于客户端分享链接；未声明时体检/链接会提示
   - 单栈 + WARP：隧道带来对端协议族时，全局接管模式下自动把 DNS/出站策略从 `UseIPv6` 放开为 `UseIP`（否则纯 IPv6 机器即便有 WARP IPv4 出口也只查 AAAA，IPv4-only 站点仍不可达）；停用 WARP 时收回
+  - WARP 出站栈矩阵：`allowedIPs` / `remoteDNS` / `targetStrategy` 按「主机栈 × 隧道实际分配地址族」同源下发。隧道只有 IPv4 时不声明 `::/0`、`targetStrategy` 锁 `UseIPv4`（解析出 AAAA 却找不到 peer 会直接失败）；双栈隧道配纯 IPv6 主机时强制 `UseIPv4`，把隧道的 IPv4 出口真正用起来。三种入站（SOCKS5 / VLESS+TLS / REALITY）共用同一份出站配置
+  - WARP 兜底放行：`freedom` 出站的 `finalRules` 末尾固定追加 `{"action":"allow"}` —— 官方默认策略会屏蔽来自 VLESS 等入站的私有/保留地址段，缺兜底时 WARP 内网段（`172.16.0.0/12`）、回环段会被静默黑洞且不留日志
 
 ---
 

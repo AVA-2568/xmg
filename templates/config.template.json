@@ -31,6 +31,9 @@
             "action": "allow",
             "network": "tcp",
             "port": "22"
+          },
+          {
+            "action": "allow"
           }
         ]
       },

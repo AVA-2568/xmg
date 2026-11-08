@@ -105,6 +105,9 @@ _XMG_DEFAULT_CONFIG_TEMPLATE='{
             "action": "allow",
             "network": "tcp",
             "port": "22"
+          },
+          {
+            "action": "allow"
           }
         ]
       },
@@ -195,6 +198,55 @@ _xmg_render_dns_servers_json() {
     out="${out}${sep}\"localhost\""
 
     printf '[%s]' "$out"
+}
+
+# ===== WARP 隧道能力画像（单栈 / 双栈矩阵）=====
+# 官方 WireGuard 出站约束（xtls.github.io/config/outbounds/wireguard.html）：
+#   1. 隧道内目标地址必须是 IP，域名要靠 remoteDNS 解析，且该 DNS 走隧道内部；
+#   2. allowedIPs 决定哪些目标交给该 peer，必须与 address 实际拥有的协议族一致 ——
+#      隧道没有 IPv6 地址却声明 ::/0，AAA A 目标会被塞进无源地址的隧道，直接超时；
+#   3. targetStrategy 在 OutboundObject 顶层，默认 AsIs（不本地解析），
+#      等于把域名解析全压在隧道内 DNS 上，隧道一抖全站皆挂。
+# 参数：$1=隧道 IPv4（可空）$2=隧道 IPv6（可空）$3=主机是否纯 IPv6(1/0)
+# 输出：<allowedIPs 元素>|<remoteDNS 元素>|<targetStrategy>，元素不含外层方括号，
+#       由调用方包 [] —— 这里再包一层会生成 [[...]]，内核直接拒绝启动。
+#       隧道无任何地址时返回 1
+_xmg_warp_tunnel_profile() {
+    local tun_v4="${1:-}" tun_v6="${2:-}" host_v6_only="${3:-0}"
+    local allowed="" dns="" strat=""
+
+    [ -n "$tun_v4" ] && allowed='"0.0.0.0/0"'
+    [ -n "$tun_v4" ] && dns='"1.1.1.1", "8.8.8.8"'
+
+    if [ -n "$tun_v6" ]; then
+        if [ -n "$allowed" ]; then
+            allowed="$allowed, \"::/0\""
+        else
+            allowed='"::/0"'
+        fi
+    fi
+
+    # 没有任何地址的隧道不具备承载能力，调用方应直接不渲染 warp-out
+    [ -n "$allowed" ] || return 1
+
+    # 隧道无 IPv4 时 remoteDNS 只能用 IPv6（裸地址，官方示例不带方括号）
+    [ -n "$dns" ] || dns='"2606:4700:4700::1111", "2001:4860:4860::8888"'
+
+    if [ -z "$tun_v4" ]; then
+        # 隧道只有 IPv6，目标只能解到 IPv6
+        strat="UseIPv6"
+    elif [ -z "$tun_v6" ]; then
+        # 隧道只有 IPv4：必须锁死 v4，否则解出 AAAA 后 allowedIPs 里没有 ::/0，找不到 peer
+        strat="UseIPv4"
+    elif [ "$host_v6_only" = "1" ]; then
+        # 纯 IPv6 主机靠隧道补 IPv4 出口，强制 v4 才能拿到 WARP 的收益
+        strat="UseIPv4"
+    else
+        # 双栈主机 + 双栈隧道：保留原生双栈能力
+        strat="UseIP"
+    fi
+
+    printf '%s|%s|%s' "$allowed" "$dns" "$strat"
 }
 
 # ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
@@ -503,6 +555,9 @@ _xmg_render_config_bash() {
             "action": "allow",
             "network": "tcp",
             "port": "22"
+          },
+          {
+            "action": "allow"
           }
         ]
       },
@@ -515,14 +570,29 @@ _xmg_render_config_bash() {
 
     local warp_outbound=""
     if [ "$warp_on" = "1" ]; then
-        local warp_addr_json="\"$warp_v4\""
-        if [ -n "$warp_v6" ]; then
-            warp_addr_json="\"$warp_v4\",
+        local _host_v6_only=0
+        [ "$is_ipv6_only" = "true" ] && _host_v6_only=1
+
+        local _wprof="" warp_allowed="" warp_dns="" warp_strat=""
+        _wprof="$(_xmg_warp_tunnel_profile "$warp_v4" "$warp_v6" "$_host_v6_only")" || _wprof=""
+
+        if [ -z "$_wprof" ]; then
+            # 隧道没有任何地址族可用于承载目标，写进配置只会让内核起不来
+            warp_on=0
+            warp_outbound=""
+        else
+            IFS='|' read -r warp_allowed warp_dns warp_strat <<< "$_wprof" || true
+
+            local warp_addr_json="\"$warp_v4\""
+            if [ -n "$warp_v6" ]; then
+                warp_addr_json="\"$warp_v4\",
           \"$warp_v6\""
-        fi
-        warp_outbound='    {
+            fi
+
+            warp_outbound='    {
       "tag": "warp-out",
       "protocol": "wireguard",
+      "targetStrategy": "'"$warp_strat"'",
       "settings": {
         "secretKey": "'"$esc_warp_privkey"'",
         "address": [
@@ -534,16 +604,19 @@ _xmg_render_config_bash() {
             "endpoint": "'"$esc_warp_endpoint"'",
             "keepAlive": 25,
             "allowedIPs": [
-              "0.0.0.0/0",
-              "::/0"
+              '"$warp_allowed"'
             ]
           }
         ],
         "reserved": '"$warp_reserved"',
         "noKernelTun": true,
-        "mtu": 1280
+        "mtu": 1280,
+        "remoteDNS": [
+          '"$warp_dns"'
+        ]
       }
     }'
+        fi
     fi
 
     local blocked_outbound='    {
@@ -783,6 +856,23 @@ xmg_render_config() {
         warp_addr_json="[\"$warp_v4\"]"
     fi
 
+    # 单栈/双栈矩阵：allowedIPs / remoteDNS / targetStrategy 三者必须同源
+    local _host_v6_only=0
+    [ "$is_ipv6_only" = "true" ] && _host_v6_only=1
+    local warp_allowed_ips='["0.0.0.0/0"]' warp_remote_dns='["1.1.1.1"]' warp_target_strategy="UseIPv4"
+    local _wprof=""
+    _wprof="$(_xmg_warp_tunnel_profile "$warp_v4" "$warp_v6" "$_host_v6_only")" || _wprof=""
+    if [ -n "$_wprof" ]; then
+        local _wa="" _wd="" _ws=""
+        IFS='|' read -r _wa _wd _ws <<< "$_wprof" || true
+        warp_allowed_ips="[$_wa]"
+        warp_remote_dns="[$_wd]"
+        warp_target_strategy="$_ws"
+    else
+        # 隧道无可用地址族，等同未启用，避免渲染出内核拒绝的配置
+        warp_bool=false
+    fi
+
     local has_jq=0
     if command -v jq >/dev/null 2>&1; then
         has_jq=1
@@ -807,6 +897,7 @@ xmg_render_config() {
     {
       "tag": "warp-out",
       "protocol": "wireguard",
+      "targetStrategy": $warp_target_strategy,
       "settings": {
         "secretKey": $warp_privkey,
         "address": $warp_address,
@@ -815,15 +906,13 @@ xmg_render_config() {
             "publicKey": $warp_pubkey,
             "endpoint": $warp_endpoint,
             "keepAlive": 25,
-            "allowedIPs": [
-              "0.0.0.0/0",
-              "::/0"
-            ]
+            "allowedIPs": $warp_allowed_ips
           }
         ],
         "reserved": $warp_reserved,
         "noKernelTun": true,
-        "mtu": 1280
+        "mtu": 1280,
+        "remoteDNS": $warp_remote_dns
       }
     }
   else null end
@@ -841,6 +930,9 @@ xmg_render_config() {
                 "action": "allow",
                 "network": "tcp",
                 "port": "22"
+              },
+              {
+                "action": "allow"
               }
             ]
           },
@@ -920,6 +1012,9 @@ xmg_render_config() {
                 "action": "allow",
                 "network": "tcp",
                 "port": "22"
+              },
+              {
+                "action": "allow"
               }
             ]
           },
@@ -957,6 +1052,9 @@ xmg_render_config() {
               "action": "allow",
               "network": "tcp",
               "port": "22"
+            },
+            {
+              "action": "allow"
             }
           ]
         },
@@ -1071,6 +1169,9 @@ xmg_render_config() {
             --arg warp_pubkey "$warp_pubkey"
             --argjson warp_address "$warp_addr_json"
             --argjson warp_reserved "$warp_reserved"
+            --argjson warp_allowed_ips "$warp_allowed_ips"
+            --argjson warp_remote_dns "$warp_remote_dns"
+            --arg warp_target_strategy "$warp_target_strategy"
         )
 
         if [ -n "$tpl_file" ] && [ -f "$tpl_file" ]; then

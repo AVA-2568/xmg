@@ -189,6 +189,56 @@ _xmg_warp_clean_ipv4() {
     echo "$val"
 }
 
+# ===== WARP 隧道能力画像（单栈 / 双栈矩阵）=====
+# 与 lib/render.sh 的同名函数必须保持逐字一致：WARP 分支不加载 render.sh，
+# 两份分别服务「增量注入」与「全量渲染」两条路径，逻辑一旦漂移，
+# 就会出现「xmg warp enable 的配置」和「proxy apply 重渲染后的配置」不同源。
+# 依据 xtls.github.io/config/outbounds/wireguard.html：
+#   allowedIPs 必须与 address 实际拥有的协议族一致；
+#   remoteDNS 必须隧道内可达，且在 address 为双栈时优先 IPv4；
+#   targetStrategy 位于 OutboundObject 顶层，默认 AsIs（不本地解析）。
+# 参数：$1=隧道 IPv4（可空）$2=隧道 IPv6（可空）$3=主机是否纯 IPv6(1/0)
+# 输出：<allowedIPs 元素>|<remoteDNS 元素>|<targetStrategy>，元素不含外层方括号，
+#       由调用方包 [] —— 这里再包一层会生成 [[...]]，内核直接拒绝启动。
+#       隧道无任何地址时返回 1
+_xmg_warp_tunnel_profile() {
+    local tun_v4="${1:-}" tun_v6="${2:-}" host_v6_only="${3:-0}"
+    local allowed="" dns="" strat=""
+
+    [ -n "$tun_v4" ] && allowed='"0.0.0.0/0"'
+    [ -n "$tun_v4" ] && dns='"1.1.1.1", "8.8.8.8"'
+
+    if [ -n "$tun_v6" ]; then
+        if [ -n "$allowed" ]; then
+            allowed="$allowed, \"::/0\""
+        else
+            allowed='"::/0"'
+        fi
+    fi
+
+    # 没有任何地址的隧道不具备承载能力，调用方应直接不渲染 warp-out
+    [ -n "$allowed" ] || return 1
+
+    # 隧道无 IPv4 时 remoteDNS 只能用 IPv6（裸地址，官方示例不带方括号）
+    [ -n "$dns" ] || dns='"2606:4700:4700::1111", "2001:4860:4860::8888"'
+
+    if [ -z "$tun_v4" ]; then
+        # 隧道只有 IPv6，目标只能解到 IPv6
+        strat="UseIPv6"
+    elif [ -z "$tun_v6" ]; then
+        # 隧道只有 IPv4：必须锁死 v4，否则解出 AAAA 后 allowedIPs 里没有 ::/0，找不到 peer
+        strat="UseIPv4"
+    elif [ "$host_v6_only" = "1" ]; then
+        # 纯 IPv6 主机靠隧道补 IPv4 出口，强制 v4 才能拿到 WARP 的收益
+        strat="UseIPv4"
+    else
+        # 双栈主机 + 双栈隧道：保留原生双栈能力
+        strat="UseIP"
+    fi
+
+    printf '%s|%s|%s' "$allowed" "$dns" "$strat"
+}
+
 _xmg_warp_country_name() {
     local code="$1"
     case "$code" in
@@ -950,9 +1000,27 @@ xmg_warp_export_xray_outbound() {
         endpoint="${endpoint%:0}:2408"
     fi
 
-    local address_json="\"$addr_v4/32\""
+    # 隧道实际拥有哪些地址族，直接决定 allowedIPs / remoteDNS / targetStrategy
+    local _host_v6_only=0
+    xmg_warp_is_ipv6_only && _host_v6_only=1
+
+    local _wprof="" w_allowed="" w_dns="" w_strat=""
+    _wprof="$(_xmg_warp_tunnel_profile "$addr_v4" "$addr_v6" "$_host_v6_only")" || _wprof=""
+    if [ -z "$_wprof" ]; then
+        xmg_error "WARP 账号未提供任何可用地址（IPv4/IPv6 皆空），拒绝生成无承载能力的出站"
+        return 1
+    fi
+    IFS='|' read -r w_allowed w_dns w_strat <<< "$_wprof" || true
+
+    # address 只列真实分配到的地址族，空值拼出的 "/32" 会让内核直接拒绝启动
+    local address_json=""
+    [ -n "$addr_v4" ] && address_json="\"$addr_v4/32\""
     if [ -n "$addr_v6" ]; then
-        address_json="\"$addr_v4/32\",\n      \"$addr_v6/128\""
+        if [ -n "$address_json" ]; then
+            address_json="$address_json,\n      \"$addr_v6/128\""
+        else
+            address_json="\"$addr_v6/128\""
+        fi
     fi
 
     local xray_json=""
@@ -960,6 +1028,7 @@ xmg_warp_export_xray_outbound() {
 {
   "tag": "warp-out",
   "protocol": "wireguard",
+  "targetStrategy": "$w_strat",
   "settings": {
     "secretKey": "$privkey",
     "address": [
@@ -971,14 +1040,16 @@ xmg_warp_export_xray_outbound() {
         "endpoint": "$endpoint",
         "keepAlive": 25,
         "allowedIPs": [
-          "0.0.0.0/0",
-          "::/0"
+          $(printf '%b' "$w_allowed")
         ]
       }
     ],
     "reserved": $reserved_json,
     "noKernelTun": true,
-    "mtu": 1280
+    "mtu": 1280,
+    "remoteDNS": [
+      $(printf '%b' "$w_dns")
+    ]
   }
 }
 EOF
@@ -1237,6 +1308,9 @@ xmg_warp_enable() {
           "action": "allow",
           "network": "tcp",
           "port": "$ssh_p"
+        },
+        {
+          "action": "allow"
         }
       ]
     else . end
@@ -1336,6 +1410,9 @@ EOF_ROUTING_JQ
           "action": "allow",
           "network": "tcp",
           "port": "$ssh_p"
+        },
+        {
+          "action": "allow"
         }
       ]
     else . end
