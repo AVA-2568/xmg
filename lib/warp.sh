@@ -1570,8 +1570,15 @@ xmg_warp_enable() {
         if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
             local jq_file="${xray_cfg}.tmp.$.jq"
             if [ "$mode" = "routing" ]; then
-                local v6_fallback_rule=""
-                if xmg_warp_is_ipv6_only; then
+                # 协议族兜底：隧道承载不了的那一族交给直连（判定函数与 render.sh 共用）
+                local _wtun="" _wfb=0 _wcond="[]" v6_fallback_rule=""
+                _wtun="$(_xmg_warp_tunnel_family "$WARP_ACC_IPV4" "$WARP_ACC_IPV6")"
+                if _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+                    _wfb=1
+                    _wcond="[\"$(_xmg_warp_tunnel_cidr "$_wtun")\"]"
+                fi
+                # 纯 IPv6 宿主 + 隧道有 IPv4：v4 目标全量走隧道（含未命中分流的）
+                if xmg_warp_is_ipv6_only && [ "$_wtun" = "v4" ]; then
                     v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
                 fi
                 cat > "$jq_file" << EOF_ROUTING_JQ
@@ -1599,14 +1606,16 @@ xmg_warp_enable() {
   ] + [ $warp_json ]
 )) |
 (.routing = (.routing // { "domainStrategy": "AsIs", "rules": [] })) |
-(.routing.domainStrategy = (.routing.domainStrategy // "AsIs")) |
+(.routing.domainStrategy = (if \$warp_fb then "IPIfNonMatch" else (.routing.domainStrategy // "AsIs") end)) |
 (.routing.rules = (
-  [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and ((.port // "") | tostring) != "$ssh_p") ] + [
-    {
-      "type": "field",
-      "outboundTag": "warp-out",
-      "domain": \$domains
-    }$v6_fallback_rule
+  [ (.routing.rules // [])[] |
+    select(
+      (.outboundTag // "") != "warp-out"
+      and ((.port // "") | tostring) != "$ssh_p"
+    )
+  ] + [
+    ({ "type": "field", "outboundTag": "warp-out", "domain": \$domains }
+     + (if (\$warp_ip_cond | length) > 0 then { "ip": \$warp_ip_cond } else {} end))$v6_fallback_rule
   ]
 ))
 EOF_ROUTING_JQ
@@ -1648,10 +1657,17 @@ EOF_GLOBAL_JQ
             # 分流域名清单由 render.sh 统一生成（硬编码 + geosite 标签），
             # jq 只负责把数组塞进配置，不再自己持有域名列表。
             local domains_json="[]"
+            local _wfb_json="false"
             if [ "$mode" = "routing" ]; then
                 domains_json="$(xmg_warp_routing_domains_json "${geo_effective:-off}")"
             fi
-            if jq --argjson domains "$domains_json" -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
+            if [ "${_wfb:-0}" -eq 1 ]; then
+                _wfb_json="true"
+            fi
+            if jq --argjson domains "$domains_json" \
+                  --argjson warp_fb "$_wfb_json" \
+                  --argjson warp_ip_cond "${_wcond:-[]}" \
+                  -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
                 merged_ok=1
             else
                 rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
@@ -1697,7 +1713,10 @@ EOF_GLOBAL_JQ
                         local fallback_ok=0
                         if [ -f "${jq_file:-/nonexistent}" ]; then
                             domains_json="$(xmg_warp_routing_domains_json off)"
-                            jq --argjson domains "$domains_json" -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null && fallback_ok=1
+                            jq --argjson domains "$domains_json" \
+                               --argjson warp_fb "$_wfb_json" \
+                               --argjson warp_ip_cond "${_wcond:-[]}" \
+                                            -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null && fallback_ok=1
                         else
                             # 纯 Bash 渲染路径：用环境开关强制关掉 geosite 重渲染托管配置
                             XMG_WARP_GEO_DISABLE=1 _xmg_warp_render_managed_config "$xray_cfg" "$tmp_cfg" && fallback_ok=1
@@ -2231,6 +2250,24 @@ xmg_warp_status() {
         printf "地理数据档位  : %s (设置: %s, 内存约 %sMB)\n" \
             "$geo_eff" "$geo_set" "$(( $(xmg_detect_mem_total_kb 2>/dev/null || echo 0) / 1024 ))"
         printf "地理数据文件  : %s\n" "$geo_note"
+
+        # 协议族覆盖：隧道承载不了的那一族是否已回退直连
+        local _tv4="" _tv6="" _tfam="" _sfb=""
+        _tv4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
+        _tv6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
+        _tfam="$(_xmg_warp_tunnel_family "$_tv4" "$_tv6")"
+        if _xmg_warp_family_fallback "$_tfam" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+            if [ "$_tfam" = "v4" ]; then
+                _sfb="已开启 (IPv6 目标回退宿主机直连)"
+            else
+                _sfb="已开启 (IPv4 目标回退宿主机直连)"
+            fi
+        elif [ "$_tfam" = "dual" ]; then
+            _sfb="不需要 (隧道双栈，两族都走 WARP)"
+        else
+            _sfb="不可用 (宿主机没有另一协议族，回退也无处可走)"
+        fi
+        printf "协议族兜底    : %s\n" "$_sfb"
     fi
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     echo "=================================================================="

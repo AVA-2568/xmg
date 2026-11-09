@@ -487,6 +487,47 @@ xmg_warp_routing_domains_json() {
     printf ']'
 }
 
+# ===== WARP 协议族兜底 =====
+# 隧道承载不了的那一族目标，不能塞进 warp-out：
+#   UseIPv4 的隧道拿不到 A 记录就判死，而路由一旦选中出站就没有回退机制
+#   （Xray 的 outbound 没有 fallback 字段）。所以把「隧道可承载的协议族」
+#   作为 ip 条件挂在同一条规则上，目标解析出另一族时规则不命中，自然落到 direct。
+# 代价是 domainStrategy 必须 IPIfNonMatch（未命中第一轮的连接多一次解析），
+# 因此只在「宿主有另一族」时启用：单栈宿主回退也访问不了，不必付这个代价。
+
+# 输出隧道可承载的协议族：v4 / v6 / dual / none
+_xmg_warp_tunnel_family() {
+    local v4="${1:-}" v6="${2:-}"
+    if [ -n "$v4" ] && [ -n "$v6" ]; then
+        printf 'dual'
+    elif [ -n "$v4" ]; then
+        printf 'v4'
+    elif [ -n "$v6" ]; then
+        printf 'v6'
+    else
+        printf 'none'
+    fi
+}
+
+# 是否需要协议族兜底：$1=隧道族 $2=宿主 IPv4(1/0) $3=宿主 IPv6(1/0)
+_xmg_warp_family_fallback() {
+    local tun="${1:-none}" hv4="${2:-0}" hv6="${3:-0}"
+    case "$tun" in
+        v4) [ "$hv6" = "1" ] && return 0 ;;
+        v6) [ "$hv4" = "1" ] && return 0 ;;
+    esac
+    return 1
+}
+
+# 隧道族 -> 该族的目标 CIDR（用于给 warp 规则挂 ip 条件）
+_xmg_warp_tunnel_cidr() {
+    case "${1:-none}" in
+        v4) printf '0.0.0.0/0' ;;
+        v6) printf '::/0' ;;
+        *) printf '' ;;
+    esac
+}
+
 # ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
 # REALITY 不需要证书：对 target 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
 # serverNames 支持逗号分隔多值 —— 这就是「同一端口服务多个域名」的真实端口复用。
@@ -882,12 +923,22 @@ _xmg_render_config_bash() {
     #   而且宿主 SSH 压根不经过 Xray，这条规则保护不了任何东西。
     if [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
         local _wgm='' _wd='' _wfirst=1
+        local _wtun='' _wfb=0 _wcond=''
         _wgm="$(_xmg_render_get_val WARP_GEO_MODE auto)"
+        _wtun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
+        _wcond="$(_xmg_warp_tunnel_cidr "$_wtun")"
+        _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}" && _wfb=1
+
         printf ',\n'
         printf '  "routing": {\n'
-        # 这里只有域名规则，用 AsIs 不做 IP 匹配：
-        # IPIfNonMatch 会让每条未命中域名的连接额外做一次 DNS 解析，纯属浪费。
-        printf '    "domainStrategy": "AsIs",\n'
+        # 挂协议族条件时必须 IPIfNonMatch：第一轮域名匹配因 ip 为空而不命中，
+        # 解析出目标地址族后第二轮才能判断这条规则是否适用。
+        # 没有协议族条件时用 AsIs，避免每条未命中域名的连接白做一次 DNS。
+        if [ "$_wfb" -eq 1 ]; then
+            printf '    "domainStrategy": "IPIfNonMatch",\n'
+        else
+            printf '    "domainStrategy": "AsIs",\n'
+        fi
         printf '    "rules": [\n'
         printf '      {\n'
         printf '        "type": "field",\n'
@@ -902,20 +953,27 @@ _xmg_render_config_bash() {
                 printf ',\n          "%s"' "$_wd"
             fi
         done < <(xmg_warp_routing_domains "$_wgm")
-        printf '\n        ]\n'
-        if [ "$is_ipv6_only" = "true" ]; then
-            printf '      },\n'
+        printf '\n        ]'
+        # 协议族兜底：给 WARP 规则挂上「隧道能承载的地址族」条件。
+        # 目标解析出另一族时规则不命中，自然落回默认出站 direct —— 不需要显式写回退规则。
+        # 仅当宿主确实有那一族（回退真能通）时才启用，单栈宿主不为此付 DNS 解析开销。
+        if [ "$_wfb" -eq 1 ] && [ -n "$_wcond" ]; then
+            printf ',\n        "ip": [\n          "%s"\n        ]' "$_wcond"
+        fi
+        printf '\n      }'
+        # 纯 IPv6 宿主的 IPv4 全量兜底：命中分流的 v4 目标走 WARP，
+        # 未命中分流的 v4 目标也必须走隧道，否则宿主机根本没有 v4 出口。
+        if [ "$is_ipv6_only" = "true" ] && [ "$_wtun" = "v4" ]; then
+            printf ',\n'
             printf '      {\n'
             printf '        "type": "field",\n'
             printf '        "outboundTag": "warp-out",\n'
             printf '        "ip": [\n'
             printf '          "0.0.0.0/0"\n'
             printf '        ]\n'
-            printf '      }\n'
-        else
-            printf '      }\n'
+            printf '      }'
         fi
-        printf '    ]\n'
+        printf '\n    ]\n'
         printf '  }\n'
     else
         printf '\n'
@@ -1161,15 +1219,16 @@ xmg_render_config() {
         }
       ] |
       .routing = {
-        "domainStrategy": "AsIs",
+        "domainStrategy": $warp_strategy,
         "rules": (
           [
             {
               "type": "field",
               "outboundTag": "warp-out",
               "domain": $routing_domains
-            }
-          ] + (if $is_ipv6_only then [{ "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }] else [] end)
+            } + (if ($warp_ip_cond | length) > 0 then { "ip": $warp_ip_cond } else {} end)
+          ]
+          + (if $is_ipv6_only and $warp_tun_v4 then [{ "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }] else [] end)
         )
       }
     else
@@ -1302,11 +1361,27 @@ xmg_render_config() {
 ) as $active_inbounds |
 .inbounds = $active_inbounds'
 
+        # 协议族兜底：jq 路径与纯 Bash 路径共用同一套判定函数
+        local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_tun_v4=false
+        _warp_tun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
+        if [ "$_warp_tun" = "v4" ]; then
+            _warp_tun_v4=true
+        fi
+        if _xmg_warp_family_fallback "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+            _warp_strategy="IPIfNonMatch"
+            local _wc=""
+            _wc="$(_xmg_warp_tunnel_cidr "$_warp_tun")"
+            if [ -n "$_wc" ]; then _warp_ip_cond="[\"$_wc\"]"; fi
+        fi
+
         local jq_args=(
             --arg error_log "$error_log"
             --argjson buffer_size "$bufsz"
             --argjson dns_servers "$(_xmg_render_dns_servers_json)"
             --argjson is_ipv6_only "$is_ipv6_only"
+            --arg warp_strategy "$_warp_strategy"
+            --argjson warp_ip_cond "$_warp_ip_cond"
+            --argjson warp_tun_v4 "$_warp_tun_v4"
             --argjson routing_domains "$(xmg_warp_routing_domains_json "$(_xmg_render_get_val WARP_GEO_MODE auto)")"
             --argjson socks_on "$socks_bool"
             --arg socks_listen "$socks_listen"

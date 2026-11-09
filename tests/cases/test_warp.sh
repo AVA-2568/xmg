@@ -385,7 +385,18 @@ t_equals "1024MB + 0.2C 自动降到 slim" "$(MOCK_MEM_TOTAL_MB=1024 XMG_CGROUP_
 t_equals "4096MB + 1C 自动选 full" "$(MOCK_MEM_TOTAL_MB=4096 XMG_CGROUP_CPU_MAX=/nonexistent MOCK_CPU_CORES=8 xmg_warp_geo_auto_mode)" "full"
 t_equals "非法档位回落 off" "$(xmg_warp_geo_mode_resolve bogus)" "off"
 
-# 21. 网络栈感知与 curl 协议族参数检测测试
+# 21. 协议族兜底（隧道单栈 + 宿主有另一族时，另一族目标回退直连）
+t_equals "隧道双栈判定" "$(_xmg_warp_tunnel_family "172.16.0.2" "fd01::1")" "dual"
+t_equals "隧道仅 IPv4 判定" "$(_xmg_warp_tunnel_family "172.16.0.2" "")" "v4"
+t_equals "隧道仅 IPv6 判定" "$(_xmg_warp_tunnel_family "" "fd01::1")" "v6"
+t_equals "v4 隧道承载 CIDR" "$(_xmg_warp_tunnel_cidr v4)" "0.0.0.0/0"
+t_equals "v6 隧道承载 CIDR" "$(_xmg_warp_tunnel_cidr v6)" "::/0"
+t_assert "双栈宿主 + v4 隧道需要兜底" _xmg_warp_family_fallback v4 1 1
+t_assert "单栈宿主 + v4 隧道不需要兜底" "! _xmg_warp_family_fallback v4 1 0"
+t_assert "单栈宿主 + v6 隧道不需要兜底" "! _xmg_warp_family_fallback v6 0 1"
+t_assert "双栈隧道不需要兜底" "! _xmg_warp_family_fallback dual 1 1"
+
+# 22. 网络栈感知与 curl 协议族参数检测测试
 export XMG_MOCK_WARP_STACK="ipv6_only"
 FAM_V6="$(_xmg_warp_curl_family)"
 t_equals "纯 IPv6 下 curl 参数输出 -6" "$FAM_V6" "-6"
