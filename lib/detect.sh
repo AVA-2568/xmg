@@ -240,6 +240,62 @@ xmg_detect_mem_total_mb() {
     return 0
 }
 
+# 可用内存（MB）：MemAvailable 优先，回退 MemFree+Buffers+Cached，
+# 无 /proc 时用 free，全失败返回 1（调用方自行决定降级）。
+# XMG_MEMINFO_FILE 仅用于测试注入，生产恒为 /proc/meminfo。
+XMG_MEMINFO_FILE="${XMG_MEMINFO_FILE:-/proc/meminfo}"
+
+xmg_mem_available_mb() {
+    local kb="" mb=""
+
+    if [ -r "$XMG_MEMINFO_FILE" ]; then
+        kb="$(awk '/^MemAvailable:/ {print $2; exit}' "$XMG_MEMINFO_FILE" 2>/dev/null)"
+        if [ -z "$kb" ]; then
+            kb="$(awk '/^MemFree:/ {f=$2} /^Buffers:/ {b=$2} /^Cached:/ {c=$2} END {print f+b+c}' \
+                "$XMG_MEMINFO_FILE" 2>/dev/null)"
+        fi
+    fi
+
+    if [ -n "$kb" ]; then
+        mb=$((kb / 1024))
+        printf '%s' "$mb"
+        return 0
+    fi
+
+    if command -v free >/dev/null 2>&1; then
+        mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
+        if [ -n "$mb" ]; then
+            printf '%s' "$mb"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# 有效内存（MB）：真正能分给新进程的量，不是标称总内存。
+#   512MB 机器跑着其他服务、只剩 218MB 可用时，按 512MB 判档会同时放大
+#   GOMEMLIMIT 与 geosite 档位，Go 峰值一冲就到 OOM 边缘。
+#   可用内存是瞬时值，加 25% 抖动余量后再与总内存取小，避免单次采样把档位打得太低。
+xmg_mem_effective_mb() {
+    local total=0 avail=0 eff=0
+    total="$(xmg_detect_mem_total_mb)"
+    [[ "$total" =~ ^[0-9]+$ ]] || total=0
+    avail="$(xmg_mem_available_mb 2>/dev/null || printf 0)"
+    [[ "$avail" =~ ^[0-9]+$ ]] || avail=0
+    if [ "$total" -le 0 ]; then
+        printf '0'
+        return 0
+    fi
+    if [ "$avail" -le 0 ]; then
+        printf '%s' "$total"
+        return 0
+    fi
+    eff=$(( avail + avail / 4 ))
+    [ "$eff" -lt "$total" ] || eff="$total"
+    printf '%s' "$eff"
+}
+
 # ------------------------------------------------------------------
 # 有效 CPU 核数：cgroup CPU 配额优先，分数配额（0.5C）收敛为 1
 # ------------------------------------------------------------------

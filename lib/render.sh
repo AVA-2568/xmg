@@ -276,6 +276,217 @@ _xmg_warp_tunnel_profile() {
     printf '%s|%s|%s' "$allowed" "$dns" "$strat"
 }
 
+# ===== WARP 分流：地理数据文件与规则集 =====
+# 为什么分档而不是一律开 geosite：
+#   Xray 引用 geosite: 标签时，启动阶段要按标签逐个扫描整个 dat 文件；常驻内存
+#   只保留被引用标签的 matcher（增量约 1~3MB），但 11MB 级全量包在 80~215MB 机型
+#   上会挤压 Xray 原本 20~35MB 的 RSS，进而触发 GOMEMLIMIT 抖动。
+#   因此默认只取 v2fly 的 dlc.dat（约 2.4MB），低内存机型直接回落到硬编码域名。
+XMG_WARP_GEOSITE_FILE="${XMG_WARP_GEOSITE_FILE:-${XMG_XRAY_ASSET_DIR:-/usr/local/share/xray}/geosite.dat}"
+
+# 档位 -> geosite 标签集合。标签越少，启动扫描次数与 matcher 内存越小。
+_xmg_warp_geo_tags() {
+    case "${1:-off}" in
+        slim) printf '%s' 'openai anthropic google-gemini netflix' ;;
+        std)  printf '%s' 'openai anthropic google-gemini netflix disney hbo primevideo spotify youtube' ;;
+        full) printf '%s' 'openai anthropic google-gemini netflix disney hbo primevideo spotify youtube tiktok telegram twitter github' ;;
+        *)    printf '' ;;
+    esac
+}
+
+# 有效 CPU 百分比（100 = 1 核）。cgroup v2 的 0.2C 会写成 cpu.max "20000 100000"，
+# 整数除法会抹成 0 再被兜底成 1 核，所以这里单独按百分比算，不复用核数探测。
+_xmg_warp_cpu_pct() {
+    local quota='' period='' pct=''
+    local cpu_max="${XMG_CGROUP_CPU_MAX:-/sys/fs/cgroup/cpu.max}"
+    if [ -r "$cpu_max" ]; then
+        read -r quota period _ < "$cpu_max" 2>/dev/null || true
+        if [[ "$quota" =~ ^[0-9]+$ ]] && [[ "$period" =~ ^[0-9]+$ ]] && [ "$period" -gt 0 ]; then
+            pct=$(( quota * 100 / period ))
+            printf '%s' "$pct"
+            return 0
+        fi
+    fi
+
+    local quota_f="${XMG_CGROUP_CPU_QUOTA:-/sys/fs/cgroup/cpu/cpu.cfs_quota_us}"
+    local period_f="${XMG_CGROUP_CPU_PERIOD:-/sys/fs/cgroup/cpu/cpu.cfs_period_us}"
+    if [ -r "$quota_f" ] && [ -r "$period_f" ]; then
+        read -r quota < "$quota_f" 2>/dev/null || true
+        read -r period < "$period_f" 2>/dev/null || true
+        if [[ "$quota" =~ ^[0-9]+$ ]] && [[ "$period" =~ ^[0-9]+$ ]] && [ "$period" -gt 0 ]; then
+            pct=$(( quota * 100 / period ))
+            printf '%s' "$pct"
+            return 0
+        fi
+    fi
+
+    local cores=''
+    if declare -F xmg_detect_cpu_cores >/dev/null 2>&1; then
+        cores="$(xmg_detect_cpu_cores 2>/dev/null || true)"
+    fi
+    [[ "$cores" =~ ^[0-9]+$ ]] && [ "$cores" -gt 0 ] || cores=1
+    printf '%s' $(( cores * 100 ))
+}
+
+# 内存 -> 默认档位。auto 的语义是「按机型自己选」，用户可显式覆盖。
+# 判据用「有效内存」而不是标称总内存：512MB 机器只剩 218MB 可用时，
+# 按 512MB 判 std 会多加载 5 个标签，而 geosite 加载峰值正好落在这段余量里。
+# 只做分流档位判断，不参与 tune.sh 的内核调优分档，两者互不影响。
+xmg_warp_geo_auto_mode() {
+    local mb=0 cpu_pct=100 base=''
+    if declare -F xmg_mem_effective_mb >/dev/null 2>&1; then
+        mb="$(xmg_mem_effective_mb 2>/dev/null || printf 0)"
+    elif declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+        mb="$(xmg_detect_mem_total_mb 2>/dev/null || printf 0)"
+    fi
+    [[ "$mb" =~ ^[0-9]+$ ]] || mb=0
+
+    if [ "$mb" -le 0 ]; then
+        printf 'off'       # 探测失败：按最保守处理，不拿稳定性赌
+        return 0
+    elif [ "$mb" -le 128 ]; then
+        base='off'         # 80MB 级：零地理数据开销，纯硬编码
+    elif [ "$mb" -le 256 ]; then
+        base='slim'        # 129~256MB：4 个核心标签
+    elif [ "$mb" -le 512 ]; then
+        base='std'
+    else
+        base='full'
+    fi
+
+    # 0.2C 这类弱 CPU：dat 扫描是启动期的 CPU 密集操作，档位再收一档。
+    # 只收档不下探到 off —— 弱 CPU 机型往往内存也不大，slim 已是可用的最低档。
+    cpu_pct="$(_xmg_warp_cpu_pct 2>/dev/null || printf 100)"
+    [[ "$cpu_pct" =~ ^[0-9]+$ ]] || cpu_pct=100
+    if [ "$cpu_pct" -le 20 ]; then
+        case "$base" in
+            full) base='slim' ;;
+            std)  base='slim' ;;
+        esac
+    elif [ "$cpu_pct" -le 50 ]; then
+        case "$base" in
+            full) base='std' ;;
+            std)  base='slim' ;;
+        esac
+    fi
+
+    printf '%s' "$base"
+    return 0
+}
+
+xmg_warp_geo_mode_resolve() {
+    case "${1:-auto}" in
+        auto|'') xmg_warp_geo_auto_mode ;;
+        off|slim|std|full) printf '%s' "$1" ;;
+        *) printf 'off' ;;
+    esac
+}
+
+# dat 是否可用：1MB 下限能挡掉 404 HTML 与被截断的半包。
+# XMG_WARP_GEO_DISABLE=1 是渲染期的强制降级开关：内核 -test 判定 geosite
+# 不可用时（tag 不存在/文件损坏），调用方靠它重渲染一版纯硬编码配置。
+xmg_warp_geo_available() {
+    local f="${XMG_WARP_GEOSITE_FILE:-/usr/local/share/xray/geosite.dat}" sz=0
+    [ "${XMG_WARP_GEO_DISABLE:-0}" = "1" ] && return 1
+    [ -s "$f" ] || return 1
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$sz" =~ ^[0-9]+$ ]] || return 1
+    [ "$sz" -ge 1048576 ] || return 1
+    return 0
+}
+
+# 分流条目唯一真源。
+#   硬编码核心永远排在最前：geosite 缺失、档位为 off、或 dat 被删时，
+#   这批域名仍能保证 AI / 主流流媒体走 WARP，功能不会整块失效。
+#   geosite 只做「扩展覆盖」，不替代硬编码。
+xmg_warp_routing_domains() {
+    local mode='' m='' t=''
+    mode="${1:-auto}"
+    m="$(xmg_warp_geo_mode_resolve "$mode")"
+
+    printf '%s\n' \
+        'domain:openai.com' \
+        'domain:chatgpt.com' \
+        'domain:oaistatic.com' \
+        'domain:oaiusercontent.com' \
+        'domain:sora.com' \
+        'domain:anthropic.com' \
+        'domain:claude.ai' \
+        'domain:gemini.google.com' \
+        'domain:bard.google.com' \
+        'domain:generativeai.googleapis.com' \
+        'domain:makersuite.google.com' \
+        'domain:deepmind.com' \
+        'domain:deepmind.google' \
+        'domain:copilot.microsoft.com' \
+        'domain:sydney.bing.com' \
+        'domain:perplexity.ai' \
+        'domain:pplx.ai' \
+        'domain:midjourney.com' \
+        'domain:huggingface.co' \
+        'domain:groq.com' \
+        'domain:poe.com' \
+        'domain:cursor.com' \
+        'domain:cursor.sh' \
+        'domain:netflix.com' \
+        'domain:netflix.net' \
+        'domain:nflximg.net' \
+        'domain:nflxvideo.net' \
+        'domain:nflxext.com' \
+        'domain:nflxso.net' \
+        'domain:disneyplus.com' \
+        'domain:disney-portal.my.onetrust.com' \
+        'domain:dssott.com' \
+        'domain:bamgrid.com' \
+        'domain:disneystreaming.com' \
+        'domain:spotify.com' \
+        'domain:scdn.co' \
+        'domain:spoti.fi' \
+        'domain:max.com' \
+        'domain:hbo.com' \
+        'domain:hbomax.com' \
+        'domain:primevideo.com' \
+        'domain:aiv-cdn.net' \
+        'domain:amazonvideo.com' \
+        'domain:tv.apple.com' \
+        'domain:hulu.com' \
+        'domain:peacocktv.com' \
+        'domain:paramountplus.com' \
+        'domain:tiktok.com' \
+        'domain:byteoversea.com' \
+        'domain:ibytedtos.com' \
+        'domain:musical.ly' \
+        'domain:tiktokcdn.com' \
+        'domain:tiktokv.com' \
+        'domain:gamer.com.tw' \
+        'domain:bilibili.tv' \
+        'domain:viu.com' \
+        'domain:viu.tv'
+
+    if [ "$m" != 'off' ] && xmg_warp_geo_available; then
+        for t in $(_xmg_warp_geo_tags "$m"); do
+            printf 'geosite:%s\n' "$t"
+        done
+    fi
+}
+
+# 同一份条目的 JSON 数组形态，供 jq 引擎与 warp.sh 增量合并复用。
+# 两条渲染路径都从这里取，避免又出现「bash 版 33 条 / jq 版 55 条」的漂移。
+xmg_warp_routing_domains_json() {
+    local first=1 d=''
+    printf '['
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ "$first" -eq 1 ]; then
+            first=0
+        else
+            printf ','
+        fi
+        printf '"%s"' "$d"
+    done < <(xmg_warp_routing_domains "${1:-auto}")
+    printf ']'
+}
+
 # ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
 # REALITY 不需要证书：对 target 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
 # serverNames 支持逗号分隔多值 —— 这就是「同一端口服务多个域名」的真实端口复用。
@@ -670,48 +881,28 @@ _xmg_render_config_bash() {
     #   会把所有经代理访问 22 端口的流量强制用宿主机真实 IP 直连（流量泄漏），
     #   而且宿主 SSH 压根不经过 Xray，这条规则保护不了任何东西。
     if [ "$warp_on" = "1" ] && [ "$warp_mode" = "routing" ]; then
+        local _wgm='' _wd='' _wfirst=1
+        _wgm="$(_xmg_render_get_val WARP_GEO_MODE auto)"
         printf ',\n'
         printf '  "routing": {\n'
-        printf '    "domainStrategy": "IPIfNonMatch",\n'
+        # 这里只有域名规则，用 AsIs 不做 IP 匹配：
+        # IPIfNonMatch 会让每条未命中域名的连接额外做一次 DNS 解析，纯属浪费。
+        printf '    "domainStrategy": "AsIs",\n'
         printf '    "rules": [\n'
         printf '      {\n'
         printf '        "type": "field",\n'
         printf '        "outboundTag": "warp-out",\n'
         printf '        "domain": [\n'
-        printf '          "domain:openai.com",\n'
-        printf '          "domain:chatgpt.com",\n'
-        printf '          "domain:oaistatic.com",\n'
-        printf '          "domain:oaiusercontent.com",\n'
-        printf '          "domain:sora.com",\n'
-        printf '          "domain:anthropic.com",\n'
-        printf '          "domain:claude.ai",\n'
-        printf '          "domain:gemini.google.com",\n'
-        printf '          "domain:bard.google.com",\n'
-        printf '          "domain:generativeai.googleapis.com",\n'
-        printf '          "domain:makersuite.google.com",\n'
-        printf '          "domain:deepmind.com",\n'
-        printf '          "domain:deepmind.google",\n'
-        printf '          "domain:copilot.microsoft.com",\n'
-        printf '          "domain:sydney.bing.com",\n'
-        printf '          "domain:perplexity.ai",\n'
-        printf '          "domain:pplx.ai",\n'
-        printf '          "domain:midjourney.com",\n'
-        printf '          "domain:huggingface.co",\n'
-        printf '          "domain:groq.com",\n'
-        printf '          "domain:poe.com",\n'
-        printf '          "domain:cursor.com",\n'
-        printf '          "domain:cursor.sh",\n'
-        printf '          "domain:netflix.com",\n'
-        printf '          "domain:byteoversea.com",\n'
-        printf '          "domain:ibytedtos.com",\n'
-        printf '          "domain:musical.ly",\n'
-        printf '          "domain:tiktokcdn.com",\n'
-        printf '          "domain:tiktokv.com",\n'
-        printf '          "domain:gamer.com.tw",\n'
-        printf '          "domain:bilibili.tv",\n'
-        printf '          "domain:viu.com",\n'
-        printf '          "domain:viu.tv"\n'
-        printf '        ]\n'
+        while IFS= read -r _wd; do
+            [ -n "$_wd" ] || continue
+            if [ "$_wfirst" -eq 1 ]; then
+                _wfirst=0
+                printf '          "%s"' "$_wd"
+            else
+                printf ',\n          "%s"' "$_wd"
+            fi
+        done < <(xmg_warp_routing_domains "$_wgm")
+        printf '\n        ]\n'
         if [ "$is_ipv6_only" = "true" ]; then
             printf '      },\n'
             printf '      {\n'
@@ -970,47 +1161,13 @@ xmg_render_config() {
         }
       ] |
       .routing = {
-        "domainStrategy": "IPIfNonMatch",
+        "domainStrategy": "AsIs",
         "rules": (
           [
             {
               "type": "field",
               "outboundTag": "warp-out",
-              "domain": [
-                "domain:openai.com",
-                "domain:chatgpt.com",
-                "domain:oaistatic.com",
-                "domain:oaiusercontent.com",
-                "domain:sora.com",
-                "domain:anthropic.com",
-                "domain:claude.ai",
-                "domain:gemini.google.com",
-                "domain:bard.google.com",
-                "domain:generativeai.googleapis.com",
-                "domain:makersuite.google.com",
-                "domain:deepmind.com",
-                "domain:deepmind.google",
-                "domain:copilot.microsoft.com",
-                "domain:sydney.bing.com",
-                "domain:perplexity.ai",
-                "domain:pplx.ai",
-                "domain:midjourney.com",
-                "domain:huggingface.co",
-                "domain:groq.com",
-                "domain:poe.com",
-                "domain:cursor.com",
-                "domain:cursor.sh",
-                "domain:netflix.com",
-                "domain:byteoversea.com",
-                "domain:ibytedtos.com",
-                "domain:musical.ly",
-                "domain:tiktokcdn.com",
-                "domain:tiktokv.com",
-                "domain:gamer.com.tw",
-                "domain:bilibili.tv",
-                "domain:viu.com",
-                "domain:viu.tv"
-              ]
+              "domain": $routing_domains
             }
           ] + (if $is_ipv6_only then [{ "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }] else [] end)
         )
@@ -1150,6 +1307,7 @@ xmg_render_config() {
             --argjson buffer_size "$bufsz"
             --argjson dns_servers "$(_xmg_render_dns_servers_json)"
             --argjson is_ipv6_only "$is_ipv6_only"
+            --argjson routing_domains "$(xmg_warp_routing_domains_json "$(_xmg_render_get_val WARP_GEO_MODE auto)")"
             --argjson socks_on "$socks_bool"
             --arg socks_listen "$socks_listen"
             --argjson socks_port "$socks_port"

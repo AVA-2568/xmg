@@ -117,7 +117,8 @@ xmg_state_defaults() {
         'WARP_PUBLIC_KEY=' \
         'WARP_IPV4=' \
         'WARP_IPV6=' \
-        'WARP_RESERVED='
+        'WARP_RESERVED=' \
+        'WARP_GEO_MODE=auto'
 }
 
 declare -gA XMG_STATE_DEFAULTS=()
@@ -827,6 +828,20 @@ xmg_state_validate() {
             xmg_error "非法 WARP_ENDPOINT 格式: '$warp_ep'（需为 IP:端口、[IPv6]:端口 或 域名:端口）"
             return 2
         fi
+    fi
+
+    # 地理数据档位：只允许 auto / off / slim / std / full。
+    # auto 是「按内存与有效 CPU 自动判档」，显式档位用于用户覆盖。
+    local warp_geo
+    _state_val warp_geo WARP_GEO_MODE
+    if [ -n "$warp_geo" ]; then
+        case "$warp_geo" in
+            auto|off|slim|std|full) ;;
+            *)
+                xmg_error "非法 WARP_GEO_MODE: '$warp_geo'（仅支持 auto/off/slim/std/full）"
+                return 2
+                ;;
+        esac
     fi
 
     return 0

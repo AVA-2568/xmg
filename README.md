@@ -15,7 +15,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AVA-2568/xmg/main/install.sh
 专为 **0.5C / 215MB RAM 极低内存 VPS**、**NAT 端口映射机器** 与 **纯 IPv6 / 双栈主机** 打造的极简、坚固、零臃肿代理与核心网络栈管理引擎。
 
 - **零外部重依赖**：纯 Bash 4.4+ 实现，jq / python 全程可选（存在时用于模板渲染加速，缺失自动回退纯 Bash 引擎），拒绝常驻外部中间件。
-- **内存极限防护**：针对 `<= 256MB` 设立专属 `extreme_low` 档位；按运行时内存（容器内取 cgroup 配额）动态计算 `GOMEMLIMIT`（32/48/64/100/150MiB）与 `GOGC`，`GOMAXPROCS` 按有效核数自适应（<=512MB 收敛为 1，上限 4），并注入 `GODEBUG=madvdontneed=1`，Xray 常驻内存稳定在 20MB~35MB。
+- **内存极限防护**：针对 `<= 256MB` 设立专属 `extreme_low` 档位；`GOMEMLIMIT` 按**有效内存**（`min(总内存, 可用内存 × 1.25)`）动态计算，档位 32/40/48/64/100/150MiB —— 512MB 机器只剩 218MB 可用时会落 48MiB 而不是按标称值给 64MiB；`GOMAXPROCS` 按有效核数自适应（<=512MB 收敛为 1，上限 4），并注入 `GODEBUG=madvdontneed=1`，Xray 常驻内存稳定在 20MB~35MB。
 - **容器与虚拟化自省**：自动识别 KVM、OpenVZ (OVZ)、LXC、Docker；对受限容器的只读 `sysctl` 与 Swap 限制平滑熔断降级，绝不因权限缺失崩溃。
 - **全场景网络适配**：解耦 NAT 外部映射端口；支持纯 IPv4、纯 IPv6 及双栈环境，内置 DoH 与出站解析动态适配。
 - **两阶段原子事务**：`state.env` 批量暂存合并提交，配置经 `xray run -test` 校验通过后原子替换，失败完整双回滚。
@@ -87,6 +87,11 @@ xmg doctor                       # 结构化疗程卡片（--dry-run 无副作�
 # 路由与出站
 xmg warp status                  # WARP 原生出站
 xmg warp enable                  # 全局接管（单栈自动放开 DNS/出站策略）
+xmg warp enable routing          # 流媒体/AI 分流（按机型自动选地理数据档位）
+xmg warp enable routing --geo slim   # 强制档位: auto / off / slim / std / full
+xmg warp geo status              # 查看分档、数据文件、标签与条目数
+xmg warp geo update              # 刷新 geosite.dat（官方 XTLS/Xray-rules-dat）
+xmg warp geo clean               # 删除地理数据，回退硬编码分流
 xmg warp test                    # 解锁与延迟测试
 xmg warp export                  # 导出可直接粘贴的 Xray outbound
 
@@ -156,6 +161,26 @@ PASS=44  FAIL=0  SKIP=1   (alpine / openrc / iptables)
   - 单栈 + WARP：隧道带来对端协议族时，全局接管模式下自动把 DNS/出站策略从 `UseIPv6` 放开为 `UseIP`（否则纯 IPv6 机器即便有 WARP IPv4 出口也只查 AAAA，IPv4-only 站点仍不可达）；停用 WARP 时收回
   - WARP 出站栈矩阵：`allowedIPs` / `remoteDNS` / `targetStrategy` 按「主机栈 × 隧道实际分配地址族」同源下发。隧道只有 IPv4 时不声明 `::/0`、`targetStrategy` 锁 `UseIPv4`（解析出 AAAA 却找不到 peer 会直接失败）；双栈隧道配纯 IPv6 主机时强制 `UseIPv4`，把隧道的 IPv4 出口真正用起来。三种入站（SOCKS5 / VLESS+TLS / REALITY）共用同一份出站配置
   - WARP 兜底放行：`freedom` 出站的 `finalRules` 末尾固定追加 `{"action":"allow"}` —— 官方默认策略会屏蔽来自 VLESS 等入站的私有/保留地址段，缺兜底时 WARP 内网段（`172.16.0.0/12`）、回环段会被静默黑洞且不留日志
+
+### WARP 分流的地理数据分档
+
+分流模式（`warp enable routing`）默认按机型自动选档，而不是一律加载全量 geosite：Xray 在配置解析期会把 dat 整文件读入（v25）或按标签流式扫描（v26），低内存机的真实风险是加载峰值，不是常驻 matcher（13 个标签约 790 条域名，常驻 <1MB）。
+
+判据用**有效内存**（`min(总内存, 可用内存 × 1.25)`），与 `GOMEMLIMIT` 同一口径：512MB 机器跑着其他服务、只剩 218MB 可用时按 272MB 判档，不会因为标称值够大就多加载 5 个标签。
+
+| 有效内存 | 有效 CPU | 档位 | 数据文件 | 规则 |
+| --- | --- | --- | --- | --- |
+| ≤128MB（含 80MB 机型） | 任意 | `off` | 不下载 | 57 条内置硬编码域名 |
+| 129–256MB | ≥0.5C | `slim` | geosite.dat | 硬编码 + 4 标签（openai/anthropic/google-gemini/netflix） |
+| 257–512MB | ≥0.5C | `std` | geosite.dat | 硬编码 + 9 标签 |
+| >512MB | ≥0.5C | `full` | geosite.dat | 硬编码 + 13 标签 |
+
+- CPU ≤0.5C 降一档，≤0.2C 直接降到 `slim`（dat 扫描是启动期 CPU 密集操作）
+- 数据源为官方 `XTLS/Xray-rules-dat` 的 `geosite.dat.gz`（下载 2.4MB，解压约 7.7MB），落盘 `/usr/local/share/xray/geosite.dat`（Xray 官方默认资源目录）；带 `.sha256sum` 校验，失败回退 v2fly 社区源，再失败回退硬编码
+- **没下过地理数据时**：`warp enable routing` 会先按档位尝试下载（off 档跳过），下载失败/超时/校验不通过都只告警不阻断，规则退化为 57 条硬编码域名，AI 与主流流媒体照常走 WARP；`off` 档不会下载任何数据，零磁盘零加载开销
+- `domainStrategy` 默认 `AsIs`：规则全是域名，不做 IP 匹配，避免每条未命中连接多做一次 DNS 解析
+- 四层兜底：dat 缺失/损坏 → 硬编码；`xray run -test` 失败 → 自动去掉 geosite 重试一次并把生效档位降为 `off`；规则未命中 → `direct`（`outbounds[0]`，不绕路也不阻断）；端点不可达 → `xmg warp test` 显式暴露
+- SSH 不经过 Xray，分流规则永远不会影响登录
 
 ---
 

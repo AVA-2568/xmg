@@ -10,7 +10,8 @@
 #   - 核心目标: 彻底隐藏高污染本机 IP，节点公网出站默认 100% 走 WARP 清洁出口
 #   - 宿主机保护: 100% 零侵入、零网卡、零路由修改、零 DNS 篡改，SSH 物理级绝对不可能失联！
 #   - 官方标准: 完整解析 Cloudflare client_id，精准填充 WireGuard 3 字节 reserved 保留字段，解决丢包假死
-#   - 零依赖: 全局出站置顶架构，不写 geoip: 规则，零依赖 geoip.dat，244MB 极低内存机器稳定运行
+#   - 地理数据: 分流模式按机型分档启用官方 geosite.dat（XTLS/Xray-rules-dat），
+#     极低内存（<=128MB / 0.2C 弱核）自动回退内置硬编码域名，零 dat 加载开销
 #
 
 # warp.sh 是 Bash 库文件，明确拒绝非 Bash 宿主
@@ -1256,6 +1257,174 @@ _xmg_warp_get_account_vars() {
     return 0
 }
 
+# ===== 地理数据文件管理（WARP 分流用） =====
+# 数据源与落盘位置严格跟随 Xray 官方：
+#   1. 官方仓库 XTLS/Xray-rules-dat 提供 geosite.dat(.gz) 与 .sha256sum；
+#   2. 官方 install-release.sh 的 DAT_PATH 默认就是 /usr/local/share/xray，
+#      这也是 Xray 内核查找资源文件的默认目录，无需额外设 XRAY_LOCATION_ASSET。
+#   体积取舍：geosite.dat 解压后约 7.7MB，压缩包 2.4MB；geosite-expand.dat 解压 100MB+，
+#   低配机一律不用。官方源失败时回退 v2fly dlc.dat（2.4MB，标签集兼容）。
+
+xmg_warp_geo_dir() {
+    printf '%s' "${XMG_XRAY_ASSET_DIR:-/usr/local/share/xray}"
+}
+
+_xmg_warp_geo_size() {
+    local f="${1:-}" sz=''
+    [ -f "$f" ] || { printf '0'; return 0; }
+    sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
+    printf '%s' "$sz"
+}
+
+# 下载器：curl 优先，wget 兜底；镜像用于 GitHub 直连受限的机房
+_xmg_warp_geo_get() {
+    local url="$1" out="$2" timeout="${3:-120}"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 8 --max-time "$timeout" "$url" -o "$out" 2>/dev/null && return 0
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 30 -O "$out" "$url" 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+_xmg_warp_sha256() {
+    local f="$1" h=''
+    if command -v sha256sum >/dev/null 2>&1; then
+        h="$(sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        h="$(shasum -a 256 "$f" 2>/dev/null | awk '{print $1}')"
+    elif command -v busybox >/dev/null 2>&1; then
+        h="$(busybox sha256sum "$f" 2>/dev/null | awk '{print $1}')"
+    fi
+    printf '%s' "$h" | tr 'A-F' 'a-f'
+}
+
+# 官方源：geosite.dat.gz（2.4MB）→ gzip 解压 → 原子替换
+_xmg_warp_geo_fetch_official() {
+    local out="$1"
+    local base="https://github.com/XTLS/Xray-rules-dat/releases/latest/download"
+    local gz="${out}.gz.$$"
+    local sumf="${gz}.sum"
+    local un="${out}.xmg-new.$$"
+    local u='' sum='' calc='' sz=0
+
+    for u in "$base" "https://ghfast.top/$base" "https://mirror.ghproxy.com/$base"; do
+        rm -f "$gz" "$sumf" "$un" 2>/dev/null || true
+        _xmg_warp_geo_get "$u/geosite.dat.gz" "$gz" 150 || continue
+        _xmg_warp_geo_get "$u/geosite.dat.gz.sha256sum" "$sumf" 30 || true
+
+        # 压缩包至少 1MB，挡掉 404 页面与被截断的半包
+        [ "$(_xmg_warp_geo_size "$gz")" -ge 1048576 ] || continue
+
+        if [ -s "$sumf" ]; then
+            sum="$(awk '{print $1; exit}' "$sumf" 2>/dev/null | tr 'A-F' 'a-f')"
+            calc="$(_xmg_warp_sha256 "$gz")"
+            if [ -n "$sum" ] && [ -n "$calc" ] && [ "$sum" != "$calc" ]; then
+                xmg_warn "地理数据 sha256 校验不匹配，换下一个源重试..."
+                continue
+            fi
+        fi
+
+        if gzip -dc "$gz" > "$un" 2>/dev/null; then
+            sz="$(_xmg_warp_geo_size "$un")"
+            if [ "$sz" -ge 1048576 ] && [ "$sz" -le 20971520 ]; then
+                if mv -f "$un" "$out" 2>/dev/null; then
+                    rm -f "$gz" "$sumf" 2>/dev/null || true
+                    return 0
+                fi
+            fi
+        fi
+    done
+    rm -f "$gz" "$sumf" "$un" 2>/dev/null || true
+    return 1
+}
+
+# 备用源：v2fly dlc.dat（未压缩 2.4MB，标签集与 Xray 官方兼容）
+_xmg_warp_geo_fetch_v2fly() {
+    local out="$1"
+    local base="https://github.com/v2fly/domain-list-community/releases/latest/download"
+    local un="${out}.xmg-new.$$"
+    local u='' sz=0
+
+    for u in "$base" "https://ghfast.top/$base" "https://mirror.ghproxy.com/$base"; do
+        rm -f "$un" 2>/dev/null || true
+        _xmg_warp_geo_get "$u/dlc.dat" "$un" 150 || continue
+        sz="$(_xmg_warp_geo_size "$un")"
+        if [ "$sz" -ge 1048576 ] && [ "$sz" -le 8388608 ]; then
+            mv -f "$un" "$out" 2>/dev/null && return 0
+        fi
+    done
+    rm -f "$un" 2>/dev/null || true
+    return 1
+}
+
+_xmg_warp_geo_download() {
+    local out="$1"
+    _xmg_warp_geo_fetch_official "$out" && return 0
+    xmg_warn "官方地理数据源不可用，回退 v2fly 社区数据源..."
+    _xmg_warp_geo_fetch_v2fly "$out" && return 0
+    return 1
+}
+
+# 确保地理数据就绪；结果写入全局 XMG_WARP_GEO_EFFECTIVE（失败会降为 off）。
+# 必须在当前 shell 直接调用，不要放进 $(...) —— 否则变量回传会丢。
+_xmg_warp_geo_prepare() {
+    local want="${1:-auto}" mode='' dir='' f='' mark='' ts=0 now=0
+    XMG_WARP_GEO_EFFECTIVE="off"
+
+    mode="$(xmg_warp_geo_mode_resolve "$want")"
+    if [ "$mode" = "off" ]; then
+        return 0
+    fi
+
+    dir="$(xmg_warp_geo_dir)"
+    f="${dir}/geosite.dat"
+    XMG_WARP_GEOSITE_FILE="$f"
+    export XMG_WARP_GEOSITE_FILE
+    mark="${XMG_WARP_GEO_FAIL_MARK:-${XMG_WARP_DIR}/.geodata_failed}"
+
+    if xmg_warp_geo_available; then
+        rm -f "$mark" 2>/dev/null || true
+        XMG_WARP_GEO_EFFECTIVE="$mode"
+        return 0
+    fi
+
+    # 测试模式绝不触网：用例要的是确定性的规则结构，不是真实下载
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        return 0
+    fi
+
+    # 失败负缓存：三个源依次超时要等 24 秒以上，不能让用户每次 enable 都再等一遍。
+    # 24 小时内直接走硬编码，需要重试时用 xmg warp geo update。
+    if [ -f "$mark" ]; then
+        ts="$(cat "$mark" 2>/dev/null | tr -d '[:space:]')"
+        [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
+        now="$(date +%s 2>/dev/null || printf 0)"
+        if [ "$ts" -gt 0 ] && [ "$now" -gt 0 ] && [ $(( now - ts )) -lt 86400 ]; then
+            xmg_info "地理数据 24 小时内获取失败过，本次直接使用硬编码域名 (xmg warp geo update 可强制重试)"
+            return 0
+        fi
+    fi
+
+    xmg_info "正在获取地理数据文件 (geosite.dat, 约 2.4MB)..."
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        xmg_warn "无法创建地理数据目录: $dir，本次降级为硬编码分流"
+        return 0
+    fi
+    if _xmg_warp_geo_download "$f" && xmg_warp_geo_available; then
+        rm -f "$mark" 2>/dev/null || true
+        xmg_info "地理数据已就绪: $f ($(_xmg_warp_geo_size "$f") 字节)"
+        XMG_WARP_GEO_EFFECTIVE="$mode"
+        return 0
+    fi
+
+    date +%s > "$mark" 2>/dev/null || true
+    xmg_warn "地理数据获取失败，本次分流降级为内置硬编码域名 (核心 AI / 流媒体仍走 WARP)"
+    xmg_info "24 小时内不再自动重试；需要时执行: xmg warp geo update"
+    return 0
+}
+
 # ===== 无 jq 时的配置合并 =====
 # XMG 托管配置（XMG_XRAY_CONFIG）由渲染器重建：WARP 出站与分流规则本来就在
 # render.sh 里实现（纯 Bash），比 awk 手写 JSON 更可靠。
@@ -1288,7 +1457,22 @@ _xmg_warp_render_managed_config() {
 
 xmg_warp_enable() {
     local mode="${1:-global}"
+    local geo_want=""
     [ "${XMG_TEST_MODE:-0}" = "1" ] || xmg_require_root
+
+    # 第二种写法是 xmg warp enable routing --geo slim|std|full|off|auto
+    if [ "${2:-}" = "--geo" ]; then
+        geo_want="${3:-auto}"
+    elif [ -n "${2:-}" ]; then
+        geo_want="$2"
+    fi
+    case "$geo_want" in
+        ''|auto|off|slim|std|full) ;;
+        *)
+            xmg_warn "未知地理数据档位: '$geo_want'，按 auto 处理"
+            geo_want="auto"
+            ;;
+    esac
 
     # 模式必须先归一：任意字符串都会被当作 global 注入，但非法值会原样写进
     # state.env，之后每次 xmg proxy apply 都在校验阶段被判非法，只能手改文件恢复。
@@ -1307,6 +1491,22 @@ xmg_warp_enable() {
         xmg_info "核心目标: 彻底隐藏高污染本机 IP，节点代理流量全局默认走 WARP 出口"
     fi
 
+    # routing 专属：确保地理数据就绪。
+    # 下载或校验失败只降级为硬编码，不阻断启用 —— 分流失效比「完全没网」更可接受。
+    local geo_effective=""
+    if [ "$mode" = "routing" ]; then
+        if [ -z "$geo_want" ]; then
+            geo_want="$(_xmg_render_get_val WARP_GEO_MODE auto)"
+        fi
+        _xmg_warp_geo_prepare "$geo_want"
+        geo_effective="$XMG_WARP_GEO_EFFECTIVE"
+        if [ "$geo_effective" = "off" ]; then
+            xmg_info "地理数据档位: off (使用内置硬编码域名，零 dat 加载开销)"
+        else
+            xmg_info "地理数据档位: $geo_effective (geosite 标签已合并进分流规则)"
+        fi
+    fi
+
     # 1. 确保账号凭据就绪 (含 client_id / reserved)
     if [ ! -f "$XMG_WARP_ACCOUNT_FILE" ]; then
         _xmg_warp_register 0 || return 1
@@ -1319,6 +1519,9 @@ xmg_warp_enable() {
     if declare -F xmg_state_stage >/dev/null 2>&1; then
         xmg_state_stage WARP_ENABLED 1
         xmg_state_stage WARP_MODE "$mode"
+        if [ "$mode" = "routing" ] && [ -n "$geo_want" ]; then
+            xmg_state_stage WARP_GEO_MODE "$geo_want"
+        fi
         xmg_state_stage WARP_ENDPOINT "$WARP_ACC_ENDPOINT"
         xmg_state_stage WARP_PRIVATE_KEY "$WARP_ACC_PRIVKEY"
         xmg_state_stage WARP_PUBLIC_KEY "$WARP_ACC_PUBKEY"
@@ -1395,72 +1598,14 @@ xmg_warp_enable() {
     else . end
   ] + [ $warp_json ]
 )) |
-(.routing = (.routing // { "domainStrategy": "IPIfNonMatch", "rules": [] })) |
-(.routing.domainStrategy = (.routing.domainStrategy // "IPIfNonMatch")) |
+(.routing = (.routing // { "domainStrategy": "AsIs", "rules": [] })) |
+(.routing.domainStrategy = (.routing.domainStrategy // "AsIs")) |
 (.routing.rules = (
   [ (.routing.rules // [])[] | select((.outboundTag // "") != "warp-out" and ((.port // "") | tostring) != "$ssh_p") ] + [
     {
       "type": "field",
       "outboundTag": "warp-out",
-      "domain": [
-        "domain:openai.com",
-        "domain:chatgpt.com",
-        "domain:oaistatic.com",
-        "domain:oaiusercontent.com",
-        "domain:sora.com",
-        "domain:anthropic.com",
-        "domain:claude.ai",
-        "domain:gemini.google.com",
-        "domain:bard.google.com",
-        "domain:generativeai.googleapis.com",
-        "domain:makersuite.google.com",
-        "domain:deepmind.com",
-        "domain:deepmind.google",
-        "domain:copilot.microsoft.com",
-        "domain:sydney.bing.com",
-        "domain:perplexity.ai",
-        "domain:pplx.ai",
-        "domain:midjourney.com",
-        "domain:huggingface.co",
-        "domain:groq.com",
-        "domain:poe.com",
-        "domain:cursor.com",
-        "domain:cursor.sh",
-        "domain:netflix.com",
-        "domain:netflix.net",
-        "domain:nflximg.net",
-        "domain:nflxvideo.net",
-        "domain:nflxext.com",
-        "domain:nflxso.net",
-        "domain:disneyplus.com",
-        "domain:disney-portal.my.onetrust.com",
-        "domain:dssott.com",
-        "domain:bamgrid.com",
-        "domain:disneystreaming.com",
-        "domain:spotify.com",
-        "domain:scdn.co",
-        "domain:spoti.fi",
-        "domain:max.com",
-        "domain:hbo.com",
-        "domain:hbomax.com",
-        "domain:primevideo.com",
-        "domain:aiv-cdn.net",
-        "domain:amazonvideo.com",
-        "domain:tv.apple.com",
-        "domain:hulu.com",
-        "domain:peacocktv.com",
-        "domain:paramountplus.com",
-        "domain:tiktok.com",
-        "domain:byteoversea.com",
-        "domain:ibytedtos.com",
-        "domain:musical.ly",
-        "domain:tiktokcdn.com",
-        "domain:tiktokv.com",
-        "domain:gamer.com.tw",
-        "domain:bilibili.tv",
-        "domain:viu.com",
-        "domain:viu.tv"
-      ]
+      "domain": \$domains
     }$v6_fallback_rule
   ]
 ))
@@ -1500,8 +1645,13 @@ EOF_ROUTING_JQ
 (if ((.routing.rules // []) | length) == 0 then del(.routing) else . end)
 EOF_GLOBAL_JQ
             fi
-            if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
-                rm -f "$jq_file" 2>/dev/null || true
+            # 分流域名清单由 render.sh 统一生成（硬编码 + geosite 标签），
+            # jq 只负责把数组塞进配置，不再自己持有域名列表。
+            local domains_json="[]"
+            if [ "$mode" = "routing" ]; then
+                domains_json="$(xmg_warp_routing_domains_json "${geo_effective:-off}")"
+            fi
+            if jq --argjson domains "$domains_json" -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
                 merged_ok=1
             else
                 rm -f "$jq_file" "$tmp_cfg" 2>/dev/null || true
@@ -1539,11 +1689,52 @@ EOF_GLOBAL_JQ
             if [ -n "$xray_bin" ] && [ -x "$xray_bin" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
                 local test_out=""
                 if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
-                    xmg_error "Xray 内核校验新配置失败，取消应用，详细错误信息如下:"
-                    printf '%s\n' "$test_out" >&2
-                    rm -f "$tmp_cfg" 2>/dev/null || true
-                    return 1
+                    # geosite 标签名在不同 dat 版本间有差异，且内核在配置解析期就会失败。
+                    # 整块回滚会让用户误判「WARP 不可用」，所以先自动回退硬编码再校验一次。
+                    if [ "$mode" = "routing" ] && [ "${geo_effective:-off}" != "off" ]; then
+                        xmg_warn "含 geosite 规则的配置未通过内核校验，自动回退硬编码域名重试..."
+                        geo_effective="off"
+                        local fallback_ok=0
+                        if [ -f "${jq_file:-/nonexistent}" ]; then
+                            domains_json="$(xmg_warp_routing_domains_json off)"
+                            jq --argjson domains "$domains_json" -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null && fallback_ok=1
+                        else
+                            # 纯 Bash 渲染路径：用环境开关强制关掉 geosite 重渲染托管配置
+                            XMG_WARP_GEO_DISABLE=1 _xmg_warp_render_managed_config "$xray_cfg" "$tmp_cfg" && fallback_ok=1
+                        fi
+                        if [ "$fallback_ok" -eq 1 ]; then
+                            _xmg_warp_relax_stack_strategy "$tmp_cfg" "$mode" "$WARP_ACC_IPV4"
+                            if ! test_out="$("$xray_bin" run -test -format json -c "$tmp_cfg" 2>&1)"; then
+                                xmg_error "回退后仍校验失败，取消应用，详细错误信息如下:"
+                                printf '%s\n' "$test_out" >&2
+                                rm -f "$tmp_cfg" 2>/dev/null || true
+                                [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null
+                                return 1
+                            fi
+                            xmg_info "已回退为硬编码分流规则，并通过内核校验"
+                            # 状态必须同步降级：否则下一次 proxy apply 走 render.sh 重渲染时，
+                            # 会按 state 里的原档位把 geosite 加回来，再撞一次同样的校验失败，
+                            # 而用户看到的是「改个端口就失败」，根本联想不到是地理数据。
+                            geo_want="off"
+                            geo_effective="off"
+                            if declare -F xmg_state_stage >/dev/null 2>&1; then
+                                xmg_state_stage WARP_GEO_MODE off
+                            fi
+                        else
+                            xmg_error "回退硬编码规则失败，取消应用"
+                            rm -f "$tmp_cfg" 2>/dev/null || true
+                            [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null
+                            return 1
+                        fi
+                    else
+                        xmg_error "Xray 内核校验新配置失败，取消应用，详细错误信息如下:"
+                        printf '%s\n' "$test_out" >&2
+                        rm -f "$tmp_cfg" 2>/dev/null || true
+                        [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null
+                        return 1
+                    fi
                 fi
+                [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null
             fi
 
             mv -f "$tmp_cfg" "$xray_cfg"
@@ -1592,9 +1783,13 @@ EOF_GLOBAL_JQ
     if [ -f "$XMG_WARP_ENV_FILE" ]; then
         sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
         sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+        sed -i '/^WARP_GEO_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
     fi
     echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
     echo "WARP_MODE=$mode" >> "$XMG_WARP_ENV_FILE"
+    if [ "$mode" = "routing" ]; then
+        echo "WARP_GEO_MODE=${geo_want:-auto}" >> "$XMG_WARP_ENV_FILE"
+    fi
 
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
     if [ "${XMG_TEST_MODE:-0}" != "1" ] && _warp_can_manage_service; then
@@ -2012,8 +2207,100 @@ xmg_warp_status() {
 
     echo "-------------------- Xray 节点代理清洁出口诊断 --------------------"
     printf "接管模式        : %s\n" "$([ "$cur_mode" = "routing" ] && echo "流媒体/AI 智能分流" || echo "全局清洁接管 (默认出站走 WARP，隐藏高污染本机 IP)")"
+    if [ "$cur_mode" = "routing" ]; then
+        local geo_set="" geo_eff="" geo_note=""
+        geo_set="$(grep -E '^WARP_GEO_MODE=' "$XMG_WARP_ENV_FILE" 2>/dev/null | cut -d= -f2 || true)"
+        [ -n "$geo_set" ] || geo_set="auto"
+        geo_eff="$(xmg_warp_geo_mode_resolve "$geo_set")"
+        if xmg_warp_geo_available; then
+            geo_note="$(xmg_warp_geo_dir)/geosite.dat $(( $(_xmg_warp_geo_size "$XMG_WARP_GEOSITE_FILE") / 1024 ))KB"
+        else
+            geo_note="未就绪 (已回退硬编码)"
+        fi
+        printf "地理数据档位  : %s (设置: %s, 内存约 %sMB)\n" \
+            "$geo_eff" "$geo_set" "$(( $(xmg_detect_mem_total_kb 2>/dev/null || echo 0) / 1024 ))"
+        printf "地理数据文件  : %s\n" "$geo_note"
+    fi
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     echo "=================================================================="
+}
+
+# ===== 地理数据管理 =====
+# xmg warp geo [status|update|clean]
+xmg_warp_geo_cmd() {
+    local action="${1:-status}"
+    local dir="" f="" want="" eff="" sz=0
+
+    dir="$(xmg_warp_geo_dir)"
+    f="${dir}/geosite.dat"
+    XMG_WARP_GEOSITE_FILE="$f"
+    export XMG_WARP_GEOSITE_FILE
+
+    want="$(xmg_state_get WARP_GEO_MODE auto 2>/dev/null || true)"
+    [ -n "$want" ] || want="auto"
+    eff="$(xmg_warp_geo_mode_resolve "$want")"
+
+    case "$action" in
+        status)
+            local mem_mb=0 cpu_pct=100
+            mem_mb="$(( $(xmg_detect_mem_total_kb 2>/dev/null || echo 0) / 1024 ))"
+            cpu_pct="$(_xmg_warp_cpu_pct 2>/dev/null || echo 100)"
+            echo "==================== WARP 地理数据分流状态 ===================="
+            printf "设置档位        : %s\n" "$want"
+            printf "当前生效档位    : %s (内存分档 + CPU 降档后的结果)\n" "$eff"
+            printf "内存 / 有效CPU  : %sMB / %s%%\n" "$mem_mb" "$cpu_pct"
+            printf "数据文件        : %s\n" "$f"
+            if xmg_warp_geo_available; then
+                sz="$(_xmg_warp_geo_size "$f")"
+                printf "文件状态        : 可用 (%s KB)\n" "$(( sz / 1024 ))"
+            else
+                printf "文件状态        : 缺失或不可用 (分流只使用硬编码域名)\n"
+            fi
+            printf "geosite 标签    : %s\n" "$(_xmg_warp_geo_tags "$eff")"
+            printf "分流条目数      : %s (硬编码 + geosite)\n" "$(xmg_warp_routing_domains "$eff" | wc -l | tr -d ' ')"
+            echo "=============================================================="
+            ;;
+        update)
+            xmg_require_root
+            if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+                xmg_info "[测试模式] 跳过地理数据下载"
+                return 0
+            fi
+            eff="$(xmg_warp_geo_mode_resolve "$want")"
+            if [ "$eff" = "off" ]; then
+                # off 档不阻止用户预先准备好数据：下载本身不改变当前规则，
+                # 只是切到 slim/std/full 时才真正加载。
+                xmg_warn "当前档位为 off，数据下载后不会自动生效"
+                xmg_info "启用方式: xmg warp enable routing --geo slim"
+            fi
+            xmg_info "刷新地理数据: $f"
+            mkdir -p "$dir" 2>/dev/null || { xmg_error "无法创建目录: $dir"; return 1; }
+            if _xmg_warp_geo_download "$f" && xmg_warp_geo_available; then
+                rm -f "${XMG_WARP_GEO_FAIL_MARK:-${XMG_WARP_DIR}/.geodata_failed}" 2>/dev/null || true
+                xmg_info "地理数据已更新 ($(( $(_xmg_warp_geo_size "$f") / 1024 )) KB)"
+                xmg_warn "规则未变，重启 Xray 后新数据才会被加载: xmg xray restart"
+                return 0
+            fi
+            xmg_error "地理数据更新失败（网络不可达或产物异常）"
+            return 1
+            ;;
+        clean)
+            xmg_require_root
+            rm -f "${XMG_WARP_GEO_FAIL_MARK:-${XMG_WARP_DIR}/.geodata_failed}" 2>/dev/null || true
+            if [ -f "$f" ]; then
+                rm -f "$f" 2>/dev/null || true
+                xmg_info "已删除地理数据文件: $f"
+                xmg_warn "分流将回退为硬编码域名，重启 Xray 后生效"
+            else
+                xmg_info "地理数据文件不存在，无需清理"
+            fi
+            ;;
+        *)
+            xmg_error "未知的 geo 子命令: '$action'（支持 status / update / clean）"
+            return 2
+            ;;
+    esac
+    return 0
 }
 
 # ===== 流媒体与 IP 清洁度测试 =====

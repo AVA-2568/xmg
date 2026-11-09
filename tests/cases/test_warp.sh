@@ -351,7 +351,41 @@ t_contains "停用后原有 direct 出站依然完好" "$REVERTED_CFG" '"tag": "
 t_contains "停用后原有广告拦截规则依然完好" "$REVERTED_CFG" "geosite:category-ads-all"
 
 
-# 20. 网络栈感知与 curl 协议族参数检测测试
+# 20. 地理数据分档与降级（WARP 分流）
+FAKE_ASSET="$XMG_TMP/geo_asset"
+mkdir -p "$FAKE_ASSET"
+head -c 1200000 /dev/zero > "$FAKE_ASSET/geosite.dat"
+OLD_GEOSITE="${XMG_WARP_GEOSITE_FILE:-}"
+XMG_WARP_GEOSITE_FILE="$FAKE_ASSET/geosite.dat"
+
+t_equals "off 档不引用任何 geosite 标签" "$(xmg_warp_routing_domains off | grep -c '^geosite:')" "0"
+t_equals "slim 档追加 4 个 geosite 标签" "$(xmg_warp_routing_domains slim | grep -c '^geosite:')" "4"
+t_equals "std 档追加 9 个 geosite 标签" "$(xmg_warp_routing_domains std | grep -c '^geosite:')" "9"
+t_equals "full 档追加 13 个 geosite 标签" "$(xmg_warp_routing_domains full | grep -c '^geosite:')" "13"
+t_contains "slim 标签包含 openai" "$(xmg_warp_routing_domains slim)" "geosite:openai"
+t_contains "full 标签包含 github" "$(xmg_warp_routing_domains full)" "geosite:github"
+t_assert "硬编码核心域名始终保留" test "$(xmg_warp_routing_domains off | grep -c '^domain:openai.com$')" -eq 1
+
+XMG_WARP_GEOSITE_FILE="$FAKE_ASSET/missing.dat"
+t_equals "dat 缺失时 slim 自动回退纯硬编码" "$(xmg_warp_routing_domains slim | grep -c '^geosite:')" "0"
+XMG_WARP_GEOSITE_FILE="$OLD_GEOSITE"
+
+# 体积不足 1MB 视为损坏（404 页面/半包）
+mkdir -p "$FAKE_ASSET/bad"
+printf 'not a dat' > "$FAKE_ASSET/bad/geosite.dat"
+XMG_WARP_GEOSITE_FILE="$FAKE_ASSET/bad/geosite.dat"
+t_equals "损坏的 dat 被判为不可用" "$(xmg_warp_routing_domains slim | grep -c '^geosite:')" "0"
+XMG_WARP_GEOSITE_FILE="$OLD_GEOSITE"
+
+# 分档判定：极低内存必须 off，绝不加载 dat
+t_equals "80MB 机型自动选 off" "$(MOCK_MEM_TOTAL_MB=80 XMG_CGROUP_CPU_MAX=/nonexistent xmg_warp_geo_auto_mode)" "off"
+t_equals "215MB 机型自动选 slim" "$(MOCK_MEM_TOTAL_MB=215 XMG_CGROUP_CPU_MAX=/nonexistent MOCK_CPU_CORES=8 xmg_warp_geo_auto_mode)" "slim"
+printf '20000 100000\n' > "$XMG_TMP/cpu02.max"
+t_equals "1024MB + 0.2C 自动降到 slim" "$(MOCK_MEM_TOTAL_MB=1024 XMG_CGROUP_CPU_MAX="$XMG_TMP/cpu02.max" xmg_warp_geo_auto_mode)" "slim"
+t_equals "4096MB + 1C 自动选 full" "$(MOCK_MEM_TOTAL_MB=4096 XMG_CGROUP_CPU_MAX=/nonexistent MOCK_CPU_CORES=8 xmg_warp_geo_auto_mode)" "full"
+t_equals "非法档位回落 off" "$(xmg_warp_geo_mode_resolve bogus)" "off"
+
+# 21. 网络栈感知与 curl 协议族参数检测测试
 export XMG_MOCK_WARP_STACK="ipv6_only"
 FAM_V6="$(_xmg_warp_curl_family)"
 t_equals "纯 IPv6 下 curl 参数输出 -6" "$FAM_V6" "-6"

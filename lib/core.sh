@@ -92,8 +92,10 @@ if [ -z "${XMG_XRAY_CONFIG:-}" ]; then
     XMG_XRAY_CONFIG="$XMG_XRAY_DIR/config.json"
 fi
 
-# 低配机型默认不下载地理数据（geoip.dat / geosite.dat），省磁盘与流量。
-# 设为 1 时才让官方脚本下载 geodata。
+# 低配机型默认不让官方脚本装地理数据（省磁盘与安装时间）。
+# 注意：这只影响 core 安装流程；WARP 分流需要 geosite 时会由 warp.sh
+# 自行按档位下载到 /usr/local/share/xray，两者互不依赖。
+# 设为 1 才让官方脚本随内核一起安装 geodata。
 XMG_CORE_GEODATA="${XMG_CORE_GEODATA:-0}"
 
 export XMG_XRAY_INSTALL_URL XMG_XRAY_SERVICE XMG_HOME XMG_XRAY_DIR XMG_XRAY_CONFIG
@@ -583,52 +585,39 @@ xmg_core_status() {
 # ===== 内存体检 =====
 # 低配机型（0.5C/215MB）下载与解压内核时内存峰值可能超限，
 # 安装前体检并在不足时告警（不阻断，见 spec §7.4）。
-# XMG_MEMINFO_FILE 仅用于测试注入：默认真机 /proc/meminfo。
+# 可用内存 / 有效内存的计算已下沉到 detect.sh（GOMEMLIMIT 与分流分档共用同一真源）。
 XMG_MEM_CHECK_MB="${XMG_MEM_CHECK_MB:-256}"
-XMG_MEMINFO_FILE="${XMG_MEMINFO_FILE:-/proc/meminfo}"
 
-# 输出可用内存（MB）。优先 MemAvailable，回退 MemFree+Buffers+Cached；
-# 无 /proc（部分开发环境）时回退 free；都不可用则返回 1（不报错崩掉）。
-xmg_mem_available_mb() {
-    local kb="" mb=""
-
-    if [ -r "$XMG_MEMINFO_FILE" ]; then
-        kb="$(awk '/^MemAvailable:/ {print $2; exit}' "$XMG_MEMINFO_FILE" 2>/dev/null)"
-        if [ -z "$kb" ]; then
-            kb="$(awk '/^MemFree:/ {f=$2} /^Buffers:/ {b=$2} /^Cached:/ {c=$2} END {print f+b+c}' \
-                "$XMG_MEMINFO_FILE" 2>/dev/null)"
-        fi
+# 内存体检报告：总内存 / 可用内存 / 有效内存 三个口径分开写。
+# 原来只写「low，可用: 218MB」会让用户以为判定错了（218MB 怎么不是极低档），
+# 实际 profile 看的是标称总内存，GOMEMLIMIT 看的是有效内存，三者不是一回事。
+_xmg_core_memcheck_report() {
+    local label="${1:-低配}" avail_mb="${2:-0}"
+    local total_mb="" eff_mb="" limit="" procs=""
+    if declare -F xmg_detect_mem_total_mb >/dev/null 2>&1; then
+        total_mb="$(xmg_detect_mem_total_mb 2>/dev/null || printf 0)"
     fi
-
-    if [ -n "$kb" ]; then
-        mb=$((kb / 1024))
-        printf '%s' "$mb"
-        return 0
+    [[ "$total_mb" =~ ^[0-9]+$ ]] || total_mb=0
+    if declare -F _xmg_xray_effective_mem_mb >/dev/null 2>&1; then
+        eff_mb="$(_xmg_xray_effective_mem_mb 2>/dev/null || printf 0)"
     fi
-
-    # 无 /proc 时回退到系统命令
-    if command -v free >/dev/null 2>&1; then
-        mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
-        if [ -n "$mb" ]; then
-            printf '%s' "$mb"
-            return 0
-        fi
+    [[ "$eff_mb" =~ ^[0-9]+$ ]] || eff_mb="$total_mb"
+    limit="$(xmg_xray_gomemlimit 2>/dev/null || printf '32MiB')"
+    if declare -F xmg_xray_gomaxprocs >/dev/null 2>&1; then
+        procs="$(xmg_xray_gomaxprocs 2>/dev/null || true)"
     fi
-
-    return 1
+    xmg_info "检测到${label}内存模式 (总内存 ${total_mb}MB / 可用 ${avail_mb}MB)"
+    xmg_info "已自动应用内存抑制 (GOMEMLIMIT=${limit}，按有效内存 ${eff_mb}MB 档) 与并发限制 (GOMAXPROCS=${procs:-按机型自适应})，允许继续安装"
 }
 
 # 内存体检：低于阈值时告警并返回 1；无法读取时告警并返回 0（不阻断）；
 # 对 <= 256MB (extreme_low) 机器放行并提示按机型计算的 Go 内存抑制。
 xmg_core_memcheck() {
     local threshold="${1:-$XMG_MEM_CHECK_MB}"
-    local mb="" procs=""
+    local mb=""
     # memcheck 可能被独立调用（未经过 drop-in 生成），此时 xray.sh 尚未加载，
     # 否则 GOMEMLIMIT/GOMAXPROCS 提示会退回硬编码兜底值。
     _xmg_core_ensure_xray_module
-    if declare -F xmg_xray_gomaxprocs >/dev/null 2>&1; then
-        procs="$(xmg_xray_gomaxprocs 2>/dev/null || true)"
-    fi
 
     if ! mb="$(xmg_mem_available_mb)"; then
         xmg_warn "无法读取内存信息，跳过内存体检"
@@ -643,17 +632,15 @@ xmg_core_memcheck() {
     # 极低内存机器（<= 256MB，如 215MB）：
     # 当 profile 为 extreme_low 且未显式指定高于 256MB 的检查阈值时：
     # 不再报致命警告或强推 swap（容器环境往往无法创建 swap），
-    # 而是展示 extreme_low 极低内存模式，提示已自动应用按机型计算的抑制参数，允许继续安装。
+    # 而是展示极低内存模式，提示已自动应用按机型计算的抑制参数，允许继续安装。
     if [ "$profile" = "extreme_low" ] && [ "$threshold" -le 256 ]; then
-        xmg_info "检测到极低内存模式 (extreme_low，可用: ${mb}MB)"
-        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与并发限制 (GOMAXPROCS=${procs:-按机型自适应})，允许继续安装"
+        _xmg_core_memcheck_report "极低" "$mb"
         return 0
     fi
 
     # 小内存机器（low 档 <= 512MB，如 331MB）：可用内存已达 128MB 以上且未显式指定超大阈值时放行
     if [ "$profile" = "low" ] && [ "$threshold" -le 256 ] && [ "$mb" -ge 128 ]; then
-        xmg_info "检测到低配内存模式 (low，可用: ${mb}MB)"
-        xmg_info "已自动应用内存抑制 (GOMEMLIMIT=$(xmg_xray_gomemlimit 2>/dev/null || echo 32MiB)) 与并发限制 (GOMAXPROCS=${procs:-按机型自适应})，允许继续安装"
+        _xmg_core_memcheck_report "低配" "$mb"
         return 0
     fi
 

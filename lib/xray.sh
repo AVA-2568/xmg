@@ -150,16 +150,39 @@ xmg_xray_gomaxprocs() {
     printf '%s' "$cores"
 }
 
+# 有效内存：真正决定 Go 堆上限的不是标称总内存，而是「现在还能用多少」。
+# 512MB 机型跑着其他服务、只剩 218MB 可用时，仍按标称值给 64MiB 堆，
+# Go 峰值 RSS 能到 90MB，占掉可用内存的四成，离 OOM 只差一次突发。
+# 计算下沉在 detect.sh 的 xmg_mem_effective_mb（与 WARP 分流分档共用同一口径）。
+_xmg_xray_effective_mem_mb() {
+    local mb=""
+    if declare -F xmg_mem_effective_mb >/dev/null 2>&1; then
+        mb="$(xmg_mem_effective_mb 2>/dev/null || printf 0)"
+        case "$mb" in ''|*[!0-9]*) mb=0 ;; esac
+        printf '%s' "$mb"
+        return 0
+    fi
+    _xmg_xray_mem_total_mb
+}
+
+# 分档边界按「有效内存」校准：
+#   <=96MB  32MiB —— 80MB 级机型，Xray RSS 与 geosite 加载峰值一起压进 60MB
+#   <=192MB 40MiB
+#   <=320MB 48MiB —— 218MB 可用 / 512MB 标称这类机器落这一档
+#   <=512MB 64MiB
+#   <=1024MB 100MiB，其余 150MiB
 xmg_xray_gomemlimit() {
     local mb=""
-    mb="$(_xmg_xray_mem_total_mb)"
+    mb="$(_xmg_xray_effective_mem_mb)"
     if [ "$mb" -le 0 ]; then
         printf '100MiB'
     elif [ "$mb" -le 96 ]; then
         printf '32MiB'
     elif [ "$mb" -le 192 ]; then
+        printf '40MiB'
+    elif [ "$mb" -le 320 ]; then
         printf '48MiB'
-    elif [ "$mb" -le 384 ]; then
+    elif [ "$mb" -le 512 ]; then
         printf '64MiB'
     elif [ "$mb" -le 1024 ]; then
         printf '100MiB'

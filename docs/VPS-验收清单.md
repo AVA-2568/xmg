@@ -404,6 +404,22 @@ grep queryStrategy /opt/xmg/xray/config.json                        # 期望收�
 
 分流模式（`routing`）不改全局策略——未被 WARP 命中的流量仍需走宿主机原栈。
 
+**分流地理数据验收（`warp enable routing`）**
+
+```bash
+xmg warp geo status                 # 档位 / 数据文件 / 标签 / 条目数
+xmg warp enable routing             # 首次按档位尝试下载 geosite.dat
+xmg warp status | grep -E '地理数据|接管模式'
+jq -r '.routing.rules[]|select(.outboundTag=="warp-out")|.domain|length' /opt/xmg/xray/config.json
+```
+
+| 场景 | 期望 |
+| --- | --- |
+| 有效内存 ≤128MB（含 80MB 机型） | 档位 `off`，规则仅 57 条 `domain:`，配置里无 `geosite:` |
+| 有效内存 ≥129MB 且下载成功 | 档位 `slim/std/full`，出现 `geosite:openai` 等标签，条数 = 57 + 标签数 |
+| 断网后重跑 `enable routing` | 三个源超时后回退硬编码，写失败标记；24 小时内重跑不再等待 |
+| `xmg warp geo clean` + 重启 | 规则回到纯硬编码，AI / 流媒体域名仍走 WARP |
+
 **DNS 服务器地址按可用协议族下发**（`dns.servers`）：
 
 ```bash

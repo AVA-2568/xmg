@@ -75,10 +75,13 @@ t_equals "未安装内核时 version 返回非 0" \
     "$([ "$_rc" -ne 0 ] && printf nonzero || printf zero)" "nonzero"
 
 # ------------------------------------------------------------------
-# Drop-in Go 运行时参数：按机型（内存 + 有效核数）动态生成
+# Drop-in Go 运行时参数：按机型（有效内存 + 有效核数）动态生成
+# 有效内存 = min(总内存, 可用内存 × 1.25)，所以必须同时注入 meminfo，
+# 否则会按「可用内存探测失败 → 退回总内存」的保守分支算成 48MiB。
 # ------------------------------------------------------------------
-_dropin="$(MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1 xmg_xray_generate_dropin_content "/custom/xray/config.json" 2>/dev/null || true)"
-t_contains "215MB 机型 drop-in 注入 GOMEMLIMIT=64MiB" "$_dropin" 'Environment="GOMEMLIMIT=64MiB"'
+printf 'MemTotal: 220160 kB\nMemAvailable: 153600 kB\n' > "$XMG_TMP/mi_dropin"
+_dropin="$(MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1 XMG_MEMINFO_FILE="$XMG_TMP/mi_dropin" xmg_xray_generate_dropin_content "/custom/xray/config.json" 2>/dev/null || true)"
+t_contains "215MB 机型 drop-in 注入 GOMEMLIMIT=40MiB" "$_dropin" 'Environment="GOMEMLIMIT=40MiB"'
 t_contains "215MB 机型 drop-in 注入 GOGC=60" "$_dropin" 'Environment="GOGC=60"'
 t_contains "drop-in 注入 GODEBUG=madvdontneed=1" "$_dropin" 'Environment="GODEBUG=madvdontneed=1"'
 t_contains "215MB 机型 drop-in 注入 GOMAXPROCS=1" "$_dropin" 'Environment="GOMAXPROCS=1"'
@@ -95,8 +98,8 @@ printf 'MemTotal: 220160 kB\nMemAvailable: 81920 kB\n' > "$XMG_TMP/mi_215m"
 _out="$(MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1 XMG_MEMINFO_FILE="$XMG_TMP/mi_215m" xmg_core_memcheck 2>&1)"
 _rc=$?
 t_equals "215MB 机器内存体检应放行 (返回 0)" "$_rc" "0"
-t_contains "215MB 机器提示 extreme_low 模式" "$_out" "extreme_low"
-t_contains "215MB 机器提示按机型计算的 64MiB 内存抑制" "$_out" "64MiB"
+t_contains "215MB 机器提示极低内存模式" "$_out" "极低内存模式"
+t_contains "215MB 机器提示按可用内存计算的 40MiB 内存抑制" "$_out" "40MiB"
 t_not_contains "215MB 机器不强推 swap" "$_out" "建议先配置 swap"
 
 # 对比：大内存机器但可用内存不足时仍应告警返回 1 并建议 swap
@@ -127,12 +130,13 @@ mkdir -p "$XMG_SYSTEMD_DIR"
 touch "$XMG_SYSTEMD_DIR/xray.service"
 export XMG_XRAY_CONFIG="$XMG_TMP/home/xray/config.json"
 export MOCK_MEM_TOTAL_KB=220160 MOCK_CPU_CORES=1
+export XMG_MEMINFO_FILE="$XMG_TMP/mi_dropin"
 
 xmg_core_patch_systemd_unit >/dev/null 2>&1
 _conf_file="$XMG_SYSTEMD_DIR/xray.service.d/20-xmg.conf"
 t_assert "drop-in 覆盖文件已创建" "[ -f '$_conf_file' ]"
 _conf_content="$(cat "$_conf_file" 2>/dev/null || true)"
-t_contains "落地文件含 215MB 机型 GOMEMLIMIT=64MiB" "$_conf_content" 'Environment="GOMEMLIMIT=64MiB"'
+t_contains "落地文件含 215MB 机型 GOMEMLIMIT=40MiB" "$_conf_content" 'Environment="GOMEMLIMIT=40MiB"'
 t_contains "落地文件含 GODEBUG=madvdontneed=1" "$_conf_content" 'Environment="GODEBUG=madvdontneed=1"'
 t_contains "落地文件含 GOMAXPROCS=1" "$_conf_content" 'Environment="GOMAXPROCS=1"'
 t_contains "落地文件含 ExecStart" "$_conf_content" "ExecStart=/usr/local/bin/xray run -config $XMG_XRAY_CONFIG"
@@ -150,3 +154,5 @@ t_assert "drop-in 覆盖文件已移除" "[ ! -f '$_conf_file' ]"
 # 注意：不 unset XMG_TMP —— 文件头的 EXIT trap 会在退出时引用它，
 # 在 run.sh 的 set -u 下 unset 会让 trap 报 unbound variable。
 unset _rc _out _dropin _td _conf_file _conf_content XMG_SYSTEMD_DIR MOCK_MEM_TOTAL_KB MOCK_CPU_CORES
+# 复位到默认路径：本文件后面会把它指向临时 meminfo，不能泄漏给同 shell 的后续用例
+export XMG_MEMINFO_FILE="/proc/meminfo"
