@@ -528,6 +528,35 @@ _xmg_warp_tunnel_cidr() {
     esac
 }
 
+# 宿主缺失、但隧道能承载的协议族 CIDR。
+#   WARP 是用户态 gVisor 栈，隧道内地址族与宿主机无关：
+#   纯 IPv4 宿主只要隧道拿到 v6 地址，IPv6 目标就全部可以走 WARP，
+#   没必要让它去撞宿主那条根本不存在的 v6 路由。
+#   反向同理（纯 IPv6 宿主 + 隧道有 v4），原来只对 v4 做了，v6 侧是缺的。
+_xmg_warp_tunnel_only_cidr() {
+    local tun="${1:-none}" hv4="${2:-0}" hv6="${3:-0}"
+    if [ "$hv4" = "0" ] && { [ "$tun" = "v4" ] || [ "$tun" = "dual" ]; }; then
+        printf '0.0.0.0/0'
+        return 0
+    fi
+    if [ "$hv6" = "0" ] && { [ "$tun" = "v6" ] || [ "$tun" = "dual" ]; }; then
+        printf '::/0'
+        return 0
+    fi
+    return 1
+}
+
+# 是否需要 domainStrategy=IPIfNonMatch（先解析目标再按 ip 规则匹配）。
+# 只要有一条 ip 规则参与分流就必须开：
+#   - 回退直连规则（宿主有、隧道没有的那一族）
+#   - 全量走隧道规则（宿主没有、隧道能承载的那一族，典型是纯 v4 宿主 + 双栈隧道）
+_xmg_warp_need_ip_match() {
+    local tun="${1:-none}" hv4="${2:-0}" hv6="${3:-0}"
+    _xmg_warp_family_fallback "$tun" "$hv4" "$hv6" && return 0
+    _xmg_warp_tunnel_only_cidr "$tun" "$hv4" "$hv6" >/dev/null 2>&1 && return 0
+    return 1
+}
+
 # ===== REALITY 入站（VLESS + XHTTP + REALITY）=====
 # REALITY 不需要证书：对 target 站点做真实 TLS 握手，靠 privateKey/shortId 区分客户端。
 # serverNames 支持逗号分隔多值 —— 这就是「同一端口服务多个域名」的真实端口复用。
@@ -927,7 +956,9 @@ _xmg_render_config_bash() {
         _wgm="$(_xmg_render_get_val WARP_GEO_MODE auto)"
         _wtun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
         _wcond="$(_xmg_warp_tunnel_cidr "$_wtun")"
-        _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}" && _wfb=1
+        if _xmg_warp_need_ip_match "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+            _wfb=1
+        fi
 
         printf ',\n'
         printf '  "routing": {\n'
@@ -961,15 +992,17 @@ _xmg_render_config_bash() {
             printf ',\n        "ip": [\n          "%s"\n        ]' "$_wcond"
         fi
         printf '\n      }'
-        # 纯 IPv6 宿主的 IPv4 全量兜底：命中分流的 v4 目标走 WARP，
-        # 未命中分流的 v4 目标也必须走隧道，否则宿主机根本没有 v4 出口。
-        if [ "$is_ipv6_only" = "true" ] && [ "$_wtun" = "v4" ]; then
+        # 宿主缺失的那一族，只要隧道能承载就全量交给 WARP：
+        # 纯 IPv4 宿主 + 双栈隧道时，IPv6 目标只有隧道这一条路能走。
+        local _wonly=""
+        _wonly="$(_xmg_warp_tunnel_only_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
+        if [ -n "$_wonly" ]; then
             printf ',\n'
             printf '      {\n'
             printf '        "type": "field",\n'
             printf '        "outboundTag": "warp-out",\n'
             printf '        "ip": [\n'
-            printf '          "0.0.0.0/0"\n'
+            printf '          "%s"\n' "$_wonly"
             printf '        ]\n'
             printf '      }'
         fi
@@ -1228,7 +1261,7 @@ xmg_render_config() {
               "domain": $routing_domains
             } + (if ($warp_ip_cond | length) > 0 then { "ip": $warp_ip_cond } else {} end)
           ]
-          + (if $is_ipv6_only and $warp_tun_v4 then [{ "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }] else [] end)
+          + (if ($warp_only_cidr | length) > 0 then [{ "type": "field", "outboundTag": "warp-out", "ip": $warp_only_cidr }] else [] end)
         )
       }
     else
@@ -1362,12 +1395,12 @@ xmg_render_config() {
 .inbounds = $active_inbounds'
 
         # 协议族兜底：jq 路径与纯 Bash 路径共用同一套判定函数
-        local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_tun_v4=false
+        local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_only="[]"
         _warp_tun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
-        if [ "$_warp_tun" = "v4" ]; then
-            _warp_tun_v4=true
-        fi
-        if _xmg_warp_family_fallback "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+        local _wo=""
+        _wo="$(_xmg_warp_tunnel_only_cidr "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
+        if [ -n "$_wo" ]; then _warp_only="[\"$_wo\"]"; fi
+        if _xmg_warp_need_ip_match "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
             _warp_strategy="IPIfNonMatch"
             local _wc=""
             _wc="$(_xmg_warp_tunnel_cidr "$_warp_tun")"
@@ -1381,7 +1414,7 @@ xmg_render_config() {
             --argjson is_ipv6_only "$is_ipv6_only"
             --arg warp_strategy "$_warp_strategy"
             --argjson warp_ip_cond "$_warp_ip_cond"
-            --argjson warp_tun_v4 "$_warp_tun_v4"
+            --argjson warp_only_cidr "$_warp_only"
             --argjson routing_domains "$(xmg_warp_routing_domains_json "$(_xmg_render_get_val WARP_GEO_MODE auto)")"
             --argjson socks_on "$socks_bool"
             --arg socks_listen "$socks_listen"

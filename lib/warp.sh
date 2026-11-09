@@ -1573,7 +1573,7 @@ xmg_warp_enable() {
                 # 协议族兜底：隧道承载不了的那一族交给直连（判定函数与 render.sh 共用）
                 local _wtun="" _wfb=0 _wcond="[]" v6_fallback_rule=""
                 _wtun="$(_xmg_warp_tunnel_family "$WARP_ACC_IPV4" "$WARP_ACC_IPV6")"
-                if _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+                if _xmg_warp_need_ip_match "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
                     _wfb=1
                     _wcond="[\"$(_xmg_warp_tunnel_cidr "$_wtun")\"]"
                 fi
@@ -2256,18 +2256,18 @@ xmg_warp_status() {
         _tv4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
         _tv6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
         _tfam="$(_xmg_warp_tunnel_family "$_tv4" "$_tv6")"
-        if _xmg_warp_family_fallback "$_tfam" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
-            if [ "$_tfam" = "v4" ]; then
-                _sfb="已开启 (IPv6 目标回退宿主机直连)"
-            else
-                _sfb="已开启 (IPv4 目标回退宿主机直连)"
-            fi
+        local _sonly=""
+        _sonly="$(_xmg_warp_tunnel_only_cidr "$_tfam" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
+        if [ -n "$_sonly" ]; then
+            _sfb="已开启 (宿主机缺失的 $_sonly 全量走 WARP)"
+        elif _xmg_warp_family_fallback "$_tfam" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+            _sfb="已开启 (隧道承载不了的一族回退宿主机直连)"
         elif [ "$_tfam" = "dual" ]; then
             _sfb="不需要 (隧道双栈，两族都走 WARP)"
         else
-            _sfb="不可用 (宿主机没有另一协议族，回退也无处可走)"
+            _sfb="不可用 (宿主机与隧道都没有那一族，回退也无处可走)"
         fi
-        printf "协议族兜底    : %s\n" "$_sfb"
+        printf "协议族覆盖    : %s\n" "$_sfb"
     fi
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     echo "=================================================================="
