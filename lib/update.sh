@@ -505,8 +505,23 @@ xmg_update_run() {
         xmg_update_verify
     fi
 
-    # 代码更新可能改变配置渲染与状态语义：重启 Xray，让新代码与现网配置一起生效
-    if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && xmg_svc_supported; then
+    # 代码更新可能改变配置渲染与状态语义（分流规则、协议族覆盖、GOMEMLIMIT 分档）。
+    # 只重启不重渲染，新逻辑会停在磁盘上、现网仍跑旧配置 —— 等于白更新。
+    # 用新进程执行：当前 shell 里 source 的还是旧函数，不能就地渲染。
+    local _warp_on=""
+    if [ -f "${XMG_STATE_FILE:-}" ]; then
+        _warp_on="$(sed -n 's/^WARP_ENABLED=//p' "$XMG_STATE_FILE" 2>/dev/null | tail -1)"
+    fi
+
+    if [ "$_warp_on" = "1" ] && [ -x "${XMG_BIN:-}" ]; then
+        xmg_info "检测到 WARP 已启用，用新版本重新生成配置 (含分流规则与机型参数)..."
+        if "$XMG_BIN" warp enable routing >/dev/null 2>&1; then
+            xmg_info "配置已按新版本刷新，Xray 已确认 active"
+        else
+            xmg_warn "自动刷新失败，现网配置保持不变"
+            xmg_warn "请手动执行: xmg warp enable routing"
+        fi
+    elif [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && xmg_svc_supported; then
         xmg_info "重启 Xray 以加载更新后的代码..."
         if xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8; then
             xmg_info "Xray 已重启并确认 active"
