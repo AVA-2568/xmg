@@ -1742,6 +1742,17 @@ EOF_GLOBAL_JQ
             if [ "$alt_cfg" != "$xray_cfg" ] && [ -d "$(dirname "$alt_cfg")" ]; then
                 cp -f "$xray_cfg" "$alt_cfg" 2>/dev/null || true
             fi
+
+            # 机型参数可能随版本升级变化（例如 GOMEMLIMIT 分档口径调整），
+            # 借这次重启顺手刷新 drop-in / init 脚本，否则用户升级后参数仍停在旧值。
+            # xray.sh 是懒加载的，这里必须先显式拉起来，否则函数不存在会静默跳过。
+            _warp_load_xray_lib 2>/dev/null || true
+            if declare -F xmg_xray_patch_systemd_unit >/dev/null 2>&1; then
+                xmg_xray_patch_systemd_unit "$xray_cfg" >/dev/null 2>&1 || true
+            elif declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+                xmg_core_patch_systemd_unit "$xray_cfg" >/dev/null 2>&1 || true
+            fi
+
             if [ "$mode" = "routing" ]; then
                 xmg_info "Xray 配置增量注入完成: 原有所有入站节点/证书/端口 100% 毫发无损，已追加 warp-out 流媒体/AI 智能分流"
             else
