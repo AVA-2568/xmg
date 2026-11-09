@@ -1595,7 +1595,8 @@ xmg_warp_enable() {
                 local _wonly=""
                 _wonly="$(_xmg_warp_tunnel_only_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
                 if [ -n "$_wonly" ]; then
-                    v6_fallback_rule="$(printf ', { "type": "field", "outboundTag": "warp-out", "ip": [ "%s" ] }' "$_wonly")"
+                    # 全量网段前必须先放行私有/保留段，否则回环与内网目标会被吞进隧道
+                    v6_fallback_rule="$(printf ', { "type": "field", "outboundTag": "direct", "ip": %s }, { "type": "field", "outboundTag": "warp-out", "ip": [ "%s" ] }' "$(_xmg_warp_private_cidrs_json)" "$_wonly")"
                 fi
                 cat > "$jq_file" << EOF_ROUTING_JQ
 (.outbounds = (

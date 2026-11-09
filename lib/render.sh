@@ -551,6 +551,13 @@ _xmg_warp_tunnel_only_cidr() {
     return 1
 }
 
+# 私有/保留网段：全量转发规则必须把它们排除在外。
+#   ::/0 与 0.0.0.0/0 字面上包含回环、ULA、链路本地、CGNAT，
+#   这些目标塞进 WARP 隧道只会失败（隧道不承载内网路由），必须先直连。
+_xmg_warp_private_cidrs_json() {
+    printf '["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16","127.0.0.0/8","169.254.0.0/16","100.64.0.0/10","::1/128","fc00::/7","fe80::/10"]'
+}
+
 # 是否需要 domainStrategy=IPIfNonMatch（先解析目标再按 ip 规则匹配）。
 # 只要有一条 ip 规则参与分流就必须开：
 #   - 回退直连规则（宿主有、隧道没有的那一族）
@@ -1002,6 +1009,13 @@ _xmg_render_config_bash() {
         local _wonly=""
         _wonly="$(_xmg_warp_tunnel_only_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
         if [ -n "$_wonly" ]; then
+            # 先放行私有/保留段：全量网段字面上包含回环与内网，塞进隧道只会失败
+            printf ',\n'
+            printf '      {\n'
+            printf '        "type": "field",\n'
+            printf '        "outboundTag": "direct",\n'
+            printf '        "ip": %s\n' "$(_xmg_warp_private_cidrs_json)"
+            printf '      }'
             printf ',\n'
             printf '      {\n'
             printf '        "type": "field",\n'
@@ -1266,7 +1280,10 @@ xmg_render_config() {
               "domain": $routing_domains
             } + (if ($warp_ip_cond | length) > 0 then { "ip": $warp_ip_cond } else {} end)
           ]
-          + (if ($warp_only_cidr | length) > 0 then [{ "type": "field", "outboundTag": "warp-out", "ip": $warp_only_cidr }] else [] end)
+          + (if ($warp_only_cidr | length) > 0 then [
+               { "type": "field", "outboundTag": "direct", "ip": $warp_private_cidrs },
+               { "type": "field", "outboundTag": "warp-out", "ip": $warp_only_cidr }
+             ] else [] end)
         )
       }
     else
@@ -1420,6 +1437,7 @@ xmg_render_config() {
             --arg warp_strategy "$_warp_strategy"
             --argjson warp_ip_cond "$_warp_ip_cond"
             --argjson warp_only_cidr "$_warp_only"
+            --argjson warp_private_cidrs "$(_xmg_warp_private_cidrs_json)"
             --argjson routing_domains "$(xmg_warp_routing_domains_json "$(_xmg_render_get_val WARP_GEO_MODE auto)")"
             --argjson socks_on "$socks_bool"
             --arg socks_listen "$socks_listen"
