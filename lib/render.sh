@@ -535,6 +535,11 @@ _xmg_warp_tunnel_cidr() {
 #   反向同理（纯 IPv6 宿主 + 隧道有 v4），原来只对 v4 做了，v6 侧是缺的。
 _xmg_warp_tunnel_only_cidr() {
     local tun="${1:-none}" hv4="${2:-0}" hv6="${3:-0}"
+    # 两族都探不到是探测失败，不是「宿主真的两族都没有」：
+    # 按最保守处理，不生成全量转发规则，避免把本可直连的流量误塞进隧道。
+    if [ "$hv4" = "0" ] && [ "$hv6" = "0" ]; then
+        return 1
+    fi
     if [ "$hv4" = "0" ] && { [ "$tun" = "v4" ] || [ "$tun" = "dual" ]; }; then
         printf '0.0.0.0/0'
         return 0

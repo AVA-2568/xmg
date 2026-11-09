@@ -407,10 +407,16 @@ xmg_warp_is_ipv6_only() {
     fi
 
     if declare -F xmg_detect_network >/dev/null 2>&1; then
+        # 探测只是为了判定「是否纯 IPv6 单栈」，但 xmg_detect_network 会写全局
+        # XMG_NET_IPV4/IPV6。分流规则正要靠这两个值决定「哪一族交给 WARP」，
+        # 被冲掉就会算出错误的族（实测：探测失败后变成 0/0，规则落到 v4 全量）。
+        local _sv4="${XMG_NET_IPV4:-}" _sv6="${XMG_NET_IPV6:-}"
         xmg_detect_network >/dev/null 2>&1 || true
         if [ "${XMG_NET_STACK:-}" = "ipv6_only" ]; then
             return 0
         fi
+        XMG_NET_IPV4="$_sv4"
+        XMG_NET_IPV6="$_sv6"
     fi
 
     if ! curl -4sSL --connect-timeout 2 --max-time 3 https://1.1.1.1 >/dev/null 2>&1; then
@@ -1570,16 +1576,26 @@ xmg_warp_enable() {
         if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
             local jq_file="${xray_cfg}.tmp.$.jq"
             if [ "$mode" = "routing" ]; then
-                # 协议族兜底：隧道承载不了的那一族交给直连（判定函数与 render.sh 共用）
                 local _wtun="" _wfb=0 _wcond="[]" v6_fallback_rule=""
                 _wtun="$(_xmg_warp_tunnel_family "$WARP_ACC_IPV4" "$WARP_ACC_IPV6")"
                 if _xmg_warp_need_ip_match "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
                     _wfb=1
-                    _wcond="[\"$(_xmg_warp_tunnel_cidr "$_wtun")\"]"
                 fi
-                # 纯 IPv6 宿主 + 隧道有 IPv4：v4 目标全量走隧道（含未命中分流的）
-                if xmg_warp_is_ipv6_only && [ "$_wtun" = "v4" ]; then
-                    v6_fallback_rule=', { "type": "field", "outboundTag": "warp-out", "ip": [ "0.0.0.0/0" ] }'
+                # 只有「隧道单栈 + 宿主有另一族」才给域名规则挂 ip 条件。
+                # 双栈隧道没有「承载族」概念，硬拼会得到空串，内核直接报
+                # illegal ip rule / unsupported address family，整份配置起不来。
+                if _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
+                    local _wc=""
+                    _wc="$(_xmg_warp_tunnel_cidr "$_wtun")"
+                    if [ -n "$_wc" ]; then
+                        _wcond="[\"$_wc\"]"
+                    fi
+                fi
+                # 宿主缺失、隧道能承载的那一族全量走 WARP（纯 v4 宿主 + 双栈隧道 → ::/0）
+                local _wonly=""
+                _wonly="$(_xmg_warp_tunnel_only_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
+                if [ -n "$_wonly" ]; then
+                    v6_fallback_rule="$(printf ', { "type": "field", "outboundTag": "warp-out", "ip": [ "%s" ] }' "$_wonly")"
                 fi
                 cat > "$jq_file" << EOF_ROUTING_JQ
 (.outbounds = (
