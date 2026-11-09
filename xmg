@@ -18,7 +18,7 @@ fi
 
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-2.3.3}"
+XMG_VERSION="${XMG_VERSION:-2.3.4}"
 
 xmg_usage() {
     cat <<EOF

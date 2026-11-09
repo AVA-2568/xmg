@@ -1586,7 +1586,7 @@ xmg_warp_enable() {
                 # illegal ip rule / unsupported address family，整份配置起不来。
                 if _xmg_warp_family_fallback "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
                     local _wc=""
-                    _wc="$(_xmg_warp_tunnel_cidr "$_wtun")"
+                    _wc="$(_xmg_warp_carrier_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
                     if [ -n "$_wc" ]; then
                         _wcond="[\"$_wc\"]"
                     fi

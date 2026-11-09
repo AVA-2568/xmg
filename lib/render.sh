@@ -515,8 +515,31 @@ _xmg_warp_family_fallback() {
     case "$tun" in
         v4) [ "$hv6" = "1" ] && return 0 ;;
         v6) [ "$hv4" = "1" ] && return 0 ;;
+        dual)
+            # 双栈隧道本身两族都能走，但纯 IPv6 宿主的 warp-out 会被
+            # _xmg_warp_tunnel_profile 锁成 UseIPv4（宿主没有 v4 原生出口，
+            # 必须强制走隧道 v4）。此时 IPv6 目标只能回宿主机直连，
+            # 所以域名规则要挂 v4 条件，把 AAAA-only 目标挡在隧道外。
+            [ "$hv4" = "0" ] && [ "$hv6" = "1" ] && return 0
+            ;;
     esac
     return 1
+}
+
+# warp-out 实际能承载的那一族（由 targetStrategy 决定，不等于隧道地址族）：
+#   纯 IPv6 宿主即便隧道双栈，targetStrategy 也会被锁成 UseIPv4，
+#   此时域名规则只能挂 v4 条件，否则 AAAA-only 目标会进隧道后失败。
+_xmg_warp_carrier_cidr() {
+    local tun="${1:-none}" hv4="${2:-0}" hv6="${3:-0}"
+    case "$tun" in
+        v4) printf '0.0.0.0/0' ;;
+        v6) printf '::/0' ;;
+        dual)
+            if [ "$hv4" = "0" ] && [ "$hv6" = "1" ]; then
+                printf '0.0.0.0/0'
+            fi
+            ;;
+    esac
 }
 
 # 隧道族 -> 该族的目标 CIDR（用于给 warp 规则挂 ip 条件）
@@ -759,7 +782,10 @@ _xmg_render_config_bash() {
 
     local dns_servers dns_query_strat out_strat
     dns_servers="$(_xmg_render_dns_servers_json)"
-    if [ "$is_ipv6_only" = "true" ]; then
+    # 纯 IPv6 宿主默认锁 UseIPv6，避免解析出根本没有出口的 A 记录。
+    # 但 WARP 隧道补上 IPv4 出口后必须放开为 UseIP：
+    # UseIPv6 只查 AAAA，IPv4-only 的域名永远解析不出 A，隧道再能承载也没用。
+    if [ "$is_ipv6_only" = "true" ] && { [ "$warp_on" != "1" ] || [ -z "$warp_v4" ]; }; then
         dns_query_strat="UseIPv6"
         out_strat="UseIPv6"
     else
@@ -967,7 +993,7 @@ _xmg_render_config_bash() {
         local _wtun='' _wfb=0 _wcond=''
         _wgm="$(_xmg_render_get_val WARP_GEO_MODE auto)"
         _wtun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
-        _wcond="$(_xmg_warp_tunnel_cidr "$_wtun")"
+        _wcond="$(_xmg_warp_carrier_cidr "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
         if _xmg_warp_need_ip_match "$_wtun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
             _wfb=1
         fi
@@ -1212,7 +1238,7 @@ xmg_render_config() {
 .policy.levels["0"].bufferSize = ($buffer_size | tonumber) |
 .policy.levels["0"].connIdle = 60 |
 .dns.servers = $dns_servers |
-.dns.queryStrategy = (if $is_ipv6_only then "UseIPv6" else "UseIP" end) |
+.dns.queryStrategy = $stack_strategy |
 (
   if $warp_on then
     {
@@ -1259,7 +1285,7 @@ xmg_render_config() {
           },
           "streamSettings": {
             "sockopt": {
-              "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+              "domainStrategy": $stack_strategy
             }
           }
         },
@@ -1306,7 +1332,7 @@ xmg_render_config() {
           },
           "streamSettings": {
             "sockopt": {
-              "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+              "domainStrategy": $stack_strategy
             }
           }
         },
@@ -1336,7 +1362,7 @@ xmg_render_config() {
         },
         "streamSettings": {
           "sockopt": {
-            "domainStrategy": (if $is_ipv6_only then "UseIPv6" else "UseIP" end)
+            "domainStrategy": $stack_strategy
           }
         }
       },
@@ -1417,6 +1443,10 @@ xmg_render_config() {
 .inbounds = $active_inbounds'
 
         # 协议族兜底：jq 路径与纯 Bash 路径共用同一套判定函数
+        local _stack_strategy="UseIP"
+        if [ "$is_ipv6_only" = "true" ] && { [ "$warp_bool" != "true" ] || [ -z "$warp_v4" ]; }; then
+            _stack_strategy="UseIPv6"
+        fi
         local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_only="[]"
         _warp_tun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
         local _wo=""
@@ -1425,7 +1455,7 @@ xmg_render_config() {
         if _xmg_warp_need_ip_match "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}"; then
             _warp_strategy="IPIfNonMatch"
             local _wc=""
-            _wc="$(_xmg_warp_tunnel_cidr "$_warp_tun")"
+            _wc="$(_xmg_warp_carrier_cidr "$_warp_tun" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
             if [ -n "$_wc" ]; then _warp_ip_cond="[\"$_wc\"]"; fi
         fi
 
@@ -1434,6 +1464,7 @@ xmg_render_config() {
             --argjson buffer_size "$bufsz"
             --argjson dns_servers "$(_xmg_render_dns_servers_json)"
             --argjson is_ipv6_only "$is_ipv6_only"
+            --arg stack_strategy "$_stack_strategy"
             --arg warp_strategy "$_warp_strategy"
             --argjson warp_ip_cond "$_warp_ip_cond"
             --argjson warp_only_cidr "$_warp_only"
