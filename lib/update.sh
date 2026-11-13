@@ -39,7 +39,12 @@ XMG_UPDATE_FORCE="${XMG_UPDATE_FORCE:-0}"
 XMG_UPDATE_SKIP_VERIFY="${XMG_UPDATE_SKIP_VERIFY:-0}"
 
 # ===== 依赖 common.sh 的路径变量 =====
-XMG_BIN="${XMG_BIN:-${XMG_HOME:-/opt/xmg}/bin/xmg}"
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
+XMG_LOG_DIR="${XMG_LOG_DIR:-$XMG_HOME/log}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
+XMG_BIN="${XMG_BIN:-$XMG_HOME/bin/xmg}"
 XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
 
 # ===== 版本检测 =====

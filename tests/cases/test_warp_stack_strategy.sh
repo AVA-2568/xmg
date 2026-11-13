@@ -8,7 +8,7 @@
 
 SRC="$TESTS_DIR/.."
 
-T="$(TMPDIR=/tmp mktemp -d)"
+T="$(mktemp -d)"
 
 # 模拟 render.sh 在纯 IPv6 主机上的输出
 mk_cfg() {

@@ -8,6 +8,34 @@
 #
 # shellcheck shell=bash
 
+unset BASH_ENV ENV 2>/dev/null || true
+
+# 确保 TMPDIR 为纯 POSIX 路径且未挂载为 noexec（防止测试中创建的桩脚本执行报 Permission denied）
+_t_ensure_exec_tmpdir() {
+    local cand="${TMPDIR:-/tmp}"
+    case "$cand" in
+        *:*) cand="/tmp" ;;
+    esac
+    local probe=""
+    probe="$(TMPDIR="$cand" mktemp 2>/dev/null || true)"
+    if [ -n "$probe" ]; then
+        printf '#!/bin/sh\nexit 0\n' > "$probe" 2>/dev/null || true
+        chmod +x "$probe" 2>/dev/null || true
+        if "$probe" >/dev/null 2>&1; then
+            rm -f "$probe" 2>/dev/null || true
+            export TMPDIR="$cand"
+            return 0
+        fi
+        rm -f "$probe" 2>/dev/null || true
+    fi
+    local fb
+    fb="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.tmp"
+    mkdir -p "$fb" 2>/dev/null || true
+    export TMPDIR="$fb"
+}
+_t_ensure_exec_tmpdir
+unset -f _t_ensure_exec_tmpdir
+
 TESTS_PASS=0
 TESTS_FAIL=0
 
@@ -71,18 +99,13 @@ t_assert() {
         # 整条命令是一个字符串：必须 eval 在当前 shell 展开，
         # 否则 "$@" 会把整串当成单个命令名去查找，必然 command not found。
         #
-        # PIPESTATUS 必须与管道在同一次 eval 内、紧跟其后读取：
-        # eval 自身是单条命令，跨语句读拿到的是 eval 的退出码而非管道各段状态。
-        local -a _t_st=()
-        eval "$1
-_t_st=(\"\${PIPESTATUS[@]}\")" >/dev/null 2>&1
-        # 语义同 pipefail：管道任一段失败即视为断言失败。
-        local i
-        for i in "${_t_st[@]}"; do
-            if [ "$i" -ne 0 ]; then
-                rc=1
-            fi
-        done
+        # 开启 pipefail 执行单条命令字符串并直接采信 eval 退出码：
+        # 既保证管道任一段失败即判 FAIL，又正确支持 `! cmd` 取反与复合命令（避免 PIPESTATUS 忽略 `!` 前缀）。
+        local _t_pf=""
+        _t_pf="$(shopt -po pipefail 2>/dev/null || true)"
+        set -o pipefail
+        eval "$1" >/dev/null 2>&1 || rc=1
+        eval "$_t_pf" 2>/dev/null || true
     else
         # 多参数：参数边界与引号由 bash 正常处理，直接调用，不做任何二次解析。
         "$@" >/dev/null 2>&1 || rc=1

@@ -435,7 +435,6 @@ EOF_UNIT
             xray_unit="${sys_dir}/xray.service"
             unit_found=1
             xmg_info "已成功自愈生成 Xray systemd unit: $xray_unit"
-            return 0
         fi
 
         xmg_warn "未找到 Xray 可执行程序与 systemd unit，跳过自动配置"

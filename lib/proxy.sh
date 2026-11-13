@@ -1502,6 +1502,7 @@ xmg_proxy_menu() {
                 v_listen="$(_xmg_read "监听地址" "$cur_v_listen")"
                 v_domain="$(_xmg_read "域名(用于SNI/CDN回源)" "$(xmg_state_get PROXY_VLESS_DOMAIN)")"
                 v_uuid="$(_xmg_read "UUID" "$(xmg_state_get PROXY_VLESS_UUID)")"
+                [ -z "$v_uuid" ] && v_uuid="$(xmg_proxy_gen_uuid 2>/dev/null || true)"
                 v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")")"
                 v_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_VLESS_MODE "auto")")"
                 v_ext="$(_xmg_read "外部映射端口(NAT 机型填公网端口，直连留空)" "$(xmg_state_get PROXY_VLESS_EXTERNAL_PORT "")")"
@@ -1561,6 +1562,7 @@ xmg_proxy_menu() {
                 ;;
             5)
                 xmg_proxy_disable vless || true
+                xmg_pause
                 ;;
             6)
                 xmg_proxy_disable reality || true

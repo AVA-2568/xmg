@@ -18,7 +18,7 @@ fi
 
 # ===== 安全加载 =====
 if [ "${XMG_MAINT_SH_LOADED:-0}" = "1" ]; then
-    return 0 2>/dev/null || exit 1
+    return 0 2>/dev/null || exit 0
 fi
 XMG_MAINT_SH_LOADED=1
 
@@ -99,6 +99,13 @@ xmg_maint_update() {
                 SwapTotal:) _s_kb="$_v" ;;
             esac
         done < /proc/meminfo 2>/dev/null
+        if declare -F xmg_detect_mem_total_kb >/dev/null 2>&1; then
+            local _det_kb
+            _det_kb="$(xmg_detect_mem_total_kb 2>/dev/null || echo 0)"
+            if [[ "$_det_kb" =~ ^[0-9]+$ ]] && [ "$_det_kb" -gt 0 ]; then
+                _m_kb="$_det_kb"
+            fi
+        fi
         if [[ "$_m_kb" =~ ^[0-9]+$ ]] && [ "$_m_kb" -gt 0 ] && [ "$_m_kb" -le 524288 ] && [ "${_s_kb:-0}" -eq 0 ]; then
             xmg_warn "当前物理内存 <=512MB 且未启用 Swap，系统更新存在 OOM 风险（建议先在「系统与网络调优」开启 Swap）"
         fi

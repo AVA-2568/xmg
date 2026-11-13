@@ -14,7 +14,7 @@ _TX_SAVED_STATE_DIR="${XMG_XRAY_STATE_DIR-}"
 _TX_SAVED_STATE_FILE="${XMG_STATE_FILE-}"
 _TX_SAVED_LIB_DIR="${XMG_LIB_DIR-}"
 
-XMG_TMP="$(TMPDIR=/tmp mktemp -d)"
+XMG_TMP="$(mktemp -d)"
 trap 'rm -rf "$XMG_TMP"' EXIT
 export XMG_HOME="$XMG_TMP/home"
 export XMG_LIB_DIR="$XMG_TMP/home/lib"

@@ -71,8 +71,8 @@ xmg_detect_virt() {
         return 0
     fi
 
-    # 2. systemd-detect-virt 命令辅助（若存在）
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
+    # 2. systemd-detect-virt 命令辅助（仅在未注入自定义探测目录时调用宿主机工具）
+    if [ -z "${XMG_DETECT_PROC_DIR:-}" ] && [ -z "${XMG_DETECT_SYS_DMI_DIR:-}" ] && command -v systemd-detect-virt >/dev/null 2>&1; then
         local sdv=""
         sdv="$(systemd-detect-virt 2>/dev/null || true)"
         case "$sdv" in
@@ -564,7 +564,8 @@ xmg_detect_container_restricted() {
 
     # 2. 检查 /proc/self/status 中有效能力 CapEff
     # CAP_SYS_ADMIN 对应位掩码为 1 << 21 (0x200000)
-    if [ -r "$status_file" ]; then
+    # 仅在显式指定 XMG_PROC_STATUS_FILE 或当前为 root (EUID=0) 时检查，避免普通非 root 用户因 CapEff=0 被误判为受限容器
+    if { [ -n "${XMG_PROC_STATUS_FILE:-}" ] || [ "${EUID:-$(id -u 2>/dev/null || echo 1)}" -eq 0 ]; } && [ -r "$status_file" ]; then
         local cap_eff=""
         local k="" v="" rest=""
         while IFS=': \t' read -r k v rest; do

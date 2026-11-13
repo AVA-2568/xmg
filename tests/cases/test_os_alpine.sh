@@ -61,7 +61,7 @@ t_contains "OpenRC 脚本设置 nofile 上限" "$_OPENRC_SCRIPT" "rc_ulimit="
 t_contains "OpenRC 脚本声明 net 软依赖（容器内可用）" "$_OPENRC_SCRIPT" "use net"
 
 # 内存抑制必须随物理内存分档：64MB 机器上写死固定堆上限等于没设
-T_MEMINFO="$(TMPDIR=/tmp mktemp -d)/meminfo"
+T_MEMINFO="$(mktemp -d)/meminfo"
 printf 'MemTotal:          61440 kB\n' > "$T_MEMINFO"
 _MEM_ENV="$(XMG_MEMINFO_FILE="$T_MEMINFO" bash -c '
     XMG_LIB_DIR="'"$SRC"'/lib"; XMG_HOME="$(mktemp -d)"
@@ -95,55 +95,55 @@ t_equals "生成的 OpenRC 脚本语法合法" "$_OPENRC_SYNTAX_RC" "0"
 # --- 5. 架构 slug 映射 ---
 t_equals "x86_64 架构映射为 64" \
     "$(bash -c '
-        mkdir -p /tmp/xmg-arch-$$/bin
-        printf "#!/bin/sh\necho x86_64\n" > /tmp/xmg-arch-$$/bin/uname
-        chmod +x /tmp/xmg-arch-$$/bin/uname
-        PATH="/tmp/xmg-arch-$$/bin:$PATH"
+        mkdir -p ${TMPDIR:-/tmp}/xmg-arch-$$/bin
+        printf "#!/bin/sh\necho x86_64\n" > ${TMPDIR:-/tmp}/xmg-arch-$$/bin/uname
+        chmod +x ${TMPDIR:-/tmp}/xmg-arch-$$/bin/uname
+        PATH="${TMPDIR:-/tmp}/xmg-arch-$$/bin:$PATH"
         XMG_LIB_DIR="'"$SRC"'/lib"
         export PATH
         source "'"$SRC"'/lib/core.sh"
         xmg_core_arch_slug
-        rm -rf /tmp/xmg-arch-$$
+        rm -rf ${TMPDIR:-/tmp}/xmg-arch-$$
     ' 2>/dev/null)" \
     "64"
 
 t_equals "aarch64 架构映射为 arm64-v8a" \
     "$(bash -c '
-        mkdir -p /tmp/xmg-arch2-$$/bin
-        printf "#!/bin/sh\necho aarch64\n" > /tmp/xmg-arch2-$$/bin/uname
-        chmod +x /tmp/xmg-arch2-$$/bin/uname
-        PATH="/tmp/xmg-arch2-$$/bin:$PATH"
+        mkdir -p ${TMPDIR:-/tmp}/xmg-arch2-$$/bin
+        printf "#!/bin/sh\necho aarch64\n" > ${TMPDIR:-/tmp}/xmg-arch2-$$/bin/uname
+        chmod +x ${TMPDIR:-/tmp}/xmg-arch2-$$/bin/uname
+        PATH="${TMPDIR:-/tmp}/xmg-arch2-$$/bin:$PATH"
         XMG_LIB_DIR="'"$SRC"'/lib"
         export PATH
         source "'"$SRC"'/lib/core.sh"
         xmg_core_arch_slug
-        rm -rf /tmp/xmg-arch2-$$
+        rm -rf ${TMPDIR:-/tmp}/xmg-arch2-$$
     ' 2>/dev/null)" \
     "arm64-v8a"
 
 t_equals "mips64 架构映射为 mips64" \
     "$(bash -c '
-        mkdir -p /tmp/xmg-arch3-$$/bin
-        printf "#!/bin/sh\necho mips64\n" > /tmp/xmg-arch3-$$/bin/uname
-        chmod +x /tmp/xmg-arch3-$$/bin/uname
-        PATH="/tmp/xmg-arch3-$$/bin:$PATH"
+        mkdir -p ${TMPDIR:-/tmp}/xmg-arch3-$$/bin
+        printf "#!/bin/sh\necho mips64\n" > ${TMPDIR:-/tmp}/xmg-arch3-$$/bin/uname
+        chmod +x ${TMPDIR:-/tmp}/xmg-arch3-$$/bin/uname
+        PATH="${TMPDIR:-/tmp}/xmg-arch3-$$/bin:$PATH"
         export PATH
         source "'"$SRC"'/lib/core.sh"
         xmg_core_arch_slug
-        rm -rf /tmp/xmg-arch3-$$
+        rm -rf ${TMPDIR:-/tmp}/xmg-arch3-$$
     ' 2>/dev/null)" \
     "mips64"
 
 t_equals "riscv64 架构映射为 riscv64" \
     "$(bash -c '
-        mkdir -p /tmp/xmg-arch4-$$/bin
-        printf "#!/bin/sh\necho riscv64\n" > /tmp/xmg-arch4-$$/bin/uname
-        chmod +x /tmp/xmg-arch4-$$/bin/uname
-        PATH="/tmp/xmg-arch4-$$/bin:$PATH"
+        mkdir -p ${TMPDIR:-/tmp}/xmg-arch4-$$/bin
+        printf "#!/bin/sh\necho riscv64\n" > ${TMPDIR:-/tmp}/xmg-arch4-$$/bin/uname
+        chmod +x ${TMPDIR:-/tmp}/xmg-arch4-$$/bin/uname
+        PATH="${TMPDIR:-/tmp}/xmg-arch4-$$/bin:$PATH"
         export PATH
         source "'"$SRC"'/lib/core.sh"
         xmg_core_arch_slug
-        rm -rf /tmp/xmg-arch4-$$
+        rm -rf ${TMPDIR:-/tmp}/xmg-arch4-$$
     ' 2>/dev/null)" \
     "riscv64"
 
@@ -269,7 +269,7 @@ t_not_contains "systemd 环境不写 /etc/sysctl.conf" "$(cat "$TMP_SYSCTL2/sysc
 rm -rf "$TMP_SYSCTL" "$TMP_SYSCTL2"
 
 # --- 8. 包管理器抽象 ---
-TMP_PKG="$(TMPDIR=/tmp mktemp -d)"
+TMP_PKG="$(mktemp -d)"
 mkdir -p "$TMP_PKG/bin"
 printf '#!/bin/sh\nexit 0\n' > "$TMP_PKG/bin/apk"
 chmod +x "$TMP_PKG/bin/apk"
@@ -318,7 +318,7 @@ rm -rf "$TMP_UNBOUND"
 # --- 10. chronyd 启动：net 依赖阻塞时用 --nodeps 兜底 ---
 # 容器里 networking 服务常未运行，发行版脚本的 need net 会让 OpenRC 直接拒绝启动，
 # XMG 必须先带依赖起一次，失败后 --nodeps 重试，并把真实报错交出来。
-T_CHRONY="$(TMPDIR=/tmp mktemp -d)"
+T_CHRONY="$(mktemp -d)"
 mkdir -p "$T_CHRONY/bin"
 
 printf '#!/bin/sh\nexit 0\n' > "$T_CHRONY/bin/chronyd"
@@ -361,7 +361,7 @@ rm -rf "$T_CHRONY"
 # --- 11. sysctl 下发格式：BusyBox 只认 key=value ---
 # 回归：曾把 "key = value" 整行交给 sysctl -w，空格留在键名里，
 # Alpine 上 24 条参数全部失败（连 vm.swappiness 都写不进去）。
-T_SYSCTL="$(TMPDIR=/tmp mktemp -d)"
+T_SYSCTL="$(mktemp -d)"
 mkdir -p "$T_SYSCTL/proc/fs" "$T_SYSCTL/proc/vm" "$T_SYSCTL/bin"
 : > "$T_SYSCTL/proc/fs/file-max"
 : > "$T_SYSCTL/proc/vm/swappiness"

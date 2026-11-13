@@ -8,7 +8,7 @@ SSH_CONTENT="$(cat "$SSH_SRC")"
 # --- 1. 自声明标签验证 ---
 t_contains "ssh.sh 包含标准自声明标签" "$SSH_CONTENT" "# XMG_MENU_LABEL: SSH 安全加固"
 
-TMP_SSH_DIR="$(TMPDIR=/tmp mktemp -d)"
+TMP_SSH_DIR="$(mktemp -d)"
 MOCK_BIN="$TMP_SSH_DIR/bin"
 MOCK_SYS_LOG="$TMP_SSH_DIR/systemctl.log"
 MOCK_F2B_CONF="$TMP_SSH_DIR/jail.d/xmg-sshd.conf"
@@ -68,6 +68,7 @@ export XMG_SSH_SOCKET_DROPIN_CONF="$MOCK_SOCKET_CONF"
 export XMG_SSH_CONFIG="$MOCK_SSHD_CONF"
 export XMG_SSH_DROPIN_CONF="$MOCK_DROPIN_CONF"
 export XMG_SSH_AUTH_KEYS="$MOCK_KEYS"
+export XMG_BACKUP_DIR="$TMP_SSH_DIR/backups"
 
 # --- 2. fail2ban 安装端口识别与 xmg_ssh_get_port 测试 ---
 _F2B_OUT="$(bash -c '

@@ -771,7 +771,7 @@ _xmg_warp_gen_keys() {
     # 2. 次选系统 openssl 原生命令生成 (所有主流 Linux 发行版均标配)
     if command -v openssl >/dev/null 2>&1; then
         local tmp_der=""
-        tmp_der="$(mktemp 2>/dev/null || echo "/tmp/xmg_ossl_$.der")"
+        tmp_der="$(mktemp 2>/dev/null || echo "/tmp/xmg_ossl_$$.der")"
         if openssl genpkey -algorithm x25519 -outform DER -out "$tmp_der" 2>/dev/null; then
             priv="$(tail -c 32 "$tmp_der" 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
             pub="$(openssl pkey -inform DER -in "$tmp_der" -pubout -outform DER 2>/dev/null | tail -c 32 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
@@ -872,7 +872,7 @@ _xmg_warp_register() {
     local resp=""
     # 临时文件必须在两个分支外声明：mock 分支也会走到失败诊断，
     # 之前声明在 else 内，mock 失败时 set -u 会直接 unbound variable。
-    local tmp_body="" tmp_err=""
+    local tmp_body="" tmp_err="" last_http="000" last_err=""
     if [ -n "${XMG_MOCK_WARP_API_RESP:-}" ]; then
         resp="$XMG_MOCK_WARP_API_RESP"
     else
@@ -896,9 +896,8 @@ _xmg_warp_register() {
             attempts=("" "-6")
         fi
 
-        local last_http="000" last_err=""
-        tmp_body="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.json")"
-        tmp_err="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$.err")"
+        tmp_body="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$$.json")"
+        tmp_err="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$$.err")"
 
         for fam_opt in "${attempts[@]}"; do
             local curl_args=()
@@ -1661,7 +1660,7 @@ xmg_warp_enable() {
         bak="$(_xmg_warp_backup_config "$xray_cfg")"
         [ -n "$bak" ] && xmg_info "已安全备份当前原始 Xray 配置至: $bak"
 
-        local tmp_cfg="${xray_cfg}.tmp.$.json"
+        local tmp_cfg="${xray_cfg}.tmp.$$.json"
         local merged_ok=0
 
         local ssh_p=22
@@ -1671,7 +1670,7 @@ xmg_warp_enable() {
         [[ "$ssh_p" =~ ^[0-9]+$ ]] && [ "$ssh_p" -gt 0 ] && [ "$ssh_p" -le 65535 ] || ssh_p=22
 
         if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
-            local jq_file="${xray_cfg}.tmp.$.jq"
+            local jq_file="${xray_cfg}.tmp.$$.jq"
             if [ "$mode" = "routing" ]; then
                 local _wtun="" _wfb=0 _wcond="[]" v6_fallback_rule=""
                 _wtun="$(_xmg_warp_tunnel_family "$WARP_ACC_IPV4" "$WARP_ACC_IPV6")"
@@ -1874,6 +1873,7 @@ EOF_GLOBAL_JQ
                 fi
                 [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null
             fi
+            [ -n "${jq_file:-}" ] && rm -f "$jq_file" 2>/dev/null || true
 
             mv -f "$tmp_cfg" "$xray_cfg"
             local alt_cfg="${XMG_HOME:-/opt/xmg}/xray/config.json"
@@ -2131,11 +2131,11 @@ xmg_warp_disable() {
         bak="$(_xmg_warp_backup_config "$xray_cfg")"
         [ -n "$bak" ] && xmg_info "已安全备份当前原始 Xray 配置至: $bak"
 
-        local tmp_cfg="${xray_cfg}.tmp.$.json"
+        local tmp_cfg="${xray_cfg}.tmp.$$.json"
         local removed_ok=0
 
         if [ "${XMG_WARP_NO_JQ:-0}" != "1" ] && command -v jq >/dev/null 2>&1; then
-            local jq_file="${xray_cfg}.tmp.$.jq"
+            local jq_file="${xray_cfg}.tmp.$$.jq"
             cat > "$jq_file" << 'EOF_DISABLE_JQ'
 (.outbounds = [ (.outbounds // [])[] | select(.tag != "warp-out") ]) |
 (if (.routing and .routing.rules) then
@@ -2143,6 +2143,7 @@ xmg_warp_disable() {
      (.outboundTag // "") != "warp-out"
      and ((((.outboundTag // "") == "direct") and (((.ip // []) | index("10.0.0.0/8")) != null) and (((.ip // []) | index("fc00::/7")) != null)) | not)
    ) ]
+   | (if ((.routing.rules // []) | length) == 0 then del(.routing) else . end)
  else . end)
 EOF_DISABLE_JQ
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then

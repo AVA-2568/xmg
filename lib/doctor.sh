@@ -188,6 +188,14 @@ _xmg_doctor_get_memory_summary() {
         if [ "$avail_kb" -le 0 ]; then
             avail_kb=$((free_kb + buffers_kb + cached_kb))
         fi
+        if declare -F xmg_detect_mem_total_kb >/dev/null 2>&1; then
+            local det_kb=0
+            det_kb="$(xmg_detect_mem_total_kb 2>/dev/null || echo 0)"
+            if [[ "$det_kb" =~ ^[0-9]+$ ]] && [ "$det_kb" -gt 0 ] && { [ "$total_kb" -eq 0 ] || [ "$det_kb" -lt "$total_kb" ]; }; then
+                total_kb="$det_kb"
+                [ "$avail_kb" -gt "$total_kb" ] && avail_kb="$total_kb"
+            fi
+        fi
     fi
 
     if [ "$total_kb" -gt 0 ]; then

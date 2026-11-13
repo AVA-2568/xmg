@@ -25,7 +25,7 @@ XMG_LIB_DIR="$SRC/lib" bash "$SRC/xmg" selftest --nonsense >/dev/null 2>&1 || _B
 t_equals "xmg selftest 非法参数退出码为 2" "$_BAD_RC" "2"
 
 # --- 3. 空环境：应报 FAIL 并返回 1 ---
-T_EMPTY="$(TMPDIR=/tmp mktemp -d)"
+T_EMPTY="$(mktemp -d)"
 _EMPTY_OUT="$(XMG_HOME="$T_EMPTY" XMG_LIB_DIR="$SRC/lib" XMG_BIN="$T_EMPTY/bin/xmg" \
     XMG_RESOLV_CONF_FILE="$T_EMPTY/resolv.conf" \
     bash "$SRC/xmg" selftest 2>&1)"
@@ -36,7 +36,7 @@ t_contains "输出包含汇总行" "$_EMPTY_OUT" "PASS="
 rm -rf "$T_EMPTY"
 
 # --- 4. 模拟完整安装：应全部 PASS ---
-T_OK="$(TMPDIR=/tmp mktemp -d)"
+T_OK="$(mktemp -d)"
 mkdir -p "$T_OK/bin" "$T_OK/etc/firewall" "$T_OK/initd" "$T_OK/binpath"
 
 # 入口与清单
@@ -98,7 +98,7 @@ rm -rf "$T_OK"
 # --- 5. Alpine 仅装框架、内核未装：必须无 FAIL（回归） ---
 # 历史问题：抬头在探测前打印，永远显示 unknown；
 # 且内核缺失会让「内核/服务脚本/运行级」连刷 3 条 FAIL，掩盖真正的适配问题。
-T_BARE="$(TMPDIR=/tmp mktemp -d)"
+T_BARE="$(mktemp -d)"
 mkdir -p "$T_BARE/bin"
 : > "$T_BARE/bin/xmg"
 cp "$SRC/xmg.files" "$T_BARE/xmg.files"

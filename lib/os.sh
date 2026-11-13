@@ -95,7 +95,7 @@ xmg_os_family_resolve() {
 xmg_os_detect() {
     local force="${1:-}"
 
-    if [ "${XMG_OS_DETECTED}" = "1" ] && [ "$force" != "force" ]; then
+    if [ "${XMG_OS_DETECTED:-0}" = "1" ] && [ "$force" != "force" ]; then
         return 0
     fi
 
@@ -213,8 +213,18 @@ xmg_init_is_sysvinit() {
 # chroot、容器、离线镜像里 systemd 未启动但依然应该写 unit 文件；
 # 而 Alpine 默认根本没有 systemctl，自然落到 OpenRC 分支。
 xmg_init_use_systemd_units() {
+    xmg_os_detect
     if xmg_init_is_systemd; then
         return 0
+    fi
+    if [ "${XMG_INIT_SYSTEM:-}" = "openrc" ]; then
+        return 1
+    fi
+    if [ -n "${XMG_INIT_OVERRIDE:-}" ] || [ -n "${MOCK_INIT:-}" ]; then
+        if [ -n "${XMG_SYSTEMD_DIR:-}" ] && [ -d "${XMG_SYSTEMD_DIR}" ]; then
+            return 0
+        fi
+        return 1
     fi
     if command -v systemctl >/dev/null 2>&1; then
         return 0

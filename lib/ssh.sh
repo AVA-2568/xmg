@@ -39,6 +39,8 @@ fi
 # XMG_MENU_LABEL: SSH 安全加固
 
 # ===== 默认配置 =====
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
 XMG_SSH_CONFIG="${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}"
 XMG_SSH_DROPIN_CONF="${XMG_SSH_DROPIN_CONF:-/etc/ssh/sshd_config.d/00-xmg-security.conf}"
 XMG_SSH_F2B_JAIL_CONF="${XMG_SSH_F2B_JAIL_CONF:-/etc/fail2ban/jail.d/xmg-sshd.conf}"
@@ -115,11 +117,11 @@ xmg_ssh_supports_include() {
 # 备份文件到 $XMG_BACKUP_DIR/ssh/
 xmg_ssh_backup_file() {
     local file="$1"
-    local dir="$XMG_BACKUP_DIR/ssh"
+    local dir="${XMG_BACKUP_DIR:-${XMG_HOME:-/opt/xmg}/backups}/ssh"
 
     [ -e "$file" ] || return 0
 
-    mkdir -p "$dir" || return 1
+    mkdir -p "$dir" 2>/dev/null || return 1
     cp -a -- "$file" "$dir/$(basename "$file").$(date '+%Y%m%d-%H%M%S').bak"
 }
 
@@ -255,10 +257,18 @@ EOF
 xmg_ssh_check_authorized_keys() {
     local auth_file="${XMG_SSH_AUTH_KEYS:-}"
     if [ -z "$auth_file" ]; then
-        if [ -f "${HOME:-/root}/.ssh/authorized_keys" ]; then
+        if [ -s "${HOME:-/root}/.ssh/authorized_keys" ]; then
             auth_file="${HOME:-/root}/.ssh/authorized_keys"
-        elif [ -f "/root/.ssh/authorized_keys" ]; then
+        elif [ -s "/root/.ssh/authorized_keys" ]; then
             auth_file="/root/.ssh/authorized_keys"
+        elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+            local _sudo_home=""
+            _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+            if [ -n "$_sudo_home" ] && [ -s "${_sudo_home}/.ssh/authorized_keys" ]; then
+                auth_file="${_sudo_home}/.ssh/authorized_keys"
+            else
+                auth_file="${HOME:-/root}/.ssh/authorized_keys"
+            fi
         else
             auth_file="${HOME:-/root}/.ssh/authorized_keys"
         fi
@@ -400,10 +410,18 @@ xmg_ssh_show() {
     echo "===== 密钥状态 ====="
     local auth_file="${XMG_SSH_AUTH_KEYS:-}"
     if [ -z "$auth_file" ]; then
-        if [ -f "${HOME:-/root}/.ssh/authorized_keys" ]; then
+        if [ -s "${HOME:-/root}/.ssh/authorized_keys" ]; then
             auth_file="${HOME:-/root}/.ssh/authorized_keys"
-        elif [ -f "/root/.ssh/authorized_keys" ]; then
+        elif [ -s "/root/.ssh/authorized_keys" ]; then
             auth_file="/root/.ssh/authorized_keys"
+        elif [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+            local _sudo_home=""
+            _sudo_home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+            if [ -n "$_sudo_home" ] && [ -s "${_sudo_home}/.ssh/authorized_keys" ]; then
+                auth_file="${_sudo_home}/.ssh/authorized_keys"
+            else
+                auth_file="${HOME:-/root}/.ssh/authorized_keys"
+            fi
         else
             auth_file="${HOME:-/root}/.ssh/authorized_keys"
         fi
@@ -436,6 +454,19 @@ _xmg_ssh_port_listening() {
         cmd="ss -ltn"
     elif command -v netstat >/dev/null 2>&1; then
         cmd="netstat -ltn"
+    elif [ -r /proc/net/tcp ] || [ -r /proc/net/tcp6 ]; then
+        local hex_port=""
+        hex_port="$(printf '%04X' "$port" 2>/dev/null || true)"
+        if [ -n "$hex_port" ]; then
+            for ((i = 0; i < 6; i++)); do
+                if awk -v hp=":${hex_port}$" '$2 ~ hp && $4 == "0A" {found=1; exit 0} END {exit(found ? 0 : 1)}' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+                    return 0
+                fi
+                sleep 0.2 2>/dev/null || sleep 1
+            done
+            return 1
+        fi
+        return 2
     else
         return 2
     fi

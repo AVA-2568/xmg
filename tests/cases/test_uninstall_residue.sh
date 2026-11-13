@@ -9,7 +9,7 @@
 SRC="$TESTS_DIR/.."
 
 _RUN="$(bash -c '
-    T="$(TMPDIR=/tmp mktemp -d)"
+    T="$(mktemp -d)"
     mkdir -p "$T/sysctl.d" "$T/limits.d" "$T/system.conf.d" "$T/modules-load.d" "$T/unbound"
 
     for f in tune bbr swap; do echo "# XMG" > "$T/sysctl.d/99-xmg-$f.conf"; done

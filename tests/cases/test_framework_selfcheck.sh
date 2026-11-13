@@ -23,11 +23,11 @@ TESTS_FAIL="$_f0"
 _qf0="$TESTS_FAIL"
 _qp0="$TESTS_PASS"
 t_assert "管道成功应通过" "printf hello | grep -q hello"
-t_assert "管道左段失败应被计数" "printf hello | grep -q NOTEXIST"
+t_assert "管道左段失败应被计数" "printf hello | grep -q NOTEXIST" 2>/dev/null
 t_assert "管道失败被正确计数" test "$TESTS_FAIL" -eq "$((_qf0 + 1))"
 t_assert "管道成功计数正确" test "$TESTS_PASS" -eq "$((_qp0 + 2))"
 # 管道右段失败同样算失败（语义同 pipefail）
-t_assert "管道右段失败应被计数" "echo hi | grep -q NOTEXIST"
+t_assert "管道右段失败应被计数" "echo hi | grep -q NOTEXIST" 2>/dev/null
 t_assert "管道右段失败被正确计数" test "$TESTS_FAIL" -eq "$((_qf0 + 2))"
 TESTS_FAIL="$_qf0"
 
@@ -77,3 +77,7 @@ t_contains "多参正则含|必须判PASS" "$_mcB" "PASS=1 FAIL=0"
 # $# 分派后 eval "" 得到 PIPESTATUS=(0)、rc=0，会把"没给命令"静默判成通过。
 _mcC="$(bash -c 'source "$1"; t_assert "探针" "" 2>&1; t_summary' _ "$_MC_LIB" 2>&1)"
 t_contains "单参空串必须判FAIL" "$_mcC" "PASS=0 FAIL=1"
+
+# 回归：单参数带 `! ` 取反前缀时应按整体退出码判定，不得因 PIPESTATUS[0] 反转
+_mcD="$(bash -c 'source "$1"; t_assert "取反假命令" "! false"; t_assert "取反真命令" "! true" 2>/dev/null; t_summary' _ "$_MC_LIB" 2>&1)"
+t_contains "单参取反命令应判PASS且反向判FAIL" "$_mcD" "PASS=1 FAIL=1"

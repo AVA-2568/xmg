@@ -10,7 +10,7 @@ SRC="$TESTS_DIR/.."
 
 render() {
     local v4="$1" v6="$2"
-    XMG_HOME="$(TMPDIR=/tmp mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
+    XMG_HOME="$(mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
         XMG_LIB_DIR="$SRC/lib" \
         bash -c '
             source lib/common.sh >/dev/null 2>&1
@@ -22,7 +22,7 @@ render() {
 
 render_bash_engine() {
     local v4="$1" v6="$2"
-    XMG_HOME="$(TMPDIR=/tmp mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
+    XMG_HOME="$(mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
         XMG_LIB_DIR="$SRC/lib" \
         bash -c '
             source lib/common.sh >/dev/null 2>&1

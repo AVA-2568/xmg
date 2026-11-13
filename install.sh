@@ -165,6 +165,7 @@ install_dirs() {
         "$XMG_LOG_DIR" \
         "$XMG_BACKUP_DIR" \
         "$XMG_XRAY_DIR" \
+        "$XMG_HOME/templates" \
         "$(dirname "$XMG_LINK")"
 
     # 设置基础权限，避免普通用户误写核心目录
@@ -370,6 +371,9 @@ install_local() {
         mode="$(manifest_entry_mode "$entry")"
 
         install_one_file "$src" "$dst" "$mode"
+        if [[ "$entry" == templates/*.json ]]; then
+            install_one_file "$src" "$XMG_HOME/templates/${entry##*/}" "$mode"
+        fi
     done < <(read_manifest_file "$manifest")
 
     install_command_link
@@ -400,6 +404,9 @@ install_remote() {
 
         src_tmp="$(download_to_temp "$url")"
         install_one_file "$src_tmp" "$dst" "$mode"
+        if [[ "$entry" == templates/*.json ]]; then
+            install_one_file "$src_tmp" "$XMG_HOME/templates/${entry##*/}" "$mode"
+        fi
         rm -f -- "$src_tmp"
     done < <(read_manifest_file "$manifest_tmp")
 

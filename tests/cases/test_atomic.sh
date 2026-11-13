@@ -35,7 +35,7 @@ _TA_SAVED_TEST_MODE="${XMG_TEST_MODE-}"
 #  2) 本机（Cygwin）默认 mktemp 会返回 Windows 风格 "C:\...\Temp/tmp.xxx"，
 #     而被导出的安全删除钩子（rm 被包装成函数）拒绝一切含 "C:" 的路径，
 #     会让 prune 内部的 rm -f 静默失败、用例假失败。
-XMG_TMP="$(TMPDIR=/tmp mktemp -d)"
+XMG_TMP="$(mktemp -d)"
 # 不用 trap 清理：EXIT trap 会被同一进程里后续用例（如 test_state.sh）的 trap 覆盖，
 # 本用例的临时目录就漏了。改为在用例末尾显式删除。
 export XMG_ETC_DIR="$XMG_TMP/etc"

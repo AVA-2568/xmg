@@ -358,7 +358,7 @@ xmg_core_install_native() {
 
     local workdir=""
     workdir="$(xmg_core_resolve_tmpdir)"
-    local run_tmp="${workdir%/}/xmg-core-$-$RANDOM"
+    local run_tmp="${workdir%/}/xmg-core-$$-$RANDOM"
     mkdir -p "$run_tmp" 2>/dev/null || run_tmp="$workdir"
     if [ "$workdir" != "/tmp" ]; then
         xmg_info "使用物理临时目录防 tmpfs OOM: $run_tmp"
@@ -507,7 +507,7 @@ xmg_core_install_official() {
     local target_tmp=""
     target_tmp="$(xmg_core_resolve_tmpdir)"
     # 规范化临时解压目录路径，防止 /tmp 冲突与多实例竞争
-    local run_tmpdir="${target_tmp%/}/xmg-inst-$-$RANDOM"
+    local run_tmpdir="${target_tmp%/}/xmg-inst-$$-$RANDOM"
     mkdir -p "$run_tmpdir" 2>/dev/null || run_tmpdir="$target_tmp"
     if [ "$target_tmp" != "/tmp" ]; then
         xmg_info "使用物理临时目录解压以防 tmpfs OOM: $run_tmpdir"

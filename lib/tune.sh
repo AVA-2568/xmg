@@ -59,6 +59,7 @@ if ! declare -F xmg_info >/dev/null 2>&1; then
         source "${XMG_LIB_DIR:-$XMG_HOME/lib}/common.sh"
     fi
 fi
+unset _XMG_TUNE_LIBDIR
 
 # ===== 默认配置 =====
 XMG_TUNE_SYSCTL_NET_CONF="${XMG_TUNE_SYSCTL_NET_CONF:-/etc/sysctl.d/99-xmg-tune.conf}"
@@ -87,7 +88,7 @@ if [ -z "${XMG_TUNE_NOFILE:-}" ]; then
     unset _xmg_tune_mb
 fi
 XMG_TUNE_SWAPFILE="${XMG_TUNE_SWAPFILE:-/swapfile}"
-XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-${XMG_HOME:-/var/lib/xmg}/backups}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-${XMG_HOME:-/opt/xmg}/backups}"
 
 # DNS 默认预设（境外优先：本面板多部署于海外服务器，阿里 DNS 直连延迟高）
 XMG_TUNE_DNS_DEFAULT="${XMG_TUNE_DNS_DEFAULT:-1.1.1.1 1.0.0.1}"
@@ -428,13 +429,15 @@ xmg_tune_bbr_enable() {
     local modules_file="${XMG_MODULES_FILE:-/etc/modules}"
     if [ -d /etc/modules-load.d ]; then
         printf 'tcp_bbr\n' > "$XMG_TUNE_MODULES_LOAD_CONF"
-    elif [ -f "$modules_file" ] || xmg_init_is_openrc; then
+    fi
+    if [ -f "$modules_file" ] || xmg_init_is_openrc; then
         # Alpine/OpenRC 使用 /etc/modules 逐行列模块
         if ! grep -qx 'tcp_bbr' "$modules_file" 2>/dev/null; then
             printf 'tcp_bbr\n' >> "$modules_file" 2>/dev/null || true
         fi
     fi
 
+    mkdir -p "$(dirname "$XMG_TUNE_SYSCTL_BBR_CONF")" 2>/dev/null || true
     cat > "$XMG_TUNE_SYSCTL_BBR_CONF" <<'EOF'
 # XMG: BBR + FQ（由 xmg tune 生成）
 net.core.default_qdisc = fq
@@ -576,6 +579,7 @@ xmg_tune_net_optimize() {
     fi
 
     xmg_tune_backup_file "$XMG_TUNE_SYSCTL_NET_CONF" || true
+    mkdir -p "$(dirname "$XMG_TUNE_SYSCTL_NET_CONF")" 2>/dev/null || true
 
     {
         echo "# XMG: 内核网络参数调优（由 xmg tune 生成）"
@@ -1978,6 +1982,7 @@ xmg_tune_swap_create() {
 
     local swap_swappiness
     swap_swappiness="$(xmg_tune_calc_swappiness "$mem_mb" "$mb")"
+    mkdir -p "$(dirname "$XMG_TUNE_SYSCTL_SWAP_CONF")" 2>/dev/null || true
     cat > "$XMG_TUNE_SYSCTL_SWAP_CONF" <<EOF
 # XMG: Swap 参数（由 xmg tune 生成）
 vm.swappiness = $swap_swappiness

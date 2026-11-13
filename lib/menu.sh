@@ -38,6 +38,9 @@ if ! declare -F xmg_svc_supported >/dev/null 2>&1; then
     unset _xmg_os_f
 fi
 
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
+
 # 自动发现到的模块列表
 XMG_MENU_FILES=()
 XMG_MENU_FUNCS=()

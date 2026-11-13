@@ -49,6 +49,7 @@ if ! declare -F xmg_state_get >/dev/null 2>&1; then
     unset _xmg_st_f
 fi
 
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
 XMG_SELFTEST_PASS=0
 XMG_SELFTEST_FAIL=0
 XMG_SELFTEST_WARN=0

@@ -35,7 +35,9 @@ fi
 XMG_UNINSTALL_KEEP_BACKUPS="${XMG_UNINSTALL_KEEP_BACKUPS:-0}"
 
 # ===== 依赖 common.sh 的路径变量 =====
-XMG_BIN="${XMG_BIN:-${XMG_HOME:-/opt/xmg}/bin/xmg}"
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
+XMG_BIN="${XMG_BIN:-$XMG_HOME/bin/xmg}"
 XMG_LINK="${XMG_LINK:-/usr/local/bin/xmg}"
 XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
 
@@ -43,6 +45,19 @@ XMG_XRAY_SERVICE="${XMG_XRAY_SERVICE:-xray}"
 # 仅做字符串比较挡不住 /opt/..、/tmp/../ 这类写法：
 # 尾斜杠能去掉，但 ".." 原样留在路径里，rm -rf 会按内核语义作用到上级目录。
 # 所以必须先规范化，再比对；解析不出真实目录时宁可拒绝。
+_xmg_uninstall_is_forbidden_dir() {
+    local d="${1:-}"
+    case "$d" in
+        /|/bin|/boot|/dev|/etc|/home|/lib|/lib32|/lib64|/libx32|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
+            return 0
+            ;;
+        /usr/bin|/usr/sbin|/usr/lib|/usr/lib32|/usr/lib64|/usr/libx32|/usr/libexec|/usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/lib|/usr/share|/usr/include|/usr/src|/var/lib|/var/log|/var/run|/var/cache|/var/spool|/var/tmp|/etc/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 xmg_uninstall_check_safe_home() {
     local target
     if [ "$#" -gt 0 ]; then
@@ -56,7 +71,28 @@ xmg_uninstall_check_safe_home() {
         return 1
     fi
 
-    local norm="$target"
+    local raw_norm="$target"
+    while [ "${raw_norm: -1}" = "/" ] && [ "$raw_norm" != "/" ]; do
+        raw_norm="${raw_norm%/}"
+    done
+
+    if [ "$raw_norm" = "/" ]; then
+        xmg_error "卸载安全拦截: 禁止对根目录 '/' 执行卸载"
+        return 1
+    fi
+
+    if [ "${#raw_norm}" -le 3 ]; then
+        xmg_error "卸载安全拦截: 路径过短 (${#raw_norm} 字符): '$target'"
+        return 1
+    fi
+
+    # 在 readlink -f 解析前先拦截原始路径（防止 UsrMerge 下 /bin -> /usr/bin 绕过顶层目录黑名单）
+    if _xmg_uninstall_is_forbidden_dir "$raw_norm"; then
+        xmg_error "卸载安全拦截: 严格禁止卸载系统目录: '$raw_norm'"
+        return 1
+    fi
+
+    local norm="$raw_norm"
     local real=""
 
     # readlink -f 会消掉 ".." 与软链接；只有解析出真实存在的目录才采信
@@ -86,12 +122,10 @@ xmg_uninstall_check_safe_home() {
         return 1
     fi
 
-    case "$norm" in
-        /bin|/boot|/dev|/etc|/home|/lib|/lib64|/media|/mnt|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var)
-            xmg_error "卸载安全拦截: 严格禁止卸载系统目录: '$norm'"
-            return 1
-            ;;
-    esac
+    if _xmg_uninstall_is_forbidden_dir "$norm"; then
+        xmg_error "卸载安全拦截: 严格禁止卸载系统目录: '$norm'"
+        return 1
+    fi
 
     # 注意：目录特征校验不能放在这里 —— 卸载过程中 bin/lib 会被逐步清理，
     # 中途再次调用本函数时会误判为「非 XMG 目录」。特征校验下沉到
@@ -382,6 +416,14 @@ xmg_uninstall_cli() {
                 rm -rf "$dir" 2>/dev/null || true
             fi
         done
+        if [ -d "${XMG_HOME:-}" ]; then
+            local _item="" _bkp_norm="${XMG_BACKUP_DIR%/}"
+            for _item in "$XMG_HOME"/* "$XMG_HOME"/.[!.]* "$XMG_HOME"/..?*; do
+                [ -e "$_item" ] || [ -L "$_item" ] || continue
+                [ "${_item%/}" = "$_bkp_norm" ] && continue
+                rm -rf -- "$_item" 2>/dev/null || true
+            done
+        fi
     else
         xmg_uninstall_remove_xmg_home
     fi

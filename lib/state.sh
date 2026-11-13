@@ -40,10 +40,12 @@ fi
 
 # ===== 依赖 common.sh 的路径变量 =====
 # 用 :- 赋值而非裸赋值，这样调用方（如测试）预设的路径不会被覆盖。
-XMG_ETC_DIR="${XMG_ETC_DIR:-/opt/xmg/etc}"
+XMG_HOME="${XMG_HOME:-/opt/xmg}"
+XMG_ETC_DIR="${XMG_ETC_DIR:-$XMG_HOME/etc}"
+XMG_BACKUP_DIR="${XMG_BACKUP_DIR:-$XMG_HOME/backups}"
 XMG_XRAY_STATE_DIR="${XMG_XRAY_STATE_DIR:-$XMG_ETC_DIR/xray}"
 XMG_STATE_FILE="${XMG_STATE_FILE:-$XMG_XRAY_STATE_DIR/state.env}"
-export XMG_ETC_DIR XMG_XRAY_STATE_DIR XMG_STATE_FILE
+export XMG_HOME XMG_ETC_DIR XMG_BACKUP_DIR XMG_XRAY_STATE_DIR XMG_STATE_FILE
 
 # 提示函数的兜底定义。
 # state.sh 理论上由 common.sh 先加载，但渲染器/CLI 的测试会单独 source 本文件，

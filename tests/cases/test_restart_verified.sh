@@ -7,7 +7,7 @@
 
 SRC="$TESTS_DIR/.."
 
-T="$(TMPDIR=/tmp mktemp -d)"
+T="$(mktemp -d)"
 mkdir -p "$T/bin"
 LOG="$T/actions.log"
 : > "$LOG"

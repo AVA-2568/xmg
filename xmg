@@ -43,10 +43,11 @@ XMG $XMG_VERSION
   xmg core menu            内核管理菜单
   xmg warp [apply|auto|enable|disable|status|optimize|test|export|import|geo|uninstall|menu] WARP 原生出站管理
             enable routing --geo auto|off|slim|std|full  指定分流地理数据档位
-  xmg tune [bbr|net|dns|dot|swap|status|menu] 系统与内核网络调优
+  xmg tune [bbr|net|dns|dot|swap|time|status|menu] 系统与内核网络调优
   xmg firewall [status|allow|enable|disable|reload|flush|menu] 防火墙端口管理
   xmg ssh [status|port|disable-pwd|enable-pwd|fail2ban|menu] SSH 安全与防爆破
-  xmg xray [start|stop|restart|reload|status|validate|menu] Xray 服务生命周期与配置校验
+  xmg xray [start|stop|restart|reload|status|validate|diag|menu] Xray 服务生命周期与配置校验
+  xmg maint [update|clean|vnstat|disk|ps|drop-caches|menu] 系统日常维护与清理
   xmg detect [virt|mem|net|os|status] 环境能力与容器自省探测
   xmg update [check|run|rollback|menu] XMG 系统更新与回滚
   xmg uninstall [run|menu] [--yes|-y] 卸载 XMG
@@ -268,6 +269,7 @@ xmg_main() {
                 dns)    shift; xmg_tune_dns_optimize "$@" ;;
                 dot)    shift; xmg_tune_dns_dot "$@" ;;
                 swap)   shift; xmg_tune_swap_panel "$@" ;;
+                time|ntp) shift; xmg_tune_time_sync "$@" ;;
                 status) shift; xmg_tune_status "$@" ;;
                 menu)   shift || true; ( set +e; xmg_tune_menu "$@" ) ;;
                 *)      xmg_error "未知的 tune 子命令: $1"; exit 2 ;;
@@ -321,7 +323,8 @@ xmg_main() {
                 restart)  shift; xmg_xray_restart "$@" ;;
                 reload)   shift; xmg_xray_reload "$@" ;;
                 status)   shift; xmg_xray_status "$@" ;;
-                validate) shift; xmg_xray_validate_config "$@" ;;
+                validate|test) shift; xmg_xray_validate_config "$@" ;;
+                diag)     shift; xmg_xray_diag "$@" ;;
                 menu)     shift || true; ( set +e; xmg_xray_menu "$@" ) ;;
                 *)        xmg_error "未知的 xray 子命令: $1"; exit 2 ;;
             esac
@@ -407,6 +410,22 @@ xmg_main() {
             else
                 echo "防火墙 : 未检测到 ufw / iptables"
             fi
+            ;;
+        maint)
+            xmg_require_core_file maint.sh
+            # shellcheck source=/dev/null
+            source "$XMG_LIB_DIR/maint.sh"
+            case "${1:-menu}" in
+                update)       shift; xmg_maint_update "$@" ;;
+                clean)        shift; xmg_maint_clean "$@" ;;
+                vnstat)       shift; xmg_maint_vnstat "$@" ;;
+                disk)         shift; xmg_maint_disk_overview "$@" ;;
+                ps|inspect)   shift; xmg_maint_process_inspect "$@" ;;
+                drop-caches)  shift; xmg_maint_drop_caches "$@" ;;
+                journal-limit) shift; xmg_maint_journal_limit "$@" ;;
+                menu)         shift || true; ( set +e; xmg_maint_menu "$@" ) ;;
+                *)            xmg_error "未知的 maint 子命令: $1"; exit 2 ;;
+            esac
             ;;
         selftest)
             xmg_require_core_file selftest.sh

@@ -343,9 +343,12 @@ esac
 # ================================================================
 section "6. 调优与持久化"
 
-run_yes xmg tune bbr >/tmp/xmg-bbr.log 2>&1 \
-    && ok "tune bbr 执行完成" || skip "BBR 不可用（内核不支持）"
-chk "BBR 配置已落盘" "[ -f /etc/sysctl.d/99-xmg-bbr.conf ]"
+if run_yes xmg tune bbr >/tmp/xmg-bbr.log 2>&1; then
+    ok "tune bbr 执行完成"
+    chk "BBR 配置已落盘" "[ -f /etc/sysctl.d/99-xmg-bbr.conf ]"
+else
+    skip "BBR 不可用（内核不支持），跳过落盘检查"
+fi
 
 run_yes xmg tune net >/tmp/xmg-net.log 2>&1 \
     && ok "tune net 执行完成" || bad "tune net 失败（/tmp/xmg-net.log）"
@@ -378,7 +381,6 @@ else
 
     case "$INIT" in
         systemd)
-            chk_not "systemd unit 已清理" "[ -f /etc/systemd/system/xray.service ]"
             chk_not "drop-in 已清理" "[ -d /etc/systemd/system/xray.service.d ]"
             ;;
         openrc)

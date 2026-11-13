@@ -27,7 +27,7 @@ _LOAD_RC=$?
 t_equals "firewall.sh 独立加载自包含测试成功" "$_LOAD_RC" "0"
 
 # --- 3. 自适应放行 SSH 端口防锁死测试 ---
-TMP_FW_DIR="$(TMPDIR=/tmp mktemp -d)"
+TMP_FW_DIR="$(mktemp -d)"
 MOCK_LOG="$TMP_FW_DIR/ufw.log"
 MOCK_BIN="$TMP_FW_DIR/bin"
 MOCK_UFW_CONF="$TMP_FW_DIR/ufw_default"

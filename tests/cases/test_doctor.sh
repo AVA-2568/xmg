@@ -183,7 +183,7 @@ t_equals "测试模式下 DoH 延迟默认短路返回" "$(XMG_TEST_MODE=1 _xmg_
 # --- 8. Alpine 回归：证书有效期不得依赖 GNU date ---
 # BusyBox date -d 解析不了 openssl 的 "Nov  7 13:49:17 2026 GMT"，
 # 旧实现会把有效证书算成 "已过期"。改为 openssl -checkend 后与平台无关。
-T_CERT="$(TMPDIR=/tmp mktemp -d)"
+T_CERT="$(mktemp -d)"
 mkdir -p "$T_CERT/etc/xray/certs"
 if command -v openssl >/dev/null 2>&1; then
     # 用配置文件写主题，避免 -subj "/CN=..." 在 Git Bash 下被当成路径改写
@@ -210,7 +210,7 @@ fi
 rm -rf "$T_CERT"
 
 # --- 9. 无配置时「配置校验」显示未配置，而不是 OK ---
-T_NOCFG="$(TMPDIR=/tmp mktemp -d)"
+T_NOCFG="$(mktemp -d)"
 _NOCFG_RC=0
 XMG_XRAY_CONFIG="$T_NOCFG/none.json" _xmg_doctor_validate_xray_config || _NOCFG_RC=$?
 t_equals "无配置文件时校验接口返回 2（未配置）" "$_NOCFG_RC" "2"
@@ -224,7 +224,7 @@ t_not_contains "无配置时不显示配置校验 OK" "$_NOCFG_OUT" "配置校�
 rm -rf "$T_NOCFG"
 
 # --- 9.5 NAT 机型未声明外部端口时必须显式提示（README 承诺的体检行为） ---
-T_NAT="$(TMPDIR=/tmp mktemp -d)"
+T_NAT="$(mktemp -d)"
 mkdir -p "$T_NAT/etc/xray"
 printf 'PROXY_VLESS_ENABLED=1\nPROXY_VLESS_PORT=20000\n' > "$T_NAT/etc/xray/state.env"
 _HINT_NAT="$(XMG_HOME="$T_NAT" XMG_ETC_DIR="$T_NAT/etc" \
