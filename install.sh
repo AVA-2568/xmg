@@ -459,6 +459,37 @@ verify_install() {
     fi
 }
 
+auto_refresh_on_upgrade() {
+    local state_f="$XMG_ETC_DIR/xray/state.env"
+    local warp_env="$XMG_HOME/warp/warp.env"
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    [ -x "$XMG_BIN" ] || return 0
+    [ -f "$state_f" ] || return 0
+
+    local w_on="" w_mode="" w_geo=""
+    w_on="$(sed -n 's/^WARP_ENABLED=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
+    w_mode="$(sed -n 's/^WARP_MODE=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
+    w_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
+    [ -n "$w_on" ] || [ ! -f "$warp_env" ] || w_on="$(sed -n 's/^WARP_ENABLED=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    [ -n "$w_mode" ] || [ ! -f "$warp_env" ] || w_mode="$(sed -n 's/^WARP_MODE=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    [ -n "$w_geo" ] || [ ! -f "$warp_env" ] || w_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    case "$w_mode" in
+        global|routing) ;;
+        *) w_mode="global" ;;
+    esac
+
+    echo
+    green "检测到已有配置，正在按新版本自动刷新配置..."
+    "$XMG_BIN" proxy apply >/dev/null 2>&1 || true
+    if [ "$w_on" = "1" ]; then
+        if [ "$w_mode" = "routing" ] && [ -n "$w_geo" ]; then
+            "$XMG_BIN" warp enable routing --geo "$w_geo" >/dev/null 2>&1 || true
+        else
+            "$XMG_BIN" warp enable "$w_mode" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 print_summary() {
     hash -r 2>/dev/null || true
     echo
@@ -499,6 +530,7 @@ main() {
     echo
     echo "安装文件校验："
     verify_install
+    auto_refresh_on_upgrade
 
     print_summary
 }

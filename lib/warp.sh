@@ -625,6 +625,34 @@ xmg_warp_optimize_endpoint() {
         fi
     fi
 
+    # 若 WARP 已处于启用状态（且非 auto_apply 内部调用），自动同步新端点到配置并重启 Xray
+    if [ "${_XMG_WARP_IN_AUTO_APPLY:-0}" != "1" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+        local _cur_on="" _cur_mode="" _cur_geo=""
+        if declare -F xmg_state_get >/dev/null 2>&1; then
+            _cur_on="$(xmg_state_get WARP_ENABLED "" 2>/dev/null || true)"
+            _cur_mode="$(xmg_state_get WARP_MODE "" 2>/dev/null || true)"
+            _cur_geo="$(xmg_state_get WARP_GEO_MODE "" 2>/dev/null || true)"
+        fi
+        if [ -z "$_cur_on" ] && [ -f "$XMG_WARP_ENV_FILE" ]; then
+            _cur_on="$(sed -n 's/^WARP_ENABLED=//p' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -1 | tr -d '" ')"
+        fi
+        if [ -z "$_cur_mode" ] && [ -f "$XMG_WARP_ENV_FILE" ]; then
+            _cur_mode="$(sed -n 's/^WARP_MODE=//p' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -1 | tr -d '" ')"
+        fi
+        if [ "$_cur_on" = "1" ]; then
+            case "$_cur_mode" in
+                global|routing) ;;
+                *) _cur_mode="global" ;;
+            esac
+            xmg_info "检测到 WARP 已启用，正在将优选端点自动同步至 Xray 配置并重启生效..."
+            if [ "$_cur_mode" = "routing" ] && [ -n "$_cur_geo" ]; then
+                xmg_warp_enable routing --geo "$_cur_geo" >/dev/null 2>&1 || xmg_warn "自动同步端点失败，请手动执行 xmg warp enable routing"
+            else
+                xmg_warp_enable "$_cur_mode" >/dev/null 2>&1 || xmg_warn "自动同步端点失败，请手动执行 xmg warp enable $_cur_mode"
+            fi
+        fi
+    fi
+
     echo "$best_ep"
     return 0
 }
@@ -1735,7 +1763,11 @@ EOF_ROUTING_JQ
 (if (.routing.rules // null) != null then
    .routing.rules = (
      [ (.routing.rules // [])[] |
-       select((.outboundTag // "") != "warp-out" and ((.port // "") | tostring) != "$ssh_p") ]
+       select(
+         (.outboundTag // "") != "warp-out"
+         and ((.port // "") | tostring) != "$ssh_p"
+         and ((((.outboundTag // "") == "direct") and (((.ip // []) | index("10.0.0.0/8")) != null) and (((.ip // []) | index("fc00::/7")) != null)) | not)
+       ) ]
    )
  else . end) |
 (if ((.routing.rules // []) | length) == 0 then del(.routing) else . end)
@@ -2223,7 +2255,7 @@ xmg_warp_auto_apply() {
     _xmg_warp_register 0 || return 1
 
     # 3. 本地机房低延迟 Anycast 端点优选并写入 account.json
-    xmg_warp_optimize_endpoint || return 1
+    _XMG_WARP_IN_AUTO_APPLY=1 xmg_warp_optimize_endpoint || return 1
 
     # 4. 导出出站并启用 (默认 global 全局清洁模式)
     xmg_warp_enable "global" || return 1
@@ -2482,6 +2514,94 @@ xmg_warp_geo_cmd() {
     return 0
 }
 
+_XMG_WARP_EPHEMERAL_PID=""
+_XMG_WARP_EPHEMERAL_DIR=""
+
+_xmg_warp_stop_ephemeral_socks() {
+    if [ -n "${_XMG_WARP_EPHEMERAL_PID:-}" ]; then
+        kill "$_XMG_WARP_EPHEMERAL_PID" 2>/dev/null || true
+        wait "$_XMG_WARP_EPHEMERAL_PID" 2>/dev/null || true
+        _XMG_WARP_EPHEMERAL_PID=""
+    fi
+    if [ -n "${_XMG_WARP_EPHEMERAL_DIR:-}" ] && [ -d "$_XMG_WARP_EPHEMERAL_DIR" ]; then
+        rm -rf "$_XMG_WARP_EPHEMERAL_DIR" 2>/dev/null || true
+        _XMG_WARP_EPHEMERAL_DIR=""
+    fi
+}
+
+_xmg_warp_start_ephemeral_socks() {
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 1
+    [ -f "$XMG_WARP_ACCOUNT_FILE" ] || return 1
+
+    _warp_load_xray_lib 2>/dev/null || true
+    local xray_bin=""
+    if declare -F xmg_xray_get_bin >/dev/null 2>&1; then
+        xray_bin="$(xmg_xray_get_bin 2>/dev/null || true)"
+    elif command -v xray >/dev/null 2>&1; then
+        xray_bin="$(command -v xray)"
+    elif [ -x /usr/local/bin/xray ]; then
+        xray_bin="/usr/local/bin/xray"
+    fi
+    [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || return 1
+
+    local tdir="" tport=""
+    tdir="$(mktemp -d 2>/dev/null || echo "/tmp/xmg_warp_eph_$$")"
+    mkdir -p "$tdir" 2>/dev/null || return 1
+
+    if command -v python3 >/dev/null 2>&1; then
+        tport="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || true)"
+    fi
+    [[ "$tport" =~ ^[0-9]+$ ]] && [ "$tport" -gt 1024 ] || tport="$(( 30000 + (RANDOM % 20000) ))"
+
+    local out_frag=""
+    out_frag="$(xmg_warp_export_xray_outbound 2>/dev/null || true)"
+    if [ -z "$out_frag" ]; then
+        rm -rf "$tdir" 2>/dev/null || true
+        return 1
+    fi
+
+    cat > "$tdir/config.json" <<EOF
+{
+  "log": { "loglevel": "none" },
+  "inbounds": [
+    {
+      "tag": "eph-socks",
+      "listen": "127.0.0.1",
+      "port": $tport,
+      "protocol": "socks",
+      "settings": { "auth": "noauth", "udp": false }
+    }
+  ],
+  "outbounds": [
+    $out_frag
+  ]
+}
+EOF
+    if ! "$xray_bin" run -test -format json -c "$tdir/config.json" >/dev/null 2>&1; then
+        rm -rf "$tdir" 2>/dev/null || true
+        return 1
+    fi
+
+    "$xray_bin" run -c "$tdir/config.json" >/dev/null 2>&1 &
+    _XMG_WARP_EPHEMERAL_PID="$!"
+    _XMG_WARP_EPHEMERAL_DIR="$tdir"
+
+    local i=0
+    while [ "$i" -lt 20 ]; do
+        if curl -x "socks5h://127.0.0.1:${tport}" -s --connect-timeout 1 --max-time 1 https://www.cloudflare.com/cdn-cgi/trace >/dev/null 2>&1; then
+            printf 'socks5h://127.0.0.1:%s
+' "$tport"
+            return 0
+        fi
+        kill -0 "$_XMG_WARP_EPHEMERAL_PID" 2>/dev/null || break
+        i=$((i + 1))
+        sleep 0.1
+    done
+
+    _xmg_warp_stop_ephemeral_socks
+    return 1
+}
+
 # ===== 获取本机 Xray SOCKS5 代理地址（供实测 WARP 出站） =====
 _xmg_warp_local_socks_proxy_url() {
     local cfg="" listen="" port="" user="" pass=""
@@ -2550,6 +2670,7 @@ xmg_warp_test_unlock() {
     local curl_proxy_args=()
     local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
+    local used_ephemeral=0
     proxy_url="$(_xmg_warp_local_socks_proxy_url 2>/dev/null || true)"
     if [ -n "$proxy_url" ]; then
         local px_trace=""
@@ -2564,11 +2685,28 @@ xmg_warp_test_unlock() {
             xmg_info "测试路径: 通过 Xray 本机 SOCKS5 代理 (实测 WARP 出站)"
             printf "当前代理出口 IP             : %s (%s, 机房: %s, warp=%s)\n" "${px_ip:-未知}" "${px_loc:-未知}" "${px_colo:-未知}" "${px_warp:-off}"
         else
-            xmg_warn "检测到本机 SOCKS5 配置，但代理连通探测失败，已回退为宿主机直连测试（非 WARP 出口）"
+            proxy_url=""
         fi
-    else
-        xmg_warn "本机未启用 SOCKS5 入站，以下为宿主机直连测试（非 Xray WARP 进程内出口）"
-        xmg_info "提示: 如需从本机实测 WARP 出口解锁，请先启用 SOCKS5 入站 (如 xmg proxy apply --socks on)"
+    fi
+
+    if [ -z "$proxy_url" ] && [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
+        proxy_url="$(_xmg_warp_start_ephemeral_socks 2>/dev/null || true)"
+        if [ -n "$proxy_url" ]; then
+            used_ephemeral=1
+            curl_proxy_args=(-x "$proxy_url")
+            local eph_trace="" eph_ip="" eph_loc="" eph_colo="" eph_warp=""
+            eph_trace="$(curl -x "$proxy_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+            eph_ip="$(printf '%s\n' "$eph_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+            eph_loc="$(printf '%s\n' "$eph_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
+            eph_colo="$(printf '%s\n' "$eph_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+            eph_warp="$(printf '%s\n' "$eph_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+            xmg_info "测试路径: 通过临时本地 WARP 探测实例 (不暴露公网端口，测完自动销毁)"
+            printf "当前 WARP 实测出口 IP       : %s (%s, 机房: %s, warp=%s)\n" "${eph_ip:-未知}" "${eph_loc:-未知}" "${eph_colo:-未知}" "${eph_warp:-off}"
+        fi
+    fi
+
+    if [ ${#curl_proxy_args[@]} -eq 0 ]; then
+        xmg_warn "未检测到可用的本机 WARP 代理实例，以下为宿主机直连测试（非 WARP 出口）"
     fi
 
     # 1. OpenAI / ChatGPT
@@ -2628,6 +2766,7 @@ xmg_warp_test_unlock() {
         echo "无法连接 (HTTP $g_code)"
     fi
 
+    [ "$used_ephemeral" -eq 1 ] && _xmg_warp_stop_ephemeral_socks
     echo "=================================================================="
 }
 

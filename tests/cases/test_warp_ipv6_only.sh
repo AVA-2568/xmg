@@ -253,3 +253,10 @@ t_equals "0.0.0.0 监听生成 socks5h://127.0.0.1 代理 URL" \
     "$(_xmg_warp_local_socks_proxy_url)" \
     "socks5h://127.0.0.1:2080"
 XMG_XRAY_CONFIG="$_TV6_TMP/xray/config.json"
+
+# 9. 从 routing 模式切回 global 模式时，彻底清理私有网段 direct 规则并删除 .routing 段
+t_assert "纯 IPv6 从 routing 启用" xmg_warp_enable routing off
+t_assert "纯 IPv6 从 routing 切回 global 成功" xmg_warp_enable global
+t_equals "切回 global 后不残留 routing 段" \
+    "$(jq -r 'if .routing then "HAS" else "NONE" end' "$XMG_XRAY_CONFIG")" \
+    "NONE"

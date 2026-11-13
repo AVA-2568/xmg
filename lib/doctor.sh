@@ -712,6 +712,54 @@ _xmg_doctor_get_doh_latency() {
     printf '超时/不可达'
 }
 
+# 5.3 检查 WARP 出站状态
+_xmg_doctor_get_warp_status() {
+    local w_on="" w_mode=""
+    if declare -F xmg_state_get >/dev/null 2>&1; then
+        w_on="$(xmg_state_get WARP_ENABLED "" 2>/dev/null || true)"
+        w_mode="$(xmg_state_get WARP_MODE "" 2>/dev/null || true)"
+    fi
+    local w_env="${XMG_WARP_ENV_FILE:-${XMG_HOME:-/opt/xmg}/warp/warp.env}"
+    if [ -z "$w_on" ] && [ -f "$w_env" ]; then
+        w_on="$(sed -n 's/^WARP_ENABLED=//p' "$w_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    fi
+    if [ -z "$w_mode" ] && [ -f "$w_env" ]; then
+        w_mode="$(sed -n 's/^WARP_MODE=//p' "$w_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    fi
+    if [ "$w_on" != "1" ]; then
+        printf '未启用'
+        return 0
+    fi
+    [ -n "$w_mode" ] || w_mode="global"
+
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        printf '已启用 (模式: %s)' "$w_mode"
+        return 0
+    fi
+
+    local cfg="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    if [ -r "$cfg" ] && ! grep -q '"warp-out"' "$cfg" 2>/dev/null; then
+        printf '状态异常 (已启用但配置缺少 warp-out，建议执行 xmg warp enable %s)' "$w_mode"
+        return 0
+    fi
+
+    if declare -F _xmg_warp_local_socks_proxy_url >/dev/null 2>&1; then
+        local p_url="" p_trace="" p_warp="" p_ip=""
+        p_url="$(_xmg_warp_local_socks_proxy_url 2>/dev/null || true)"
+        if [ -n "$p_url" ]; then
+            p_trace="$(curl -x "$p_url" -sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+            if [ -n "$p_trace" ]; then
+                p_warp="$(printf '%s\n' "$p_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+                p_ip="$(printf '%s\n' "$p_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+                printf '已启用 (模式: %s, 握手正常: warp=%s, 出口: %s)' "$w_mode" "${p_warp:-off}" "${p_ip:-未知}"
+                return 0
+            fi
+        fi
+    fi
+
+    printf '已启用 (模式: %s, 配置就绪)' "$w_mode"
+}
+
 # 6. 采集防火墙状态
 _xmg_doctor_get_firewall_status() {
     if [ -n "${MOCK_FIREWALL_STATUS:-}" ]; then
@@ -1060,6 +1108,13 @@ xmg_doctor_run() {
         "$c_cyan" "$doh_addr" "$c_reset" \
         "$c_cyan" "$doh_lat" "$c_reset" \
         "$c_cyan" "$out_resolve" "$c_reset"
+
+    # [WARP]
+    local warp_st=""
+    warp_st="$(_xmg_doctor_get_warp_status)"
+    printf '%s[WARP]%s 出站状态: %s%s%s\n' \
+        "$c_bold" "$c_reset" \
+        "$c_cyan" "$warp_st" "$c_reset"
 
     # [安全]
     printf '%s[安全]%s 防火墙: %s%s%s | SSH 端口: %s%s%s | NTP 时钟: %s%s%s\n' \
