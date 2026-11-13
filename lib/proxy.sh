@@ -278,6 +278,20 @@ xmg_proxy_apply() {
             [ -n "$r_uuid" ] && _uuid_generated=1
         fi
         [ -n "$r_uuid" ] && _xmg_stage PROXY_REALITY_UUID "$r_uuid"
+
+        local _cur_sni="" _cur_dest="" _auto_sni=""
+        _cur_sni="$(xmg_state_get PROXY_REALITY_SNI "")"
+        _cur_dest="$(xmg_state_get PROXY_REALITY_DEST "")"
+        if [ "$_cur_sni" = "auto" ] || [ "$_cur_dest" = "auto" ] || { [ -z "$_cur_sni" ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; }; then
+            _auto_sni="$(xmg_proxy_reality_auto_target 2>/dev/null || echo "www.microsoft.com")"
+            _xmg_stage PROXY_REALITY_SNI "$_auto_sni"
+            if [ -z "$_cur_dest" ] || [ "$_cur_dest" = "auto" ] || [ "$_cur_sni" = "auto" ]; then
+                _xmg_stage PROXY_REALITY_DEST "${_auto_sni}:443"
+            fi
+            xmg_info "已自动优选 REALITY 伪装目标(无共享 CDN): $_auto_sni (${_auto_sni}:443)"
+        elif [ -n "$_cur_sni" ]; then
+            _xmg_proxy_reality_warn_if_cdn "$_cur_sni"
+        fi
         if [ "$_uuid_generated" = "1" ]; then
             xmg_info "已自动生成 REALITY UUID: $r_uuid（客户端链接使用同一值）"
         fi
@@ -1214,13 +1228,180 @@ _xmg_read() {
     printf '%s' "$ans"
 }
 
+# ===== 检测域名是否套了 Cloudflare / 共享 CDN（防偷流量与特征暴露） =====
+# 返回 0 = 命中 CDN（不建议用作 REALITY 目标），1 = 未检测到常见共享 CDN 头
+_xmg_proxy_reality_is_cdn_headers() {
+    local hdrs="${1:-}"
+    [ -n "$hdrs" ] || return 1
+    if printf '%s\n' "$hdrs" | grep -qiE '^(cf-ray:|cf-cache-status:|server:[[:space:]]*cloudflare|x-amz-cf-id:|server:[[:space:]]*cloudfront|server:[[:space:]]*akamaighost|x-served-by:[[:space:]]*cache-)'; then
+        return 0
+    fi
+    return 1
+}
+
+# 查询本机或目标 IP 的国家代码（2位大写，如 JP / US / DE）
+_xmg_proxy_ip_country() {
+    local ip="${1:-}"
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local -a fam_args=()
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        fam_args=(-6)
+    elif [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+        fam_args=(-4)
+    fi
+
+    local cc=""
+    if [ -n "$ip" ]; then
+        cc="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://ipinfo.io/${ip}/country" 2>/dev/null | tr -d '[:space:]' || true)"
+    else
+        cc="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null | sed -n 's/^loc=//p' | head -1 | tr -d '[:space:]' || true)"
+    fi
+    [[ "$cc" =~ ^[A-Z]{2}$ ]] && printf '%s\n' "$cc"
+    return 0
+}
+
+_xmg_proxy_reality_warn_if_cdn() {
+    local domain="${1:-}"
+    [ -n "$domain" ] || return 0
+    [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
+    command -v curl >/dev/null 2>&1 || return 0
+
+    local d_one="${domain%%,*}"
+    d_one="${d_one%%:*}"
+    local -a fam_args=()
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        fam_args=(-6)
+    elif [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+        fam_args=(-4)
+    fi
+
+    local resp="" meta="" remote_ip="" hdrs=""
+    resp="$(curl "${fam_args[@]}" -sI -o /dev/null -D - -w "\n__XMG_IP__:%{remote_ip}" --connect-timeout 2 --max-time 3 "https://${d_one}" 2>/dev/null | tr -d '\r' || true)"
+    meta="$(printf '%s\n' "$resp" | grep '^__XMG_IP__:' | tail -1 || true)"
+    remote_ip="${meta#__XMG_IP__:}"
+    hdrs="$(printf '%s\n' "$resp" | sed '/^__XMG_IP__:/d')"
+
+    if _xmg_proxy_reality_is_cdn_headers "$hdrs"; then
+        xmg_warn "检测到 REALITY 伪装域名 $d_one 存在 Cloudflare/共享 CDN 响应头！"
+        xmg_warn "风险提示: 套了 CF 等共享 CDN 的域名可能存在被他人偷流量或指纹异常风险，建议更换为无 CDN 的独立源站域名"
+    fi
+
+    if [ -n "$remote_ip" ]; then
+        local vps_cc="" dst_cc=""
+        vps_cc="$(_xmg_proxy_ip_country "")"
+        dst_cc="$(_xmg_proxy_ip_country "$remote_ip")"
+        if [ -n "$vps_cc" ] && [ -n "$dst_cc" ] && [ "$vps_cc" != "$dst_cc" ]; then
+            xmg_warn "检测到伪装目标 $d_one ($dst_cc) 与本机所在地区 ($vps_cc) 不一致，建议优先选用同地区无 CDN 源站以降低握手延迟与特征差异"
+        fi
+    fi
+}
+
+# ===== REALITY 伪装目标自动优选（同地区优先、非大厂、无共享 CDN、TLS 1.3 + HTTP/2） =====
+xmg_proxy_reality_auto_target() {
+    if [ -n "${XMG_MOCK_REALITY_AUTO_TARGET:-}" ]; then
+        printf '%s\n' "$XMG_MOCK_REALITY_AUTO_TARGET"
+        return 0
+    fi
+    if [ "${XMG_TEST_MODE:-0}" = "1" ]; then
+        printf 'www.microsoft.com\n'
+        return 0
+    fi
+
+    if [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; then
+        if declare -F xmg_detect_network >/dev/null 2>&1; then
+            xmg_detect_network >/dev/null 2>&1 || true
+        fi
+    fi
+
+    local -a fam_args=()
+    if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+        fam_args=(-6)
+    elif [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+        fam_args=(-4)
+    fi
+
+    local vps_cc=""
+    vps_cc="$(_xmg_proxy_ip_country "")"
+
+    # 覆盖多地区独立机房/高校/开源镜像源（非大厂、无共享 CDN、TLS 1.3 + HTTP/2）
+    local candidates=(
+        "ftp.jaist.ac.jp"
+        "ftp.riken.jp"
+        "ftp.cuhk.edu.hk"
+        "download.nus.edu.sg"
+        "mirrors.xtom.com"
+        "mirrors.mit.edu"
+        "ftp.fau.de"
+        "ftp.halifax.rwth-aachen.de"
+        "ftp.nluug.nl"
+        "mirror.accum.se"
+        "www.mirrorservice.org"
+        "www.kernel.org"
+        "www.freebsd.org"
+    )
+
+    local best_same="" best_same_ms=999999
+    local best_any="" best_any_ms=999999
+    local d="" resp="" meta="" ver="" rtt="" rip="" hdrs="" ms=0 dst_cc=""
+    if command -v curl >/dev/null 2>&1; then
+        for d in "${candidates[@]}"; do
+            resp="$(curl "${fam_args[@]}" --tlsv1.3 --http2 -sI -o /dev/null -D - \
+                -w "\n__XMG_META__:%{http_version}|%{time_connect}|%{remote_ip}" \
+                --connect-timeout 2 --max-time 3 "https://${d}" 2>/dev/null | tr -d '\r' || true)"
+            meta="$(printf '%s\n' "$resp" | grep '^__XMG_META__:' | tail -1 || true)"
+            [ -n "$meta" ] || continue
+            meta="${meta#__XMG_META__:}"
+            IFS='|' read -r ver rtt rip <<< "$meta"
+            [ "$ver" = "2" ] || [ "$ver" = "2.0" ] || continue
+
+            hdrs="$(printf '%s\n' "$resp" | sed '/^__XMG_META__:/d')"
+            if _xmg_proxy_reality_is_cdn_headers "$hdrs"; then
+                continue
+            fi
+
+            ms="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t * 1000 }' 2>/dev/null || echo 999999)"
+            [ "$ms" = "0" ] && ms=1
+            [[ "$ms" =~ ^[0-9]+$ ]] || continue
+
+            if [ "$ms" -lt "$best_any_ms" ]; then
+                best_any_ms="$ms"
+                best_any="$d"
+            fi
+
+            if [ -n "$vps_cc" ] && [ -n "$rip" ]; then
+                dst_cc="$(_xmg_proxy_ip_country "$rip")"
+                if [ "$dst_cc" = "$vps_cc" ] && [ "$ms" -lt "$best_same_ms" ]; then
+                    best_same_ms="$ms"
+                    best_same="$d"
+                fi
+            fi
+        done
+    fi
+
+    if [ -n "$best_same" ]; then
+        printf '%s\n' "$best_same"
+    elif [ -n "$best_any" ]; then
+        printf '%s\n' "$best_any"
+    else
+        printf 'mirrors.xtom.com\n'
+    fi
+    return 0
+}
+
 # ===== REALITY 配置向导 =====
 # REALITY 不需要证书，只需伪装的 serverName + 回落目标 dest；密钥在 apply 时自动生成。
 xmg_proxy_reality_wizard() {
     local r_port r_listen r_uuid r_sni r_dest r_path r_mode r_ext r_public cur_listen def_sni def_dest
 
-    def_sni="$(xmg_state_get PROXY_REALITY_SNI "www.microsoft.com")"
-    def_dest="$(xmg_state_get PROXY_REALITY_DEST "${def_sni}:443")"
+    def_sni="$(xmg_state_get PROXY_REALITY_SNI "")"
+    if [ -z "$def_sni" ] || { [ "$(xmg_state_get PROXY_REALITY_ENABLED 0)" != "1" ] && [ "$def_sni" = "www.microsoft.com" ]; }; then
+        xmg_info "正在为当前 VPS 自动测速优选 TLS 1.3 + HTTP/2 伪装目标..."
+        def_sni="$(xmg_proxy_reality_auto_target 2>/dev/null || echo "www.microsoft.com")"
+    fi
+    def_dest="$(xmg_state_get PROXY_REALITY_DEST "")"
+    [ -n "$def_dest" ] || def_dest="${def_sni}:443"
 
     cur_listen="$(xmg_state_get PROXY_REALITY_LISTEN)"
     if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then

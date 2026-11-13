@@ -260,3 +260,21 @@ t_assert "纯 IPv6 从 routing 切回 global 成功" xmg_warp_enable global
 t_equals "切回 global 后不残留 routing 段" \
     "$(jq -r 'if .routing then "HAS" else "NONE" end' "$XMG_XRAY_CONFIG")" \
     "NONE"
+
+# 10. REALITY --reality-sni auto 自动优选伪装目标并同步 target
+source "$XMG_LIB_DIR/proxy.sh"
+xmg_state_stage_clear 2>/dev/null || true
+XMG_MOCK_REALITY_AUTO_TARGET="mirrors.xtom.com" xmg_proxy_apply --vless off --socks off --reality on --reality-sni auto --reality-private-key "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" --reality-public-key "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" >/dev/null 2>&1
+t_equals "auto 模式自动写入 PROXY_REALITY_SNI" \
+    "$(xmg_state_get PROXY_REALITY_SNI)" \
+    "mirrors.xtom.com"
+t_equals "auto 模式自动同步 PROXY_REALITY_DEST" \
+    "$(xmg_state_get PROXY_REALITY_DEST)" \
+    "mirrors.xtom.com:443"
+
+# 11. _xmg_proxy_reality_is_cdn_headers 识别 Cloudflare 与共享 CDN 头，放行无 CDN 独立源站
+t_assert "识别 Cloudflare cf-ray 为共享 CDN" _xmg_proxy_reality_is_cdn_headers $'HTTP/2 200\nserver: cloudflare\ncf-ray: 123456-SJC'
+t_assert "识别 CloudFront 为共享 CDN" _xmg_proxy_reality_is_cdn_headers $'HTTP/2 200\nx-amz-cf-id: abcdef'
+_rc_clean=0
+_xmg_proxy_reality_is_cdn_headers $'HTTP/2 200\nserver: nginx\ncontent-type: text/html' || _rc_clean=$?
+t_equals "独立 nginx 源站不误判为共享 CDN" "$_rc_clean" "1"
