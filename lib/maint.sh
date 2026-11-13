@@ -90,6 +90,20 @@ xmg_maint_update() {
 
     xmg_warn "即将执行系统更新（可能耗时较长，内核更新后建议重启）"
 
+    # 小内存且无 Swap 预警：apt/dnf 更新元数据与解压包时容易触发 OOM
+    if [ -r /proc/meminfo ]; then
+        local _m_kb=0 _s_kb=0 _k="" _v="" _rest=""
+        while read -r _k _v _rest; do
+            case "$_k" in
+                MemTotal:)  _m_kb="$_v" ;;
+                SwapTotal:) _s_kb="$_v" ;;
+            esac
+        done < /proc/meminfo 2>/dev/null
+        if [[ "$_m_kb" =~ ^[0-9]+$ ]] && [ "$_m_kb" -gt 0 ] && [ "$_m_kb" -le 524288 ] && [ "${_s_kb:-0}" -eq 0 ]; then
+            xmg_warn "当前物理内存 <=512MB 且未启用 Swap，系统更新存在 OOM 风险（建议先在「系统与网络调优」开启 Swap）"
+        fi
+    fi
+
     if ! xmg_confirm "确认执行系统更新?"; then
         xmg_info "已取消"
         return 0
@@ -100,11 +114,22 @@ xmg_maint_update() {
         export NEEDRESTART_MODE=a
         export UCF_FORCE_CONFFOLD=1
 
+        local -a _apt_net_opts=()
+        if [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; then
+            if declare -F xmg_detect_network >/dev/null 2>&1; then
+                xmg_detect_network >/dev/null 2>&1 || true
+            fi
+        fi
+        if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+            _apt_net_opts=(-o Acquire::ForceIPv6=true)
+            xmg_info "纯 IPv6 环境：已启用 Acquire::ForceIPv6=true 加速 apt 源连接"
+        fi
+
         if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
             xmg_apt_wait_lock 15 || true
         fi
         xmg_info "apt-get update..."
-        apt-get -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
+        apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
 
         # 预设 grub debconf，避免云 VPS 镜像无终端下 grub-pc postinst 报错卡死
         if command -v debconf-set-selections >/dev/null 2>&1; then
@@ -127,12 +152,12 @@ xmg_maint_update() {
             xmg_apt_wait_lock 15 || true
         fi
         xmg_info "apt-get upgrade..."
-        apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
+        apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
             xmg_warn "upgrade 初次受阻，尝试自动解除死锁后重试一次..."
             if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
                 xmg_apt_unlock_and_repair || true
             fi
-            apt-get -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || xmg_error "apt-get upgrade 失败"
+            apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || { xmg_error "apt-get upgrade 失败"; return 1; }
         }
 
         xmg_info "apt-get autoremove..."
@@ -143,24 +168,44 @@ xmg_maint_update() {
         fi
     elif xmg_cmd_exists dnf; then
         xmg_info "dnf upgrade..."
-        dnf upgrade -y || xmg_error "dnf upgrade 失败"
+        dnf upgrade -y || { xmg_error "dnf upgrade 失败"; return 1; }
         xmg_warn "如更新了内核，请重启: reboot"
     elif xmg_cmd_exists yum; then
         xmg_info "yum update..."
-        yum update -y || xmg_error "yum update 失败"
+        yum update -y || { xmg_error "yum update 失败"; return 1; }
         xmg_warn "如更新了内核，请重启: reboot"
     elif xmg_cmd_exists pacman; then
         xmg_info "pacman -Syu..."
-        pacman -Syu --noconfirm || xmg_error "pacman 升级失败"
+        pacman -Syu --noconfirm || { xmg_error "pacman 升级失败"; return 1; }
     elif xmg_cmd_exists apk; then
         xmg_info "apk update && apk upgrade..."
-        apk update && apk upgrade || xmg_error "apk upgrade 失败"
+        (apk update && apk upgrade) || { xmg_error "apk upgrade 失败"; return 1; }
     else
         xmg_error "未检测到受支持的包管理器 (apt-get / dnf / yum / pacman / apk)"
         return 1
     fi
 
+    # 更新后检查关键服务存活状态（needrestart 重启 libc/openssl 时偶发异常）
+    if declare -F xmg_svc_supported >/dev/null 2>&1 && xmg_svc_supported; then
+        local _svc_x="${XMG_XRAY_SERVICE:-xray}"
+        if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ]; then
+            if xmg_svc_is_active "$_svc_x" >/dev/null 2>&1; then
+                xmg_info "服务状态确认: $_svc_x 运行正常 (active)"
+            else
+                xmg_warn "更新后检测到 $_svc_x 未处于运行态，请执行 xmg xray restart 恢复"
+            fi
+        fi
+        local _ssh_s=""
+        for _ssh_s in ssh sshd; do
+            if xmg_svc_is_active "$_ssh_s" >/dev/null 2>&1; then
+                xmg_info "服务状态确认: $_ssh_s 运行正常 (active)"
+                break
+            fi
+        done
+    fi
+
     xmg_info "系统更新完成"
+    return 0
 }
 
 # ===== 一键深度磁盘清理 =====
@@ -209,7 +254,7 @@ xmg_maint_clean() {
             journalctl --vacuum-size="$XMG_MAINT_JOURNAL_MAX" 2>/dev/null | tail -1 || true
             xmg_maint_journal_limit
         else
-            xmg_info "当前 init 为 $XMG_INIT_SYSTEM，无 journald，跳过日志限容（syslog 建议配合 logrotate）"
+            xmg_info "当前 init 为 ${XMG_INIT_SYSTEM:-unknown}，无 journald，跳过日志限容（syslog 建议配合 logrotate）"
         fi
 
         # 2. 包管理器缓存与旧包清理
@@ -405,10 +450,11 @@ xmg_maint_disk_overview() {
     echo
 
     echo "== /opt/xmg 占用 =="
-    if [ -d "$XMG_HOME" ]; then
-        du -sh "$XMG_HOME" 2>/dev/null || true
+    local _xmg_home="${XMG_HOME:-/opt/xmg}"
+    if [ -d "$_xmg_home" ]; then
+        du -sh "$_xmg_home" 2>/dev/null || true
     else
-        echo "$XMG_HOME 不存在"
+        echo "$_xmg_home 不存在"
     fi
 }
 
