@@ -540,23 +540,34 @@ xmg_update_run() {
     fi
 
     if [ "$_warp_on" = "1" ] && [ -x "${XMG_BIN:-}" ]; then
-        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，用新版本重新应用并重启 Xray..."
+        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，用新版本重新应用..."
         local _warp_args=(warp enable "$_warp_mode")
         if [ "$_warp_mode" = "routing" ] && [ -n "$_warp_geo" ]; then
             _warp_args+=(--geo "$_warp_geo")
         fi
-        if "$XMG_BIN" "${_warp_args[@]}" >/dev/null 2>&1; then
-            xmg_info "WARP 配置已按新版本刷新，Xray 已确认 active"
+        if "$XMG_BIN" "${_warp_args[@]}"; then
+            xmg_info "WARP 配置已按新版本刷新"
         else
-            xmg_warn "自动刷新 WARP 失败，现网配置保持不变"
-            xmg_warn "请手动执行: xmg warp enable $_warp_mode"
+            xmg_warn "自动刷新 WARP 失败，请手动执行: xmg warp enable $_warp_mode"
         fi
-    elif [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] && xmg_svc_supported; then
-        xmg_info "重启 Xray 以加载更新后的代码..."
-        if xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8; then
-            xmg_info "Xray 已重启并确认 active"
-        else
-            xmg_warn "Xray 重启失败，请执行 xmg xray restart 检查服务状态"
+    fi
+
+    # 无论是否启用 WARP，只要存在 Xray 配置就确保用新进程重启核心（确保新参数/新配置 100% 生效）
+    local _cfg_path="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
+    if [ -s "$_cfg_path" ]; then
+        if [ -x "${XMG_BIN:-}" ]; then
+            xmg_info "正在重启 Xray 核心以加载最新配置与参数..."
+            if "$XMG_BIN" xray restart; then
+                xmg_info "Xray 核心已重启并确认 active"
+            else
+                xmg_warn "Xray 自动重启失败，请执行 xmg xray restart 检查服务状态"
+            fi
+        elif xmg_svc_supported; then
+            if xmg_svc_restart_verified "${XMG_XRAY_SERVICE:-xray}" 8; then
+                xmg_info "Xray 核心已重启并确认 active"
+            else
+                xmg_warn "Xray 自动重启失败，请执行 xmg xray restart 检查服务状态"
+            fi
         fi
     fi
 
