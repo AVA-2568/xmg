@@ -1342,6 +1342,10 @@ xmg_tune_unbound_write_conf() {
         v6_lines="    interface: ::1
     access-control: ::1 allow"
     fi
+    if xmg_tune_is_ipv6_only; then
+        v6_lines="${v6_lines}
+    do-ip4: no"
+    fi
 
     mkdir -p "$(dirname "$conf")" || return 1
     cat > "$conf" <<EOF

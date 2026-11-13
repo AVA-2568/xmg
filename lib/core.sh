@@ -301,15 +301,17 @@ xmg_core_resolve_tag() {
 
     # API 被限流/阻断时，跟随 releases/latest 的重定向地址反推 tag
     if command -v curl >/dev/null 2>&1; then
-        local eff=""
-        eff="$(curl -fsSIL --connect-timeout 8 --max-time 25 -o /dev/null \
-            -w '%{url_effective}' "https://github.com/XTLS/Xray-core/releases/latest" 2>/dev/null || true)"
-        case "$eff" in
-            */tag/*)
-                printf '%s' "${eff##*/tag/}"
-                return 0
-                ;;
-        esac
+        local eff="" ru=""
+        for ru in "https://github.com/XTLS/Xray-core/releases/latest" "https://ghfast.top/https://github.com/XTLS/Xray-core/releases/latest"; do
+            eff="$(curl -fsSIL --connect-timeout 8 --max-time 25 -o /dev/null \
+                -w '%{url_effective}' "$ru" 2>/dev/null || true)"
+            case "$eff" in
+                */tag/*)
+                    printf '%s' "${eff##*/tag/}"
+                    return 0
+                    ;;
+            esac
+        done
     fi
 
     xmg_error "无法解析 Xray 最新版本号（GitHub API 不可达）"

@@ -673,6 +673,11 @@ _xmg_render_reality_inbound_json() {
     printf '          "privateKey": "%s",\n' "$esc_privkey"
     printf '          "shortIds": %s\n' "$ids_json"
     printf '        }\n'
+    printf '      },\n'
+    printf '      "sniffing": {\n'
+    printf '        "enabled": true,\n'
+    printf '        "destOverride": ["http", "tls", "quic"],\n'
+    printf '        "routeOnly": true\n'
     printf '      }\n'
     printf '    }'
 }
@@ -738,12 +743,20 @@ _xmg_render_config_bash() {
     # WARP 参数清洗与兜底
     [ -n "$warp_mode" ] || warp_mode="global"
     if [ "$is_ipv6_only" = "true" ]; then
-        [ -n "$warp_endpoint" ] || warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+            warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+        fi
     else
         [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
     fi
     if [[ "$warp_endpoint" =~ :0$ ]]; then
         warp_endpoint="${warp_endpoint%:0}:2408"
+    fi
+    if [ "$is_ipv6_only" = "true" ] && [[ "$warp_endpoint" != \[* ]] && [[ "$warp_endpoint" == *:* ]]; then
+        local _ep_last="${warp_endpoint##*:}" _ep_head="${warp_endpoint%:*}"
+        if [[ "$_ep_last" =~ ^[0-9]+$ ]] && [[ "$_ep_head" == *:* ]]; then
+            warp_endpoint="[${_ep_head}]:${_ep_last}"
+        fi
     fi
     [ -n "$warp_pubkey" ] || warp_pubkey="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
     [ -n "$warp_v4" ] || warp_v4="172.16.0.2"
@@ -787,6 +800,9 @@ _xmg_render_config_bash() {
     # UseIPv6 只查 AAAA，IPv4-only 的域名永远解析不出 A，隧道再能承载也没用。
     if [ "$is_ipv6_only" = "true" ] && { [ "$warp_on" != "1" ] || [ -z "$warp_v4" ]; }; then
         dns_query_strat="UseIPv6"
+        out_strat="UseIPv6"
+    elif [ "$is_ipv6_only" = "true" ] && [ "$warp_mode" = "routing" ]; then
+        dns_query_strat="UseIP"
         out_strat="UseIPv6"
     else
         dns_query_strat="UseIP"
@@ -832,6 +848,11 @@ _xmg_render_config_bash() {
             printf '          }\n'
             printf '        ],\n'
             printf '        "udp": %s\n' "$socks_udp_bool"
+            printf '      },\n'
+            printf '      "sniffing": {\n'
+            printf '        "enabled": true,\n'
+            printf '        "destOverride": ["http", "tls", "quic"],\n'
+            printf '        "routeOnly": true\n'
             printf '      }\n'
             printf '    }'
             need_comma=1
@@ -876,6 +897,11 @@ _xmg_render_config_bash() {
             printf '            }\n'
             printf '          ]\n'
             printf '        }\n'
+            printf '      },\n'
+            printf '      "sniffing": {\n'
+            printf '        "enabled": true,\n'
+            printf '        "destOverride": ["http", "tls", "quic"],\n'
+            printf '        "routeOnly": true\n'
             printf '      }\n'
             printf '    }'
             need_comma=1
@@ -1173,12 +1199,20 @@ xmg_render_config() {
     [ -n "$warp_mode" ] || warp_mode="global"
 
     if [ "$is_ipv6_only" = "true" ]; then
-        [ -n "$warp_endpoint" ] || warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+            warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
+        fi
     else
         [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
     fi
     if [[ "$warp_endpoint" =~ :0$ ]]; then
         warp_endpoint="${warp_endpoint%:0}:2408"
+    fi
+    if [ "$is_ipv6_only" = "true" ] && [[ "$warp_endpoint" != \[* ]] && [[ "$warp_endpoint" == *:* ]]; then
+        local _ep_last="${warp_endpoint##*:}" _ep_head="${warp_endpoint%:*}"
+        if [[ "$_ep_last" =~ ^[0-9]+$ ]] && [[ "$_ep_head" == *:* ]]; then
+            warp_endpoint="[${_ep_head}]:${_ep_last}"
+        fi
     fi
     [ -n "$warp_pubkey" ] || warp_pubkey="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
     [ -n "$warp_v4" ] || warp_v4="172.16.0.2"
@@ -1285,7 +1319,7 @@ xmg_render_config() {
           },
           "streamSettings": {
             "sockopt": {
-              "domainStrategy": $stack_strategy
+              "domainStrategy": $out_strategy
             }
           }
         },
@@ -1332,7 +1366,7 @@ xmg_render_config() {
           },
           "streamSettings": {
             "sockopt": {
-              "domainStrategy": $stack_strategy
+              "domainStrategy": $out_strategy
             }
           }
         },
@@ -1362,7 +1396,7 @@ xmg_render_config() {
         },
         "streamSettings": {
           "sockopt": {
-            "domainStrategy": $stack_strategy
+            "domainStrategy": $out_strategy
           }
         }
       },
@@ -1393,6 +1427,11 @@ xmg_render_config() {
           }
         ],
         "udp": $socks_udp
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ] else [] end) +
@@ -1435,6 +1474,11 @@ xmg_render_config() {
             }
           ]
         }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ] else [] end) +
@@ -1443,9 +1487,13 @@ xmg_render_config() {
 .inbounds = $active_inbounds'
 
         # 协议族兜底：jq 路径与纯 Bash 路径共用同一套判定函数
-        local _stack_strategy="UseIP"
+        local _stack_strategy="UseIP" _out_strategy="UseIP"
         if [ "$is_ipv6_only" = "true" ] && { [ "$warp_bool" != "true" ] || [ -z "$warp_v4" ]; }; then
             _stack_strategy="UseIPv6"
+            _out_strategy="UseIPv6"
+        elif [ "$is_ipv6_only" = "true" ] && [ "$warp_mode" = "routing" ]; then
+            _stack_strategy="UseIP"
+            _out_strategy="UseIPv6"
         fi
         local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_only="[]"
         _warp_tun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"
@@ -1465,6 +1513,7 @@ xmg_render_config() {
             --argjson dns_servers "$(_xmg_render_dns_servers_json)"
             --argjson is_ipv6_only "$is_ipv6_only"
             --arg stack_strategy "$_stack_strategy"
+            --arg out_strategy "$_out_strategy"
             --arg warp_strategy "$_warp_strategy"
             --argjson warp_ip_cond "$_warp_ip_cond"
             --argjson warp_only_cidr "$_warp_only"

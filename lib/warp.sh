@@ -182,7 +182,6 @@ _xmg_warp_clean_ipv6() {
     fi
     val="${val#\[}"
     val="${val%\]}"
-    val="${val%%:0}"
     val="${val//[[:space:]]/}"
     if [[ "$val" =~ : ]] && [[ ! "$val" =~ [^0-9a-fA-F:] ]]; then
         echo "$val"
@@ -393,6 +392,66 @@ _xmg_warp_curl_family() {
     echo ""
 }
 
+# ===== IPv6 Endpoint 规范化 =====
+# 确保 IPv6 对端端点始终为 [addr]:port，且端口 :0 修正为 :2408
+_xmg_warp_norm_endpoint_v6() {
+    local ep="${1:-}"
+    ep="${ep//[[:space:]]/}"
+    [ -n "$ep" ] || { echo ""; return 0; }
+
+    # 已有方括号 [addr]:port
+    if [[ "$ep" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+        local h="${BASH_REMATCH[1]}" p="${BASH_REMATCH[2]}"
+        [ "$p" = "0" ] && p="2408"
+        printf '[%s]:%s\n' "$h" "$p"
+        return 0
+    fi
+    # 仅有方括号 [addr]
+    if [[ "$ep" =~ ^\[([^]]+)\]$ ]]; then
+        printf '[%s]:2408\n' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    # 无方括号但含冒号：可能是 addr:port（例如 2606:4700:d0::a29f:c001:2408 或 :0）或裸 IPv6
+    if [[ "$ep" == *:* ]]; then
+        local last="${ep##*:}"
+        local head="${ep%:*}"
+        # 若末尾是 :0 或 4位端口且前面仍含冒号（至少两组），且不是合法裸 :: 结尾
+        if [[ "$last" =~ ^[0-9]+$ ]] && [[ "$head" == *:* ]] && { [ "$last" = "0" ] || [ "$last" = "2408" ] || [ "$last" = "500" ] || [ "$last" = "4500" ]; }; then
+            [ "$last" = "0" ] && last="2408"
+            printf '[%s]:%s\n' "$head" "$last"
+            return 0
+        fi
+        printf '[%s]:2408\n' "$ep"
+        return 0
+    fi
+    printf '%s\n' "$ep"
+}
+
+# ===== 确保宿主机网络栈变量 (XMG_NET_IPV4 / XMG_NET_IPV6) 已就绪 =====
+_xmg_warp_ensure_net_detected() {
+    if [ -n "${XMG_MOCK_WARP_STACK:-}" ]; then
+        case "$XMG_MOCK_WARP_STACK" in
+            ipv6_only) XMG_NET_IPV4=0; XMG_NET_IPV6=1 ;;
+            ipv4_only) XMG_NET_IPV4=1; XMG_NET_IPV6=0 ;;
+            dual_stack|dual) XMG_NET_IPV4=1; XMG_NET_IPV6=1 ;;
+        esac
+        return 0
+    fi
+    if [ -n "${XMG_NET_STACK:-}" ]; then
+        case "$XMG_NET_STACK" in
+            ipv6_only) XMG_NET_IPV4=0; XMG_NET_IPV6=1 ;;
+            ipv4_only) XMG_NET_IPV4=1; XMG_NET_IPV6=0 ;;
+            dual_stack|dual) XMG_NET_IPV4=1; XMG_NET_IPV6=1 ;;
+        esac
+        return 0
+    fi
+    if [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; then
+        if declare -F xmg_detect_network >/dev/null 2>&1; then
+            xmg_detect_network >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
 # ===== 判断 VPS 是否为纯 IPv6 (无公网 IPv4) =====
 
 xmg_warp_is_ipv6_only() {
@@ -406,17 +465,23 @@ xmg_warp_is_ipv6_only() {
         return $?
     fi
 
+    if [ -n "${XMG_NET_IPV4:-}" ] && [ -n "${XMG_NET_IPV6:-}" ]; then
+        [ "$XMG_NET_IPV4" = "0" ] && [ "$XMG_NET_IPV6" = "1" ]
+        return $?
+    fi
+
     if declare -F xmg_detect_network >/dev/null 2>&1; then
-        # 探测只是为了判定「是否纯 IPv6 单栈」，但 xmg_detect_network 会写全局
-        # XMG_NET_IPV4/IPV6。分流规则正要靠这两个值决定「哪一族交给 WARP」，
-        # 被冲掉就会算出错误的族（实测：探测失败后变成 0/0，规则落到 v4 全量）。
         local _sv4="${XMG_NET_IPV4:-}" _sv6="${XMG_NET_IPV6:-}"
         xmg_detect_network >/dev/null 2>&1 || true
-        if [ "${XMG_NET_STACK:-}" = "ipv6_only" ]; then
+        if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
             return 0
         fi
-        XMG_NET_IPV4="$_sv4"
-        XMG_NET_IPV6="$_sv6"
+        if [ "${XMG_NET_IPV4:-}" = "1" ]; then
+            return 1
+        fi
+        # 仅在探测完全失败（0/0 或空）时恢复旧值
+        [ -n "$_sv4" ] && XMG_NET_IPV4="$_sv4"
+        [ -n "$_sv6" ] && XMG_NET_IPV6="$_sv6"
     fi
 
     if ! curl -4sSL --connect-timeout 2 --max-time 3 https://1.1.1.1 >/dev/null 2>&1; then
@@ -499,11 +564,14 @@ xmg_warp_optimize_endpoint() {
         host="${host%]}"
         local rtt=""
 
-        if command -v ping >/dev/null 2>&1; then
+        if command -v ping >/dev/null 2>&1 || { [ "$is_v6" -eq 1 ] && command -v ping6 >/dev/null 2>&1; }; then
             local ping_cmd="ping -c 1 -W 1"
             [ "$is_v6" -eq 1 ] && ping_cmd="ping -6 -c 1 -W 1"
             local ping_out=""
             ping_out="$($ping_cmd "$host" 2>/dev/null || true)"
+            if [ -z "$ping_out" ] && [ "$is_v6" -eq 1 ] && command -v ping6 >/dev/null 2>&1; then
+                ping_out="$(ping6 -c 1 -W 1 "$host" 2>/dev/null || true)"
+            fi
             rtt="$(echo "$ping_out" | grep -o 'min/avg/max[^=]*=[^/]*' | cut -d= -f2 | tr -d ' ' || true)"
             if [ -z "$rtt" ]; then
                 rtt="$(echo "$ping_out" | grep -oE '[0-9]+\.[0-9]+/[0-9]+\.[0-9]+' | cut -d/ -f2 || true)"
@@ -523,6 +591,7 @@ xmg_warp_optimize_endpoint() {
             fi
         else
             rtt="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t }' 2>/dev/null || echo "999")"
+            [ "$rtt" = "0" ] && rtt="1"
         fi
 
         if [ -n "$rtt" ] && [ "$rtt" -gt 0 ] && [ "$rtt" -lt "$best_rtt" ]; then
@@ -924,9 +993,7 @@ _xmg_warp_register() {
     [ -n "$peer_ep_v6" ] || peer_ep_v6="$XMG_WARP_ENDPOINT_V6"
     [ -n "$peer_ep_v4" ] || peer_ep_v4="$XMG_WARP_ENDPOINT_V4"
 
-    if [[ "$peer_ep_v6" =~ :0$ ]]; then
-        peer_ep_v6="${peer_ep_v6%:0}:2408"
-    fi
+    peer_ep_v6="$(_xmg_warp_norm_endpoint_v6 "$peer_ep_v6")"
     if [[ "$peer_ep_v4" =~ :0$ ]]; then
         peer_ep_v4="${peer_ep_v4%:0}:2408"
     fi
@@ -1069,13 +1136,12 @@ xmg_warp_export_xray_outbound() {
 
     local endpoint=""
     if xmg_warp_is_ipv6_only; then
-        endpoint="${ep_v6:-$XMG_WARP_ENDPOINT_V6}"
+        endpoint="$(_xmg_warp_norm_endpoint_v6 "${ep_v6:-$XMG_WARP_ENDPOINT_V6}")"
     else
         endpoint="${ep_v4:-$XMG_WARP_ENDPOINT_V4}"
-    fi
-
-    if [[ "$endpoint" =~ :0$ ]]; then
-        endpoint="${endpoint%:0}:2408"
+        if [[ "$endpoint" =~ :0$ ]]; then
+            endpoint="${endpoint%:0}:2408"
+        fi
     fi
 
     # 隧道实际拥有哪些地址族，直接决定 allowedIPs / remoteDNS / targetStrategy
@@ -1246,12 +1312,12 @@ _xmg_warp_get_account_vars() {
 
     local endpoint=""
     if xmg_warp_is_ipv6_only; then
-        endpoint="${ep_v6:-$XMG_WARP_ENDPOINT_V6}"
+        endpoint="$(_xmg_warp_norm_endpoint_v6 "${ep_v6:-$XMG_WARP_ENDPOINT_V6}")"
     else
         endpoint="${ep_v4:-$XMG_WARP_ENDPOINT_V4}"
-    fi
-    if [[ "$endpoint" =~ :0$ ]]; then
-        endpoint="${endpoint%:0}:2408"
+        if [[ "$endpoint" =~ :0$ ]]; then
+            endpoint="${endpoint%:0}:2408"
+        fi
     fi
 
     WARP_ACC_PRIVKEY="$privkey"
@@ -1518,6 +1584,9 @@ xmg_warp_enable() {
         _xmg_warp_register 0 || return 1
     fi
 
+    # 确保宿主机网络栈变量已探测就绪，避免路由分流与端点选择误判为 IPv4
+    _xmg_warp_ensure_net_detected
+
     # 2. 提取凭据并 stage 到 state 内存中
     local WARP_ACC_PRIVKEY="" WARP_ACC_PUBKEY="" WARP_ACC_IPV4="" WARP_ACC_IPV6="" WARP_ACC_ENDPOINT="" WARP_ACC_RESERVED=""
     _xmg_warp_get_account_vars || return 1
@@ -1629,6 +1698,7 @@ xmg_warp_enable() {
     select(
       (.outboundTag // "") != "warp-out"
       and ((.port // "") | tostring) != "$ssh_p"
+      and ((((.outboundTag // "") == "direct") and (((.ip // []) | index("10.0.0.0/8")) != null) and (((.ip // []) | index("fc00::/7")) != null)) | not)
     )
   ] + [
     ({ "type": "field", "outboundTag": "warp-out", "domain": \$domains }
@@ -1926,31 +1996,52 @@ _xmg_warp_relax_stack_strategy() {
     local v4="${3:-}"
 
     [ -f "$cfg" ] || return 0
-    # 分流模式不动全局策略：未被 WARP 命中的流量仍需走宿主机原栈
-    [ "$mode" = "global" ] || return 0
     # 只对纯 IPv6 主机处理；IPv4 主机本来就是 UseIP
     xmg_warp_is_ipv6_only || return 0
     [ -n "$v4" ] || return 0
 
     if command -v jq >/dev/null 2>&1; then
         local tmp="${cfg}.stack.$$"
-        if jq '
-            (if (.dns // {}).queryStrategy == "UseIPv6" then .dns.queryStrategy = "UseIP" else . end)
-            | (.outbounds // []) |= map(
-                if (((.streamSettings // {}).sockopt // {}).domainStrategy // "") == "UseIPv6"
-                then .streamSettings.sockopt.domainStrategy = "UseIP"
-                else . end)
+        # 分流模式下 direct 出站仍走宿主机原生 IPv6（保持 UseIPv6），
+        # 但 DNS queryStrategy 必须放开为 UseIP，否则 IPIfNonMatch 查不到 A 记录导致 IPv4 规则永不命中。
+        # 同时确保纯 IPv6 机的直连 DoH 服务器为 IPv6（https+local 不走路由，纯 IPv6 连不上 1.1.1.1）。
+        if jq --arg mode "$mode" '
+            (if ($mode == "global" or ((.routing // {}).domainStrategy // "") == "IPIfNonMatch")
+                and ((.dns // {}).queryStrategy == "UseIPv6")
+             then .dns.queryStrategy = "UseIP"
+             else . end)
+            | (if (.dns // {}).servers then
+                 if ([.dns.servers[] | select(tostring | test("2606:4700|2001:4860"))] | length) == 0
+                    and ([.dns.servers[] | select(tostring | test("^https[+]local://(1[.]1[.]1[.]1|8[.]8[.]8[.]8)"))] | length) > 0
+                 then .dns.servers = ["https+local://[2606:4700:4700::1111]/dns-query", "https+local://[2001:4860:4860::8888]/dns-query", "localhost"]
+                 else . end
+               else . end)
+            | (if $mode == "global" then
+                 (.outbounds // []) |= map(
+                   if (((.streamSettings // {}).sockopt // {}).domainStrategy // "") == "UseIPv6"
+                   then .streamSettings.sockopt.domainStrategy = "UseIP"
+                   else . end)
+               else . end)
         ' "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
             mv -f "$tmp" "$cfg"
-            xmg_info "已把 DNS/出站策略放开为 UseIP：WARP 隧道为纯 IPv6 主机提供了 IPv4 出口"
+            if [ "$mode" = "global" ]; then
+                xmg_info "已把 DNS/出站策略放开为 UseIP：WARP 隧道为纯 IPv6 主机提供了 IPv4 出口"
+            else
+                xmg_info "已把 DNS 查询策略放开为 UseIP（分流模式需解析 A 记录以匹配 WARP IPv4 规则）"
+            fi
             return 0
         fi
         rm -f "$tmp" 2>/dev/null || true
     fi
 
-    # 无 jq 兜底：只替换渲染器固定输出的这两个字段
-    sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/; s/"domainStrategy": "UseIPv6"/"domainStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
-    xmg_info "已把 DNS/出站策略放开为 UseIP（WARP 隧道提供 IPv4 出口）"
+    # 无 jq 兜底
+    if [ "$mode" = "global" ]; then
+        sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/; s/"domainStrategy": "UseIPv6"/"domainStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
+        xmg_info "已把 DNS/出站策略放开为 UseIP（WARP 隧道提供 IPv4 出口）"
+    else
+        sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
+        xmg_info "已把 DNS 查询策略放开为 UseIP（分流模式）"
+    fi
     return 0
 }
 
@@ -2016,7 +2107,10 @@ xmg_warp_disable() {
             cat > "$jq_file" << 'EOF_DISABLE_JQ'
 (.outbounds = [ (.outbounds // [])[] | select(.tag != "warp-out") ]) |
 (if (.routing and .routing.rules) then
-   .routing.rules = [ .routing.rules[] | select((.outboundTag // "") != "warp-out") ]
+   .routing.rules = [ .routing.rules[] | select(
+     (.outboundTag // "") != "warp-out"
+     and ((((.outboundTag // "") == "direct") and (((.ip // []) | index("10.0.0.0/8")) != null) and (((.ip // []) | index("fc00::/7")) != null)) | not)
+   ) ]
  else . end)
 EOF_DISABLE_JQ
             if jq -f "$jq_file" < "$xray_cfg" > "$tmp_cfg" 2>/dev/null; then
@@ -2184,6 +2278,7 @@ xmg_warp_uninstall() {
 # ===== 运行状态与出口诊断 =====
 
 xmg_warp_status() {
+    _xmg_warp_ensure_net_detected
     echo "==================== WARP 运行状态与出口诊断 ===================="
     printf "架构模式        : Xray 原生 WireGuard 进程内出站 (方案 A)\n"
     printf "防失联保护      : 宿主机 100%% 零网卡/零路由接管，SSH 物理级绝对不失联\n"
@@ -2286,6 +2381,25 @@ xmg_warp_status() {
         fi
         printf "协议族覆盖    : %s\n" "$_sfb"
     fi
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && [ "$is_enabled" -eq 1 ]; then
+        local _px_url=""
+        _px_url="$(_xmg_warp_local_socks_proxy_url 2>/dev/null || true)"
+        if [ -n "$_px_url" ]; then
+            local _px_trace=""
+            _px_trace="$(curl -x "$_px_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+            if [ -n "$_px_trace" ]; then
+                local _px_ip="" _px_loc="" _px_colo="" _px_warp=""
+                _px_ip="$(printf '%s\n' "$_px_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+                _px_loc="$(printf '%s\n' "$_px_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
+                _px_colo="$(printf '%s\n' "$_px_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+                _px_warp="$(printf '%s\n' "$_px_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+                printf "代理实测出口    : %s (%s, 机房: %s, warp=%s)\n" "${_px_ip:-未知}" "${_px_loc:-未知}" "${_px_colo:-未知}" "${_px_warp:-off}"
+            else
+                printf "代理实测出口    : 探测超时（请确认 Xray 运行状态与 WARP 握手）\n"
+            fi
+        fi
+    fi
+
     printf "VPS 本地原生地区: %s | 机房 Colo: %s\n" "$(_xmg_warp_country_name "$XMG_WARP_NATIVE_LOC")" "$XMG_WARP_NATIVE_COLO"
     echo "=================================================================="
 }
@@ -2368,6 +2482,52 @@ xmg_warp_geo_cmd() {
     return 0
 }
 
+# ===== 获取本机 Xray SOCKS5 代理地址（供实测 WARP 出站） =====
+_xmg_warp_local_socks_proxy_url() {
+    local cfg="" listen="" port="" user="" pass=""
+    cfg="$(_xmg_warp_find_xray_config 2>/dev/null || true)"
+
+    if [ -n "$cfg" ] && [ -f "$cfg" ] && command -v jq >/dev/null 2>&1; then
+        local line=""
+        line="$(jq -r '
+            [.inbounds[]? | select(.protocol=="socks")][0] // empty |
+            [(.listen // "127.0.0.1"), ((.port // 0) | tostring), (.settings.users[0].user // ""), (.settings.users[0].pass // "")] |
+            @tsv
+        ' "$cfg" 2>/dev/null || true)"
+        if [ -n "$line" ]; then
+            IFS=$'\t' read -r listen port user pass <<< "$line"
+        fi
+    fi
+
+    if [ -z "$port" ] || [ "$port" = "0" ]; then
+        if declare -F xmg_state_get >/dev/null 2>&1; then
+            [ "$(xmg_state_get PROXY_SOCKS_ENABLED 0 2>/dev/null)" = "1" ] || return 1
+            listen="$(xmg_state_get PROXY_SOCKS_LISTEN "127.0.0.1" 2>/dev/null)"
+            port="$(xmg_state_get PROXY_SOCKS_PORT "1080" 2>/dev/null)"
+            user="$(xmg_state_get PROXY_SOCKS_USER "" 2>/dev/null)"
+            pass="$(xmg_state_get PROXY_SOCKS_PASS "" 2>/dev/null)"
+        else
+            return 1
+        fi
+    fi
+
+    [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -gt 0 ] && [ "$port" -le 65535 ] || return 1
+    case "$listen" in
+        ""|"0.0.0.0") listen="127.0.0.1" ;;
+        "::"|"[::]")  listen="[::1]" ;;
+        *:*)
+            [[ "$listen" == \[*\] ]] || listen="[$listen]"
+            ;;
+    esac
+
+    if [ -n "$user" ] && [ -n "$pass" ]; then
+        printf 'socks5h://%s:%s@%s:%s\n' "$user" "$pass" "$listen" "$port"
+    else
+        printf 'socks5h://%s:%s\n' "$listen" "$port"
+    fi
+    return 0
+}
+
 # ===== 流媒体与 IP 清洁度测试 =====
 
 xmg_warp_test_unlock() {
@@ -2386,32 +2546,67 @@ xmg_warp_test_unlock() {
         return 0
     fi
 
+    local proxy_url=""
+    local curl_proxy_args=()
+    local ua="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+
+    proxy_url="$(_xmg_warp_local_socks_proxy_url 2>/dev/null || true)"
+    if [ -n "$proxy_url" ]; then
+        local px_trace=""
+        px_trace="$(curl -x "$proxy_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
+        if [ -n "$px_trace" ]; then
+            curl_proxy_args=(-x "$proxy_url")
+            local px_ip="" px_loc="" px_colo="" px_warp=""
+            px_ip="$(printf '%s\n' "$px_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+            px_loc="$(printf '%s\n' "$px_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
+            px_colo="$(printf '%s\n' "$px_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+            px_warp="$(printf '%s\n' "$px_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+            xmg_info "测试路径: 通过 Xray 本机 SOCKS5 代理 (实测 WARP 出站)"
+            printf "当前代理出口 IP             : %s (%s, 机房: %s, warp=%s)\n" "${px_ip:-未知}" "${px_loc:-未知}" "${px_colo:-未知}" "${px_warp:-off}"
+        else
+            xmg_warn "检测到本机 SOCKS5 配置，但代理连通探测失败，已回退为宿主机直连测试（非 WARP 出口）"
+        fi
+    else
+        xmg_warn "本机未启用 SOCKS5 入站，以下为宿主机直连测试（非 Xray WARP 进程内出口）"
+        xmg_info "提示: 如需从本机实测 WARP 出口解锁，请先启用 SOCKS5 入站 (如 xmg proxy apply --socks on)"
+    fi
+
     # 1. OpenAI / ChatGPT
     printf "测试 OpenAI / ChatGPT       : "
-    local oai_code=""
-    oai_code="$(curl -sSL --connect-timeout 5 --max-time 8 -o /dev/null -w "%{http_code}" https://chatgpt.com 2>/dev/null || echo "000")"
-    if [ "$oai_code" = "200" ] || [ "$oai_code" = "301" ] || [ "$oai_code" = "302" ] || [ "$oai_code" = "403" ]; then
-        echo "可直连 (HTTP $oai_code)"
+    local oai_api_code="" oai_web_code=""
+    oai_api_code="$(curl "${curl_proxy_args[@]}" -sSL --connect-timeout 5 --max-time 8 -o /dev/null -w "%{http_code}" https://api.openai.com/v1/models 2>/dev/null || echo "000")"
+    oai_web_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o /dev/null -w "%{http_code}" https://chatgpt.com 2>/dev/null || echo "000")"
+    if [ "$oai_api_code" = "401" ] || [ "$oai_api_code" = "200" ]; then
+        if [ "$oai_web_code" = "200" ] || [ "$oai_web_code" = "301" ] || [ "$oai_web_code" = "302" ]; then
+            echo "完全支持 (API HTTP $oai_api_code / Web HTTP $oai_web_code)"
+        else
+            echo "API 可用 (HTTP $oai_api_code)，Web 受风控 (HTTP $oai_web_code)"
+        fi
+    elif [ "$oai_api_code" = "403" ] || [ "$oai_api_code" = "451" ] || [ "$oai_web_code" = "403" ]; then
+        echo "被拦截或地区受限 (API HTTP $oai_api_code / Web HTTP $oai_web_code)"
     else
-        echo "受限或超时 (HTTP $oai_code)"
+        echo "受限或超时 (API HTTP $oai_api_code / Web HTTP $oai_web_code)"
     fi
 
     # 2. Netflix
     printf "测试 Netflix 原生解锁       : "
-    local nflx_res=""
-    nflx_res="$(curl -sSL --connect-timeout 5 --max-time 8 "https://www.netflix.com/title/80018499" 2>/dev/null || true)"
-    if echo "$nflx_res" | grep -q "80018499"; then
+    local nflx_nonorig_code="" nflx_orig_code=""
+    nflx_nonorig_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o /dev/null -w "%{http_code}" "https://www.netflix.com/title/80018499" 2>/dev/null || echo "000")"
+    if [ "$nflx_nonorig_code" = "200" ]; then
         echo "已解锁 (支持完整自制剧与版权内容)"
-    elif echo "$nflx_res" | grep -qi "netflix"; then
-        echo "仅解锁自制剧"
     else
-        echo "未解锁或连接受阻"
+        nflx_orig_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o /dev/null -w "%{http_code}" "https://www.netflix.com/title/81280792" 2>/dev/null || echo "000")"
+        if [ "$nflx_orig_code" = "200" ]; then
+            echo "仅解锁自制剧 (HTTP $nflx_nonorig_code / $nflx_orig_code)"
+        else
+            echo "未解锁或连接受阻 (HTTP $nflx_nonorig_code)"
+        fi
     fi
 
     # 3. YouTube 地区与 Premium
     printf "测试 YouTube 地区标识       : "
     local yt_loc=""
-    yt_loc="$(curl -sSL --connect-timeout 5 --max-time 8 https://www.youtube.com 2>/dev/null | grep -o '"countryCode":"[A-Z]*"' | head -1 | cut -d'"' -f4 || true)"
+    yt_loc="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 https://www.youtube.com 2>/dev/null | grep -o '"countryCode":"[A-Z]*"' | head -1 | cut -d'"' -f4 || true)"
     if [ -n "$yt_loc" ]; then
         echo "已定位 ($( _xmg_warp_country_name "$yt_loc" ))"
     else
@@ -2420,14 +2615,17 @@ xmg_warp_test_unlock() {
 
     # 4. Google 搜索验证码防风控
     printf "测试 Google 搜索风控状态    : "
-    local g_res=""
-    g_res="$(curl -sSL --connect-timeout 5 --max-time 8 "https://www.google.com/search?q=test" 2>/dev/null || true)"
-    if echo "$g_res" | grep -qi "recaptcha\|unusual traffic"; then
-        echo "检测到异常流量验证码 (WARN)"
-    elif echo "$g_res" | grep -qi "google"; then
-        echo "清洁通过 (无验证码弹窗，安全)"
+    local g_tmp="" g_code="" g_res=""
+    g_tmp="$(mktemp 2>/dev/null || echo "/tmp/xmg_g_$$.html")"
+    g_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o "$g_tmp" -w "%{http_code}" "https://www.google.com/search?q=test" 2>/dev/null || echo "000")"
+    g_res="$(cat "$g_tmp" 2>/dev/null || true)"
+    rm -f "$g_tmp" 2>/dev/null || true
+    if [ "$g_code" = "429" ] || echo "$g_res" | grep -qiE "recaptcha|unusual traffic|/sorry/"; then
+        echo "检测到异常流量验证码 (HTTP $g_code, WARN)"
+    elif [ "$g_code" = "200" ] || [ "$g_code" = "301" ] || [ "$g_code" = "302" ]; then
+        echo "清洁通过 (HTTP $g_code，无验证码拦截)"
     else
-        echo "无法连接"
+        echo "无法连接 (HTTP $g_code)"
     fi
 
     echo "=================================================================="

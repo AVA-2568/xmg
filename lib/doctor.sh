@@ -684,7 +684,13 @@ _xmg_doctor_get_doh_latency() {
     case "$doh_addr" in
         https+local://*) doh_url="https://${doh_addr#https+local://}" ;;
         https://*)        doh_url="$doh_addr" ;;
-        *)               doh_url="https://1.1.1.1/dns-query" ;;
+        *)
+            if [ "${XMG_NET_IPV4:-0}" = "0" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
+                doh_url="https://[2606:4700:4700::1111]/dns-query"
+            else
+                doh_url="https://1.1.1.1/dns-query"
+            fi
+            ;;
     esac
 
     if command -v curl >/dev/null 2>&1; then

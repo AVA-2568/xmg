@@ -473,7 +473,7 @@ _xmg_proxy_ip_is_private() {
     esac
     if [[ "$ip" == *:* ]]; then
         case "$ip" in
-            ::1|::|fe80:*|fc*|fd*) return 0 ;;
+            ::1|::|[fF][eE]80:*|[fF][cC]*|[fF][dD]*) return 0 ;;
             *) return 1 ;;
         esac
     fi
@@ -519,6 +519,12 @@ _xmg_proxy_server_host() {
     fi
     if [ -z "$cand" ] && command -v ip >/dev/null 2>&1; then
         cand="$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)"
+    fi
+    if [ -z "$cand" ] && command -v ip >/dev/null 2>&1; then
+        cand="$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") {print $(i + 1); exit}}' || true)"
+    fi
+    if [ -z "$cand" ] && command -v ip >/dev/null 2>&1; then
+        cand="$(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 || true)"
     fi
 
     for c in $cand; do
@@ -987,7 +993,11 @@ xmg_proxy_status() {
     echo "[DNS]"
     if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
         echo "  上游: https+local://[2606:4700:4700::1111]/dns-query, https+local://[2001:4860:4860::8888]/dns-query"
-        echo "  策略: UseIPv6"
+        if [ "$(xmg_state_get WARP_ENABLED 0)" = "1" ] && [ -n "$(xmg_state_get WARP_IPV4 "172.16.0.2")" ]; then
+            echo "  策略: UseIP (WARP 接管 IPv4)"
+        else
+            echo "  策略: UseIPv6"
+        fi
     else
         echo "  上游: https+local://1.1.1.1/dns-query, https+local://8.8.8.8/dns-query"
         echo "  策略: UseIP"

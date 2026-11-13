@@ -254,14 +254,28 @@ xmg_uninstall_cleanup_tune_artifacts() {
         rm -f "$unbound_conf" 2>/dev/null || true
         xmg_info "已移除 XMG 生成的 unbound 配置"
         if [ -f "$resolv_file" ] && grep -q '^nameserver 127.0.0.1' "$resolv_file" 2>/dev/null; then
-            cat > "$resolv_file" <<EOF
+            if declare -F xmg_detect_network >/dev/null 2>&1 && { [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; }; then
+                xmg_detect_network >/dev/null 2>&1 || true
+            fi
+            if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
+                cat > "$resolv_file" <<EOF
+# XMG 卸载后恢复默认 DNS（unbound 已移除，纯 IPv6 环境）
+nameserver 2606:4700:4700::1111
+nameserver 2001:4860:4860::8888
+options timeout:2 attempts:2
+EOF
+                chmod 644 "$resolv_file" 2>/dev/null || true
+                xmg_warn "unbound 已移除，$resolv_file 已恢复为 2606:4700:4700::1111 / 2001:4860:4860::8888，请按需调整"
+            else
+                cat > "$resolv_file" <<EOF
 # XMG 卸载后恢复默认 DNS（unbound 已移除）
 nameserver 1.1.1.1
 nameserver 8.8.8.8
 options timeout:2 attempts:2
 EOF
-            chmod 644 "$resolv_file" 2>/dev/null || true
-            xmg_warn "unbound 已移除，$resolv_file 已恢复为 1.1.1.1 / 8.8.8.8，请按需调整"
+                chmod 644 "$resolv_file" 2>/dev/null || true
+                xmg_warn "unbound 已移除，$resolv_file 已恢复为 1.1.1.1 / 8.8.8.8，请按需调整"
+            fi
         fi
     fi
 
