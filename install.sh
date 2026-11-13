@@ -479,16 +479,17 @@ auto_refresh_on_upgrade() {
     esac
 
     echo
-    green "检测到已有配置，正在按新版本自动刷新配置并重启 Xray 核心..."
-    "$XMG_BIN" proxy apply || true
+    green "检测到已有配置，正在按新版本全量重渲染配置并重启 Xray 核心..."
+    XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply || true
     if [ "$w_on" = "1" ]; then
         if [ "$w_mode" = "routing" ] && [ -n "$w_geo" ]; then
-            "$XMG_BIN" warp enable routing --geo "$w_geo" || true
+            "$XMG_BIN" warp enable routing --geo "$w_geo" || yellow "WARP 刷新失败，请手动执行: xmg warp enable routing"
         else
-            "$XMG_BIN" warp enable "$w_mode" || true
+            "$XMG_BIN" warp enable "$w_mode" || yellow "WARP 刷新失败，请手动执行: xmg warp enable $w_mode"
         fi
+    else
+        "$XMG_BIN" xray restart || yellow "Xray 自动重启失败，请手动执行: xmg xray restart"
     fi
-    "$XMG_BIN" xray restart || yellow "Xray 自动重启失败，请手动执行: xmg xray restart"
 }
 
 print_summary() {

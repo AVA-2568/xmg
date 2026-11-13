@@ -991,6 +991,9 @@ xmg_backup_prune() {
 # 生产无可用的服务管理器时视为无需重启（返回 0）。
 # 注意：Xray 官方不支持 SIGHUP 平滑重载配置，必须整进程重启（systemctl / rc-service restart）。
 _xmg_xray_reload() {
+    if [ "${XMG_PROXY_NO_RELOAD:-0}" = "1" ]; then
+        return 0
+    fi
     if [ "${XMG_TEST_MODE:-0}" = "1" ] && [ -n "${XMG_XRAY_RELOAD_TESTCMD:-}" ]; then
         local -a _reload_cmd=($XMG_XRAY_RELOAD_TESTCMD)
         "${_reload_cmd[@]}" >/dev/null 2>&1

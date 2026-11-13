@@ -530,31 +530,29 @@ xmg_update_run() {
         *) _warp_mode="global" ;;
     esac
 
+    # 第 2 步：全量重渲染配置（暂不重启，待下文统一重启一次核心）
     if [ -x "${XMG_BIN:-}" ] && [ -f "$_state_f" ]; then
-        xmg_info "检测到已有托管状态，用新版本自动重渲染配置..."
-        if "$XMG_BIN" proxy apply >/dev/null 2>&1; then
-            xmg_info "Proxy 配置已按新版本刷新"
+        xmg_info "检测到已有托管状态，用新版本全量重渲染配置..."
+        if XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply; then
+            xmg_info "Proxy 配置已按新版本全量重渲染"
         else
-            xmg_warn "自动刷新 Proxy 配置失败，请手动执行: xmg proxy apply"
+            xmg_warn "自动重渲染配置失败，请手动执行: xmg proxy apply"
         fi
     fi
 
+    # 第 3 步：应用 WARP（若启用）并单次硬重启核心使新配置与参数 100% 生效
     if [ "$_warp_on" = "1" ] && [ -x "${XMG_BIN:-}" ]; then
-        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，用新版本重新应用..."
+        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，用新版本重新应用并重启核心..."
         local _warp_args=(warp enable "$_warp_mode")
         if [ "$_warp_mode" = "routing" ] && [ -n "$_warp_geo" ]; then
             _warp_args+=(--geo "$_warp_geo")
         fi
         if "$XMG_BIN" "${_warp_args[@]}"; then
-            xmg_info "WARP 配置已按新版本刷新"
+            xmg_info "WARP 配置已刷新且 Xray 核心已重启"
         else
             xmg_warn "自动刷新 WARP 失败，请手动执行: xmg warp enable $_warp_mode"
         fi
-    fi
-
-    # 无论是否启用 WARP，只要存在 Xray 配置就确保用新进程重启核心（确保新参数/新配置 100% 生效）
-    local _cfg_path="${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}"
-    if [ -s "$_cfg_path" ]; then
+    elif [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ]; then
         if [ -x "${XMG_BIN:-}" ]; then
             xmg_info "正在重启 Xray 核心以加载最新配置与参数..."
             if "$XMG_BIN" xray restart; then
