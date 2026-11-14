@@ -771,8 +771,7 @@ except Exception:
     pass
 ' 2>/dev/null || true)"
         if [ -n "$py_keys" ]; then
-            priv="$(echo "$py_keys" | awk '{print $1}')"
-            pub="$(echo "$py_keys" | awk '{print $2}')"
+            read -r priv pub _ <<< "$py_keys"
             priv="$(_xmg_warp_std_b64 "$priv")"
             pub="$(_xmg_warp_std_b64 "$pub")"
             if [ "${#priv}" -eq 44 ] && [ "${#pub}" -eq 44 ]; then
@@ -825,8 +824,7 @@ _xmg_warp_register() {
 
     local privkey="" pubkey="" keys=""
     keys="$(_xmg_warp_gen_keys)" || return 1
-    privkey="$(echo "$keys" | awk '{print $1}')"
-    pubkey="$(echo "$keys" | awk '{print $2}')"
+    read -r privkey pubkey _ <<< "$keys"
 
     local resp=""
     # 临时文件必须在两个分支外声明：mock 分支也会走到失败诊断，
@@ -2052,6 +2050,7 @@ _xmg_warp_relax_stack_strategy() {
                    else . end)
                else . end)
         ' "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            chmod --reference="$cfg" "$tmp" 2>/dev/null || true
             mv -f "$tmp" "$cfg"
             if [ "$mode" = "global" ]; then
                 xmg_info "已把 DNS/出站策略放开为 UseIP：WARP 隧道为纯 IPv6 主机提供了 IPv4 出口"
@@ -2063,15 +2062,52 @@ _xmg_warp_relax_stack_strategy() {
         rm -f "$tmp" 2>/dev/null || true
     fi
 
-    # 无 jq 兜底
+    # 无 jq 纯 Bash 原子兜底（兼容紧凑/宽松 JSON 空白，零 sed -i）
     if [ "$mode" = "global" ]; then
-        sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/; s/"domainStrategy": "UseIPv6"/"domainStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
+        _xmg_warp_json_swap_strategy "$cfg" "UseIPv6" "UseIP" 1
         xmg_info "已把 DNS/出站策略放开为 UseIP（WARP 隧道提供 IPv4 出口）"
     else
-        sed -i 's/"queryStrategy": "UseIPv6"/"queryStrategy": "UseIP"/' "$cfg" 2>/dev/null || true
+        _xmg_warp_json_swap_strategy "$cfg" "UseIPv6" "UseIP" 0
         xmg_info "已把 DNS 查询策略放开为 UseIP（分流模式）"
     fi
     return 0
+}
+
+# 纯 Bash 零 sed -i 原子替换 queryStrategy / domainStrategy（兼容任意空白符并保留权限）
+_xmg_warp_json_swap_strategy() {
+    local cfg="$1"
+    local from_val="$2"
+    local to_val="$3"
+    local swap_domain="${4:-1}"
+
+    [ -f "$cfg" ] || return 0
+    local content=""
+    content="$(< "$cfg")" 2>/dev/null || return 0
+
+    local changed=0 re_q="" re_d=""
+    re_q='^(.*)"queryStrategy"[[:space:]]*:[[:space:]]*"'"$from_val"'"(.*)$'
+    while [[ "$content" =~ $re_q ]]; do
+        content="${BASH_REMATCH[1]}\"queryStrategy\": \"${to_val}\"${BASH_REMATCH[2]}"
+        changed=1
+    done
+
+    if [ "$swap_domain" = "1" ]; then
+        re_d='^(.*)"domainStrategy"[[:space:]]*:[[:space:]]*"'"$from_val"'"(.*)$'
+        while [[ "$content" =~ $re_d ]]; do
+            content="${BASH_REMATCH[1]}\"domainStrategy\": \"${to_val}\"${BASH_REMATCH[2]}"
+            changed=1
+        done
+    fi
+
+    [ "$changed" = "1" ] || return 0
+    local tmp="${cfg}.stack.$$"
+    if printf '%s
+' "$content" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+        chmod --reference="$cfg" "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$cfg"
+    else
+        rm -f "$tmp" 2>/dev/null || true
+    fi
 }
 
 # 停用 WARP 后反向收紧：纯 IPv6 主机没有 IPv4 直连，必须回到 UseIPv6
@@ -2090,6 +2126,7 @@ _xmg_warp_restore_stack_strategy() {
                 then .streamSettings.sockopt.domainStrategy = "UseIPv6"
                 else . end)
         ' "$cfg" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            chmod --reference="$cfg" "$tmp" 2>/dev/null || true
             mv -f "$tmp" "$cfg"
             xmg_info "已恢复 DNS/出站策略为 UseIPv6（宿主机无 IPv4 直连）"
             return 0
@@ -2097,7 +2134,8 @@ _xmg_warp_restore_stack_strategy() {
         rm -f "$tmp" 2>/dev/null || true
     fi
 
-    sed -i 's/"queryStrategy": "UseIP"/"queryStrategy": "UseIPv6"/; s/"domainStrategy": "UseIP"/"domainStrategy": "UseIPv6"/' "$cfg" 2>/dev/null || true
+    _xmg_warp_json_swap_strategy "$cfg" "UseIP" "UseIPv6" 1
+    xmg_info "已恢复 DNS/出站策略为 UseIPv6（宿主机无 IPv4 直连）"
     return 0
 }
 

@@ -28,8 +28,8 @@ chmod +x "$T/bin/rc-service"
 # --- 1. 服务处于停止状态：必须被拉起 ---
 _OUT1="$(PATH="$T/bin:$PATH" MOCK_INIT=openrc XMG_LIB_DIR="$SRC/lib" \
     bash -c '
-        source lib/common.sh >/dev/null 2>&1
-        source lib/os.sh >/dev/null 2>&1
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/os.sh" >/dev/null 2>&1
         xmg_svc_restart_verified xray 3
         echo "rc=$?"
     ' 2>&1)"
@@ -42,8 +42,8 @@ t_equals "停止态时未执行 stop" "$(grep -c '^stop xray$' "$LOG")" "0"
 : > "$T/alive_xray"
 _OUT2="$(PATH="$T/bin:$PATH" MOCK_INIT=openrc XMG_LIB_DIR="$SRC/lib" \
     bash -c '
-        source lib/common.sh >/dev/null 2>&1
-        source lib/os.sh >/dev/null 2>&1
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/os.sh" >/dev/null 2>&1
         xmg_svc_restart_verified xray 3
         echo "rc=$?"
     ' 2>&1)"
@@ -64,8 +64,8 @@ chmod +x "$T/bin/rc-service"
 
 _OUT3="$(PATH="$T/bin:$PATH" MOCK_INIT=openrc XMG_LIB_DIR="$SRC/lib" \
     bash -c '
-        source lib/common.sh >/dev/null 2>&1
-        source lib/os.sh >/dev/null 2>&1
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/os.sh" >/dev/null 2>&1
         xmg_svc_restart_verified xray 1
         echo "rc=$?"
     ' 2>&1)"
@@ -73,8 +73,8 @@ t_contains "启动后始终非 active 时返回 1" "$_OUT3" "rc=1"
 
 # --- 4. 无服务管理器时返回 2（不误判为成功） ---
 _OUT4="$(MOCK_INIT=none XMG_LIB_DIR="$SRC/lib" bash -c '
-    source lib/common.sh >/dev/null 2>&1
-    source lib/os.sh >/dev/null 2>&1
+    source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+    source "$XMG_LIB_DIR/os.sh" >/dev/null 2>&1
     xmg_svc_restart_verified xray 1
     echo "rc=$?"
 ' 2>&1)"

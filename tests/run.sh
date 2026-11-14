@@ -5,6 +5,7 @@ unset BASH_ENV ENV 2>/dev/null || true
 set -uo pipefail
 
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$TESTS_DIR/.." || exit 1
 # shellcheck source=lib.sh
 source "$TESTS_DIR/lib.sh"
 

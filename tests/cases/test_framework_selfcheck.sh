@@ -81,3 +81,12 @@ t_contains "单参空串必须判FAIL" "$_mcC" "PASS=0 FAIL=1"
 # 回归：单参数带 `! ` 取反前缀时应按整体退出码判定，不得因 PIPESTATUS[0] 反转
 _mcD="$(bash -c 'source "$1"; t_assert "取反假命令" "! false"; t_assert "取反真命令" "! true" 2>/dev/null; t_summary' _ "$_MC_LIB" 2>&1)"
 t_contains "单参取反命令应判PASS且反向判FAIL" "$_mcD" "PASS=1 FAIL=1"
+
+# 回归门禁：生产代码零 sed -i / 零 echo -e，测试代码零相对路径 source lib/
+_PROJ_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+_sed_i_hits="$(grep -rnE '\bsed[[:space:]]+-i\b' "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT/lib/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+t_equals "生产代码 sed -i 清零" "$_sed_i_hits" ""
+_echo_e_hits="$(grep -rnE '\becho[[:space:]]+-e\b' "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT/lib/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+t_equals "生产代码 echo -e 清零" "$_echo_e_hits" ""
+_rel_src_hits="$(grep -rnE '\bsource[[:space:]]+lib/' "$_PROJ_ROOT/tests/cases/" 2>/dev/null | grep -v 'test_framework_selfcheck.sh' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
+t_equals "测试脚本相对路径 source lib/ 清零" "$_rel_src_hits" ""

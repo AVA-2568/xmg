@@ -28,8 +28,8 @@ run_relax() {
     local cfg="$1" mode="$2" stack="$3"
     XMG_LIB_DIR="$SRC/lib" XMG_HOME="$T" XMG_NET_STACK="$stack" \
         bash -c '
-            source lib/common.sh >/dev/null 2>&1
-            source lib/warp.sh >/dev/null 2>&1
+            source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+            source "$XMG_LIB_DIR/warp.sh" >/dev/null 2>&1
             _xmg_warp_relax_stack_strategy "$1" "$2" "172.16.0.2"
         ' _ "$cfg" "$mode" 2>&1
 }
@@ -65,11 +65,43 @@ run_relax "$C5" global ipv6_only >/dev/null 2>&1
 t_equals "启用后为 UseIP" "$(q_strategy "$C5")" '"queryStrategy":"UseIP"'
 XMG_LIB_DIR="$SRC/lib" XMG_HOME="$T" XMG_NET_STACK=ipv6_only \
     bash -c '
-        source lib/common.sh >/dev/null 2>&1
-        source lib/warp.sh >/dev/null 2>&1
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/warp.sh" >/dev/null 2>&1
         _xmg_warp_restore_stack_strategy "$1"
     ' _ "$C5" >/dev/null 2>&1
 t_equals "停用后 DNS 策略收回 UseIPv6" "$(q_strategy "$C5")" '"queryStrategy":"UseIPv6"'
 t_equals "停用后出站策略收回 UseIPv6" "$(d_strategy "$C5")" '"domainStrategy":"UseIPv6"'
+
+
+# --- 6. 无 jq 纯 Bash 兜底 + 紧凑 JSON（无空格）双向验证与权限保持 ---
+NOJQ_BIN="$T/nojq_bin"
+mkdir -p "$NOJQ_BIN"
+# 仅放基础命令并屏蔽 jq
+for _cmd in bash sh rm mv chmod cat printf dirname; do
+    _p="$(command -v "$_cmd" 2>/dev/null || true)"
+    [ -n "$_p" ] && ln -sf "$_p" "$NOJQ_BIN/$_cmd"
+done
+
+C6="$T/c6.json"
+printf '{"dns":{"queryStrategy":"UseIPv6"},"outbounds":[{"tag":"direct","protocol":"freedom","streamSettings":{"sockopt":{"domainStrategy":"UseIPv6"}}}]}\n' > "$C6"
+chmod 600 "$C6"
+PATH="$NOJQ_BIN" XMG_LIB_DIR="$SRC/lib" XMG_HOME="$T" XMG_NET_STACK=ipv6_only \
+    bash -c '
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/warp.sh" >/dev/null 2>&1
+        _xmg_warp_relax_stack_strategy "$1" "global" "172.16.0.2"
+    ' _ "$C6" >/dev/null 2>&1
+t_equals "无 jq 紧凑 JSON 放开 queryStrategy 为 UseIP" "$(q_strategy "$C6")" '"queryStrategy":"UseIP"'
+t_equals "无 jq 紧凑 JSON 放开 domainStrategy 为 UseIP" "$(d_strategy "$C6")" '"domainStrategy":"UseIP"'
+t_equals "无 jq 替换后保持 600 权限" "$(stat -c '%a' "$C6" 2>/dev/null || echo 600)" "600"
+
+PATH="$NOJQ_BIN" XMG_LIB_DIR="$SRC/lib" XMG_HOME="$T" XMG_NET_STACK=ipv6_only \
+    bash -c '
+        source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+        source "$XMG_LIB_DIR/warp.sh" >/dev/null 2>&1
+        _xmg_warp_restore_stack_strategy "$1"
+    ' _ "$C6" >/dev/null 2>&1
+t_equals "无 jq 紧凑 JSON 收回 queryStrategy 为 UseIPv6" "$(q_strategy "$C6")" '"queryStrategy":"UseIPv6"'
+t_equals "无 jq 紧凑 JSON 收回 domainStrategy 为 UseIPv6" "$(d_strategy "$C6")" '"domainStrategy":"UseIPv6"'
 
 rm -rf "$T"

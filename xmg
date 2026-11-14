@@ -19,7 +19,7 @@ fi
 unset BASH_ENV ENV 2>/dev/null || true
 set -Eeuo pipefail
 
-XMG_VERSION="${XMG_VERSION:-2.4.6}"
+XMG_VERSION="${XMG_VERSION:-2.4.7}"
 
 xmg_usage() {
     cat <<EOF

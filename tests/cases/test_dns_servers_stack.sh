@@ -7,27 +7,29 @@
 # shellcheck shell=bash
 
 SRC="$TESTS_DIR/.."
+_DNS_TMP_ROOT="$(mktemp -d)"
+trap 'rm -rf "$_DNS_TMP_ROOT"' RETURN 2>/dev/null || true
 
 render() {
     local v4="$1" v6="$2"
-    XMG_HOME="$(mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
+    XMG_HOME="$(mktemp -d "$_DNS_TMP_ROOT/case.XXXXXX")" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
         XMG_LIB_DIR="$SRC/lib" \
         bash -c '
-            source lib/common.sh >/dev/null 2>&1
-            source lib/state.sh >/dev/null 2>&1
-            source lib/render.sh >/dev/null 2>&1
+            source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+            source "$XMG_LIB_DIR/state.sh" >/dev/null 2>&1
+            source "$XMG_LIB_DIR/render.sh" >/dev/null 2>&1
             xmg_render_config 0 0
         ' 2>/dev/null
 }
 
 render_bash_engine() {
     local v4="$1" v6="$2"
-    XMG_HOME="$(mktemp -d)" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
+    XMG_HOME="$(mktemp -d "$_DNS_TMP_ROOT/case.XXXXXX")" XMG_NET_IPV4="$v4" XMG_NET_IPV6="$v6" \
         XMG_LIB_DIR="$SRC/lib" \
         bash -c '
-            source lib/common.sh >/dev/null 2>&1
-            source lib/state.sh >/dev/null 2>&1
-            source lib/render.sh >/dev/null 2>&1
+            source "$XMG_LIB_DIR/common.sh" >/dev/null 2>&1
+            source "$XMG_LIB_DIR/state.sh" >/dev/null 2>&1
+            source "$XMG_LIB_DIR/render.sh" >/dev/null 2>&1
             _xmg_render_config_bash
         ' 2>/dev/null
 }
@@ -70,3 +72,5 @@ t_equals "纯 Bash 引擎输出合法 JSON" "$(printf '%s' "$C_BASH" | jq -e . >
 t_equals "两套引擎 DNS 列表一致" \
     "$(printf '%s' "$C_BASH" | jq -c '.dns.servers' 2>/dev/null)" \
     "$(printf '%s' "$C_DUAL" | jq -c '.dns.servers' 2>/dev/null)"
+
+rm -rf "$_DNS_TMP_ROOT"
