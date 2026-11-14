@@ -124,7 +124,8 @@ xmg_os_detect() {
         # Alpine 老版本（3.x 早期）可能没有完整 os-release
         if [ -z "$id" ] && [ -r "$alpine_rel" ]; then
             id="alpine"
-            ver="$(tr -d '\r\n' < "$alpine_rel" 2>/dev/null || true)"
+            IFS= read -r ver < "$alpine_rel" 2>/dev/null || true
+            ver="${ver//$''/}"
         fi
     fi
 
@@ -552,7 +553,8 @@ xmg_svc_kill_force() {
             local pidfile="${XMG_PID_DIR:-/run}/${svc}.pid"
             if [ -r "$pidfile" ]; then
                 local pid=""
-                pid="$(tr -dc '0-9' < "$pidfile" 2>/dev/null || true)"
+                IFS= read -r pid < "$pidfile" 2>/dev/null || true
+                pid="${pid//[!0-9]/}"
                 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                     kill -9 "$pid" 2>/dev/null || true
                 fi

@@ -389,7 +389,8 @@ xmg_warp_geo_available() {
     local f="${XMG_WARP_GEOSITE_FILE:-/usr/local/share/xray/geosite.dat}" sz=0
     [ "${XMG_WARP_GEO_DISABLE:-0}" = "1" ] && return 1
     [ -s "$f" ] || return 1
-    sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    sz="$(wc -c < "$f" 2>/dev/null || true)"
+    sz="${sz//[[:space:]]/}"
     [[ "$sz" =~ ^[0-9]+$ ]] || return 1
     [ "$sz" -ge 1048576 ] || return 1
     return 0
@@ -1127,7 +1128,8 @@ xmg_render_config() {
     vless_port="$(_xmg_render_get_val PROXY_VLESS_PORT "443")"
     vless_domain="$(_xmg_render_get_val PROXY_VLESS_DOMAIN "")"
     vless_uuid="$(_xmg_render_get_val PROXY_VLESS_UUID "")"
-    vless_path="$(_xmg_render_get_val PROXY_VLESS_PATH "/xhttpx")"
+    vless_path="$(_xmg_render_get_val PROXY_VLESS_PATH "/")"
+    [ -n "$vless_path" ] || vless_path="/"
     vless_mode="$(_xmg_render_get_val PROXY_VLESS_MODE "auto")"
     vless_cert_file="$(_xmg_render_get_val PROXY_VLESS_CERT_FILE "")"
     vless_key_file="$(_xmg_render_get_val PROXY_VLESS_KEY_FILE "")"

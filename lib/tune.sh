@@ -225,7 +225,7 @@ xmg_tune_mem_profile() {
     fi
 }
 
-# 备份将被覆盖的配置文件到 $XMG_BACKUP_DIR/tune/
+# 备份将被覆盖的配置文件到 $XMG_BACKUP_DIR/tune/（防重名且按 XMG_BACKUP_KEEP 自动轮转清理）
 xmg_tune_backup_file() {
     local file="$1"
     local dir="$XMG_BACKUP_DIR/tune"
@@ -233,10 +233,37 @@ xmg_tune_backup_file() {
     [ -e "$file" ] || return 0
 
     mkdir -p "$dir" || return 1
-    cp -a -- "$file" "$dir/$(basename "$file").$(xmg_timestamp).bak" || {
+    local bname="${file##*/}"
+    local base_bak="$dir/${bname}.$(xmg_timestamp).$$"
+    local _seq=0
+    local bak_file="${base_bak}_0.bak"
+    while [ -e "$bak_file" ]; do
+        _seq=$((_seq + 1))
+        bak_file="${base_bak}_${_seq}.bak"
+    done
+    cp -a -- "$file" "$bak_file" || {
         xmg_warn "备份失败: $file"
         return 1
     }
+
+    local keep="${XMG_BACKUP_KEEP:-5}"
+    case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+    if [ "$keep" -gt 0 ]; then
+        local -a tbaks=()
+        local _tf=""
+        for _tf in "$dir/${bname}".*.bak; do
+            [ -f "$_tf" ] && tbaks+=("$_tf")
+        done
+        local ttotal="${#tbaks[@]}"
+        if [ "$ttotal" -gt "$keep" ]; then
+            local tdel=$((ttotal - keep)) tidx=0
+            while [ "$tidx" -lt "$tdel" ]; do
+                rm -f "${tbaks[$tidx]}" 2>/dev/null || true
+                tidx=$((tidx + 1))
+            done
+        fi
+    fi
+
     xmg_info "已备份 $file -> $dir/"
 }
 
@@ -396,7 +423,9 @@ xmg_tune_bbr_supported() {
     modprobe tcp_bbr 2>/dev/null || true
 
     local avail=""
-    avail="$(cat /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || echo '')"
+    if [ -r /proc/sys/net/ipv4/tcp_available_congestion_control ]; then
+        IFS= read -r avail < /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || true
+    fi
 
     case " $avail " in
         *" bbr "*)
@@ -939,14 +968,20 @@ xmg_tune_dns_optimize() {
         return 0
     fi
 
-    # 保存安全回滚快照
-    local snapshot_resolv="/tmp/xmg-resolv-snap.$$.bak"
-    local snapshot_resolved="/tmp/xmg-resolved-snap.$$.bak"
-    local had_resolved_conf=0
-    [ -e /etc/resolv.conf ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null || true
+    # 保存安全回滚快照（使用 mktemp 防 /tmp 符号链接劫持）
+    local snapshot_resolv="" snapshot_resolved=""
+    local had_resolv_conf=0 had_resolved_conf=0
+    if [ -e /etc/resolv.conf ]; then
+        snapshot_resolv="$(mktemp)" || snapshot_resolv=""
+        if [ -n "$snapshot_resolv" ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null; then
+            had_resolv_conf=1
+        fi
+    fi
     if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
-        cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_resolved" 2>/dev/null || true
-        had_resolved_conf=1
+        snapshot_resolved="$(mktemp)" || snapshot_resolved=""
+        if [ -n "$snapshot_resolved" ] && cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_resolved" 2>/dev/null; then
+            had_resolved_conf=1
+        fi
     fi
 
     local is_resolved=0
@@ -970,16 +1005,16 @@ xmg_tune_dns_optimize() {
             fi
             systemctl restart systemd-resolved 2>/dev/null || true
         fi
-        if [ -e "$snapshot_resolv" ]; then
+        if [ "$had_resolv_conf" -eq 1 ] && [ -n "$snapshot_resolv" ] && [ -e "$snapshot_resolv" ]; then
             rm -f /etc/resolv.conf
             cp -a "$snapshot_resolv" /etc/resolv.conf 2>/dev/null || true
         fi
-        rm -f "$snapshot_resolv" "$snapshot_resolved"
+        rm -f ${snapshot_resolv:+"$snapshot_resolv"} ${snapshot_resolved:+"$snapshot_resolved"} 2>/dev/null || true
         xmg_info "已完成安全回滚，已恢复原网络配置"
         return 1
     fi
 
-    rm -f "$snapshot_resolv" "$snapshot_resolved"
+    rm -f ${snapshot_resolv:+"$snapshot_resolv"} ${snapshot_resolved:+"$snapshot_resolved"} 2>/dev/null || true
     xmg_info "DNS 优化应用成功，解析验证通过"
 }
 
@@ -1109,7 +1144,8 @@ xmg_tune_resolved_unit_exists() {
 xmg_tune_dns_enable_resolved() {
     local dns1="${1:-}"
     local dns2="${2:-}"
-    local resolv_backup="/tmp/xmg-resolv-backup.$(xmg_timestamp)"
+    local resolv_backup=""
+    resolv_backup="$(mktemp)" || resolv_backup="${XMG_RUN_DIR:-${XMG_HOME:-/opt/xmg}/run}/.resolv-backup.$$.$RANDOM"
 
     xmg_warn "systemd-resolved 未运行，将启用它并接管 /etc/resolv.conf"
     if ! xmg_confirm "确认继续? (失败会自动回滚)"; then
@@ -1206,11 +1242,13 @@ xmg_tune_dns_dot_apply() {
         fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
     fi
 
-    local snapshot_dropin="/tmp/xmg-dot-dropin.$$.bak"
+    local snapshot_dropin=""
     local had_prior=0
     if [ -f "$XMG_TUNE_RESOLVED_CONF" ]; then
-        cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_dropin" 2>/dev/null || true
-        had_prior=1
+        snapshot_dropin="$(mktemp)" || snapshot_dropin=""
+        if [ -n "$snapshot_dropin" ] && cp -a "$XMG_TUNE_RESOLVED_CONF" "$snapshot_dropin" 2>/dev/null; then
+            had_prior=1
+        fi
     fi
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
@@ -1233,18 +1271,18 @@ EOF
     if ! xmg_tune_dns_verify; then
         xmg_error "DoT 配置后解析验证失败（853 端口受阻或解析无响应）！"
         xmg_warn "正在自动回滚 DoT 配置以恢复网络..."
-        if [ "$had_prior" -eq 1 ]; then
+        if [ "$had_prior" -eq 1 ] && [ -n "$snapshot_dropin" ] && [ -f "$snapshot_dropin" ]; then
             cp -a "$snapshot_dropin" "$XMG_TUNE_RESOLVED_CONF" 2>/dev/null || true
         else
             rm -f "$XMG_TUNE_RESOLVED_CONF"
         fi
         systemctl restart systemd-resolved 2>/dev/null || true
-        rm -f "$snapshot_dropin"
+        rm -f ${snapshot_dropin:+"$snapshot_dropin"} 2>/dev/null || true
         xmg_info "已自动撤销 DoT 配置，网络已恢复"
         return 1
     fi
 
-    rm -f "$snapshot_dropin"
+    rm -f ${snapshot_dropin:+"$snapshot_dropin"} 2>/dev/null || true
     xmg_info "DoT 已启用: DNSOverTLS=opportunistic（带回退）"
     xmg_info "配置文件: $XMG_TUNE_RESOLVED_CONF"
     resolvectl status 2>/dev/null | sed -n '1,12p' || true
@@ -1419,14 +1457,17 @@ xmg_tune_dns_dot_openrc() {
     fi
 
     local conf="${XMG_TUNE_UNBOUND_CONF:-/etc/unbound/unbound.conf}"
-    local snapshot_conf="/tmp/xmg-unbound-snap.$$.bak"
-    local snapshot_resolv="/tmp/xmg-resolv-snap.$$.bak"
-    local had_conf=0
+    local snapshot_conf="" snapshot_resolv=""
+    local had_conf=0 had_resolv=0
 
     if [ -f "$conf" ]; then
-        cp -a "$conf" "$snapshot_conf" 2>/dev/null && had_conf=1
+        snapshot_conf="$(mktemp)" || snapshot_conf=""
+        [ -n "$snapshot_conf" ] && cp -a "$conf" "$snapshot_conf" 2>/dev/null && had_conf=1
     fi
-    [ -e /etc/resolv.conf ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null || true
+    if [ -e /etc/resolv.conf ]; then
+        snapshot_resolv="$(mktemp)" || snapshot_resolv=""
+        [ -n "$snapshot_resolv" ] && cp -a /etc/resolv.conf "$snapshot_resolv" 2>/dev/null && had_resolv=1
+    fi
 
     # 单栈自适应：纯 IPv4 主机不写 ::1 上游，避免解析器指向不可用地址
     local resolv_v6=""
@@ -1459,7 +1500,7 @@ EOF
     local i=0
     for ((i=1; i<=10; i++)); do
         if xmg_tune_dns_verify; then
-            rm -f "$snapshot_conf" "$snapshot_resolv"
+            rm -f ${snapshot_conf:+"$snapshot_conf"} ${snapshot_resolv:+"$snapshot_resolv"} 2>/dev/null || true
             xmg_info "DoT 已通过 unbound 启用（forward-tls-upstream，853 加密转发）"
             xmg_info "配置文件: $conf"
             return 0
@@ -1469,18 +1510,18 @@ EOF
 
     xmg_error "DoT 应用后解析验证失败（853 受阻或证书校验失败）！"
     xmg_warn "正在自动回滚以恢复网络..."
-    if [ "$had_conf" -eq 1 ]; then
+    if [ "$had_conf" -eq 1 ] && [ -n "$snapshot_conf" ] && [ -f "$snapshot_conf" ]; then
         cp -a "$snapshot_conf" "$conf" 2>/dev/null || true
     else
         rm -f "$conf" 2>/dev/null || true
     fi
-    if [ -e "$snapshot_resolv" ]; then
+    if [ "$had_resolv" -eq 1 ] && [ -n "$snapshot_resolv" ] && [ -e "$snapshot_resolv" ]; then
         rm -f /etc/resolv.conf
         cp -a "$snapshot_resolv" /etc/resolv.conf 2>/dev/null || true
     fi
     xmg_svc_stop unbound >/dev/null 2>&1 || true
     xmg_svc_disable unbound >/dev/null 2>&1 || true
-    rm -f "$snapshot_conf" "$snapshot_resolv"
+    rm -f ${snapshot_conf:+"$snapshot_conf"} ${snapshot_resolv:+"$snapshot_resolv"} 2>/dev/null || true
     xmg_info "已自动撤销 DoT 配置，DNS 已恢复原状"
     return 1
 }
@@ -1533,15 +1574,21 @@ xmg_tune_dns_dot() {
 
 # ===== 时间同步 =====
 
-# 自动探测 VPS 当前出口 IP 的当地自然时区
+# 自动探测 VPS 当前出口 IP 的当地自然时区（纯 IPv6 主机优先走双栈 HTTPS 端点，避免纯 IPv4 端点超时）
 xmg_tune_detect_ip_timezone() {
     local tz=""
-    tz="$(curl -sSL --connect-timeout 3 --max-time 5 "http://ip-api.com/line?fields=timezone" 2>/dev/null | tr -d '\r\n' || true)"
-    if [ -n "$tz" ] && [[ "$tz" =~ ^[A-Za-z_]+/[A-Za-z_]+ ]]; then
-        echo "$tz"
-        return 0
+    if ! xmg_tune_is_ipv6_only; then
+        tz="$(curl -sSL --connect-timeout 3 --max-time 5 "http://ip-api.com/line?fields=timezone" 2>/dev/null || true)"
+        tz="${tz//[$'
+']/}"
+        if [ -n "$tz" ] && [[ "$tz" =~ ^[A-Za-z_]+/[A-Za-z_]+ ]]; then
+            echo "$tz"
+            return 0
+        fi
     fi
-    tz="$(curl -sSL --connect-timeout 3 --max-time 5 "https://ipapi.co/timezone" 2>/dev/null | tr -d '\r\n' || true)"
+    tz="$(curl -sSL --connect-timeout 3 --max-time 5 "https://ipapi.co/timezone" 2>/dev/null || true)"
+    tz="${tz//[$'
+']/}"
     if [ -n "$tz" ] && [[ "$tz" =~ ^[A-Za-z_]+/[A-Za-z_]+ ]]; then
         echo "$tz"
         return 0
@@ -1837,7 +1884,7 @@ xmg_tune_disk_avail_mb() {
     [ -d "$dir" ] || dir="/"
 
     local avail=""
-    avail="$(df -m -P "$dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+    avail="$(LC_ALL=C df -m -P "$dir" 2>/dev/null | awk 'NR==2 {print $4}')"
     case "$avail" in
         ''|*[!0-9]*)
             echo 999999
@@ -1859,7 +1906,7 @@ xmg_tune_fs_type() {
         fstype="$(stat -f -c %T "$target_dir" 2>/dev/null || true)"
     fi
     if [ -z "$fstype" ] && command -v df >/dev/null 2>&1; then
-        fstype="$(df -T "$target_dir" 2>/dev/null | awk 'NR>1 {print $2; exit}' || true)"
+        fstype="$(LC_ALL=C df -T "$target_dir" 2>/dev/null | awk 'NR>1 {print $2; exit}' || true)"
     fi
     printf '%s' "$fstype"
 }
@@ -2007,7 +2054,20 @@ xmg_tune_swap_remove() {
     fi
 
     swapoff "$XMG_TUNE_SWAPFILE" 2>/dev/null || true
-    sed -i '\|^'"$XMG_TUNE_SWAPFILE"' |d' /etc/fstab
+    if [ -w /etc/fstab ] && [ -r /etc/fstab ]; then
+        local _fstab_tmp="" _fl=""
+        _fstab_tmp="$(mktemp)" || _fstab_tmp=""
+        if [ -n "$_fstab_tmp" ]; then
+            while IFS= read -r _fl || [ -n "$_fl" ]; do
+                case "$_fl" in
+                    "$XMG_TUNE_SWAPFILE "[*]|"$XMG_TUNE_SWAPFILE	"*|"$XMG_TUNE_SWAPFILE "*) continue ;;
+                esac
+                printf '%s\n' "$_fl" >> "$_fstab_tmp"
+            done < /etc/fstab
+            cat "$_fstab_tmp" > /etc/fstab 2>/dev/null || true
+            rm -f "$_fstab_tmp" 2>/dev/null || true
+        fi
+    fi
     rm -f "$XMG_TUNE_SWAPFILE" && xmg_info "Swap 已删除"
     rm -f "$XMG_TUNE_SYSCTL_SWAP_CONF"
 }

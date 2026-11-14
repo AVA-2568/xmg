@@ -124,7 +124,8 @@ xmg_detect_virt() {
     local dmi_val=""
     for dmi_f in "$dmi_dir/product_name" "$dmi_dir/sys_vendor" "$dmi_dir/bios_vendor"; do
         if [ -r "$dmi_f" ]; then
-            dmi_val="$(cat "$dmi_f" 2>/dev/null || true)"
+            dmi_val=""
+            IFS= read -r dmi_val < "$dmi_f" 2>/dev/null || true
             case "$dmi_val" in
                 *QEMU*|*KVM*|*Bochs*)
                     printf 'kvm\n'
@@ -215,7 +216,8 @@ xmg_detect_mem_total_kb() {
     for cg_file in "${XMG_CGROUP_MEMORY_MAX:-/sys/fs/cgroup/memory.max}" \
                    "${XMG_CGROUP_MEMORY_LIMIT:-/sys/fs/cgroup/memory/memory.limit_in_bytes}"; do
         [ -r "$cg_file" ] || continue
-        cg_bytes="$(cat "$cg_file" 2>/dev/null || true)"
+        cg_bytes=""
+        IFS= read -r cg_bytes < "$cg_file" 2>/dev/null || true
         case "$cg_bytes" in
             ''|max|*[!0-9]*) continue ;;
         esac
@@ -246,13 +248,31 @@ xmg_detect_mem_total_mb() {
 XMG_MEMINFO_FILE="${XMG_MEMINFO_FILE:-/proc/meminfo}"
 
 xmg_mem_available_mb() {
-    local kb="" mb=""
+    local kb="" mb="" _k="" _v="" _rest=""
+    local _avail="" _free=0 _buf=0 _cached=0 _saw_fbc=0
 
     if [ -r "$XMG_MEMINFO_FILE" ]; then
-        kb="$(awk '/^MemAvailable:/ {print $2; exit}' "$XMG_MEMINFO_FILE" 2>/dev/null)"
-        if [ -z "$kb" ]; then
-            kb="$(awk '/^MemFree:/ {f=$2} /^Buffers:/ {b=$2} /^Cached:/ {c=$2} END {print f+b+c}' \
-                "$XMG_MEMINFO_FILE" 2>/dev/null)"
+        while IFS=': ' read -r _k _v _rest; do
+            case "$_k" in
+                MemAvailable)
+                    _avail="${_v//[!0-9]/}"
+                    [ -n "$_avail" ] && break
+                    ;;
+                MemFree)
+                    _free="${_v//[!0-9]/}"; _saw_fbc=1
+                    ;;
+                Buffers)
+                    _buf="${_v//[!0-9]/}"; _saw_fbc=1
+                    ;;
+                Cached)
+                    _cached="${_v//[!0-9]/}"; _saw_fbc=1
+                    ;;
+            esac
+        done < "$XMG_MEMINFO_FILE" 2>/dev/null
+        if [ -n "$_avail" ]; then
+            kb="$_avail"
+        elif [ "$_saw_fbc" -eq 1 ]; then
+            kb=$(( ${_free:-0} + ${_buf:-0} + ${_cached:-0} ))
         fi
     fi
 
@@ -263,7 +283,7 @@ xmg_mem_available_mb() {
     fi
 
     if command -v free >/dev/null 2>&1; then
-        mb="$(free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
+        mb="$(LC_ALL=C free -m 2>/dev/null | awk '/^Mem:/ {print $7}')"
         if [ -n "$mb" ]; then
             printf '%s' "$mb"
             return 0
@@ -326,8 +346,9 @@ xmg_detect_cpu_cores() {
         local quota_f="${XMG_CGROUP_CPU_QUOTA:-/sys/fs/cgroup/cpu/cpu.cfs_quota_us}"
         local period_f="${XMG_CGROUP_CPU_PERIOD:-/sys/fs/cgroup/cpu/cpu.cfs_period_us}"
         if [ -r "$quota_f" ] && [ -r "$period_f" ]; then
-            quota="$(cat "$quota_f" 2>/dev/null || true)"
-            period="$(cat "$period_f" 2>/dev/null || true)"
+            quota=""; period=""
+            IFS= read -r quota < "$quota_f" 2>/dev/null || true
+            IFS= read -r period < "$period_f" 2>/dev/null || true
             if [[ "$quota" =~ ^[0-9]+$ ]] && [ "$quota" -gt 0 ] && [[ "$period" =~ ^[0-9]+$ ]] && [ "$period" -gt 0 ]; then
                 cores=$((quota / period))
                 quota_seen=1

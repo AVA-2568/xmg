@@ -251,54 +251,8 @@ _xmg_warp_clean_ipv4() {
 }
 
 # ===== WARP 隧道能力画像（单栈 / 双栈矩阵）=====
-# 与 lib/render.sh 的同名函数必须保持逐字一致：WARP 分支不加载 render.sh，
-# 两份分别服务「增量注入」与「全量渲染」两条路径，逻辑一旦漂移，
-# 就会出现「xmg warp enable 的配置」和「proxy apply 重渲染后的配置」不同源。
-# 依据 xtls.github.io/config/outbounds/wireguard.html：
-#   allowedIPs 必须与 address 实际拥有的协议族一致；
-#   remoteDNS 必须隧道内可达，且在 address 为双栈时优先 IPv4；
-#   targetStrategy 位于 OutboundObject 顶层，默认 AsIs（不本地解析）。
-# 参数：$1=隧道 IPv4（可空）$2=隧道 IPv6（可空）$3=主机是否纯 IPv6(1/0)
-# 输出：<allowedIPs 元素>|<remoteDNS 元素>|<targetStrategy>，元素不含外层方括号，
-#       由调用方包 [] —— 这里再包一层会生成 [[...]]，内核直接拒绝启动。
-#       隧道无任何地址时返回 1
-_xmg_warp_tunnel_profile() {
-    local tun_v4="${1:-}" tun_v6="${2:-}" host_v6_only="${3:-0}"
-    local allowed="" dns="" strat=""
-
-    [ -n "$tun_v4" ] && allowed='"0.0.0.0/0"'
-    [ -n "$tun_v4" ] && dns='"1.1.1.1", "8.8.8.8"'
-
-    if [ -n "$tun_v6" ]; then
-        if [ -n "$allowed" ]; then
-            allowed="$allowed, \"::/0\""
-        else
-            allowed='"::/0"'
-        fi
-    fi
-
-    # 没有任何地址的隧道不具备承载能力，调用方应直接不渲染 warp-out
-    [ -n "$allowed" ] || return 1
-
-    # 隧道无 IPv4 时 remoteDNS 只能用 IPv6（裸地址，官方示例不带方括号）
-    [ -n "$dns" ] || dns='"2606:4700:4700::1111", "2001:4860:4860::8888"'
-
-    if [ -z "$tun_v4" ]; then
-        # 隧道只有 IPv6，目标只能解到 IPv6
-        strat="UseIPv6"
-    elif [ -z "$tun_v6" ]; then
-        # 隧道只有 IPv4：必须锁死 v4，否则解出 AAAA 后 allowedIPs 里没有 ::/0，找不到 peer
-        strat="UseIPv4"
-    elif [ "$host_v6_only" = "1" ]; then
-        # 纯 IPv6 主机靠隧道补 IPv4 出口，强制 v4 才能拿到 WARP 的收益
-        strat="UseIPv4"
-    else
-        # 双栈主机 + 双栈隧道：保留原生双栈能力
-        strat="UseIP"
-    fi
-
-    printf '%s|%s|%s' "$allowed" "$dns" "$strat"
-}
+# 直接复用已由顶部加载的 lib/render.sh 中的 _xmg_warp_tunnel_profile 唯一真源，
+# 消除双份实现与潜在逻辑漂移。
 
 _xmg_warp_country_name() {
     local code="$1"
@@ -516,9 +470,9 @@ xmg_warp_optimize_endpoint() {
 
         if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
             if xmg_warp_is_ipv6_only; then
-                sed -i -E "s/\"endpoint_v6\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v6\": \"$mock_res\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+                _xmg_warp_account_set_ep "endpoint_v6" "$mock_res"
             else
-                sed -i -E "s/\"endpoint_v4\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v4\": \"$mock_res\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+                _xmg_warp_account_set_ep "endpoint_v4" "$mock_res"
             fi
         fi
 
@@ -619,9 +573,9 @@ xmg_warp_optimize_endpoint() {
     # 更新 account.json 中的端点 (若存在)
     if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
         if [ "$is_v6" -eq 1 ]; then
-            sed -i -E "s/\"endpoint_v6\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v6\": \"$best_ep\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+            _xmg_warp_account_set_ep "endpoint_v6" "$best_ep"
         else
-            sed -i -E "s/\"endpoint_v4\"[[:space:]]*:[[:space:]]*\"[^\"]*\"/\"endpoint_v4\": \"$best_ep\"/" "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+            _xmg_warp_account_set_ep "endpoint_v4" "$best_ep"
         fi
     fi
 
@@ -633,11 +587,15 @@ xmg_warp_optimize_endpoint() {
             _cur_mode="$(xmg_state_get WARP_MODE "" 2>/dev/null || true)"
             _cur_geo="$(xmg_state_get WARP_GEO_MODE "" 2>/dev/null || true)"
         fi
-        if [ -z "$_cur_on" ] && [ -f "$XMG_WARP_ENV_FILE" ]; then
-            _cur_on="$(sed -n 's/^WARP_ENABLED=//p' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -1 | tr -d '" ')"
-        fi
-        if [ -z "$_cur_mode" ] && [ -f "$XMG_WARP_ENV_FILE" ]; then
-            _cur_mode="$(sed -n 's/^WARP_MODE=//p' "$XMG_WARP_ENV_FILE" 2>/dev/null | tail -1 | tr -d '" ')"
+        if { [ -z "$_cur_on" ] || [ -z "$_cur_mode" ]; } && [ -f "$XMG_WARP_ENV_FILE" ]; then
+            local _ek="" _ev=""
+            while IFS='=' read -r _ek _ev || [ -n "$_ek" ]; do
+                _ev="${_ev%$'\r'}"; _ev="${_ev//\"/}"; _ev="${_ev//[[:space:]]/}"
+                case "$_ek" in
+                    WARP_ENABLED) [ -n "$_cur_on" ]   || _cur_on="$_ev" ;;
+                    WARP_MODE)    [ -n "$_cur_mode" ] || _cur_mode="$_ev" ;;
+                esac
+            done < "$XMG_WARP_ENV_FILE"
         fi
         if [ "$_cur_on" = "1" ]; then
             case "$_cur_mode" in
@@ -771,7 +729,7 @@ _xmg_warp_gen_keys() {
     # 2. 次选系统 openssl 原生命令生成 (所有主流 Linux 发行版均标配)
     if command -v openssl >/dev/null 2>&1; then
         local tmp_der=""
-        tmp_der="$(mktemp 2>/dev/null || echo "/tmp/xmg_ossl_$$.der")"
+        tmp_der="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.ossl_$$_$RANDOM.der")"
         if openssl genpkey -algorithm x25519 -outform DER -out "$tmp_der" 2>/dev/null; then
             priv="$(tail -c 32 "$tmp_der" 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
             pub="$(openssl pkey -inform DER -in "$tmp_der" -pubout -outform DER 2>/dev/null | tail -c 32 2>/dev/null | base64 2>/dev/null | tr -d '[:space:]' || true)"
@@ -836,12 +794,13 @@ _xmg_warp_register() {
 
     # 若已存在凭据，且非强制重新注册，则核验凭据纯净度与 client_id
     if [ "$force" != "1" ] && [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
-        local cur_priv cur_v4 cur_v6 cur_res cur_cid
-        cur_priv="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-        cur_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-        cur_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-        cur_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true)"
-        cur_cid="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
+        local _reg_raw="" cur_priv="" cur_v4="" cur_v6="" cur_res="" cur_cid=""
+        _reg_raw="$(< "$XMG_WARP_ACCOUNT_FILE")" 2>/dev/null || true
+        cur_priv="$(_xmg_warp_json_val "$_reg_raw" "private_key")"
+        cur_v4="$(_xmg_warp_json_val "$_reg_raw" "address_v4")"
+        cur_v6="$(_xmg_warp_json_val "$_reg_raw" "address_v6")"
+        cur_cid="$(_xmg_warp_json_val "$_reg_raw" "client_id")"
+        [[ "$_reg_raw" == *'"reserved"'* ]] && cur_res="1"
 
         # 自愈校验 1: 若内网 IPv6 损坏（含中括号、或地址末尾被拼上端口），自动重新注册
         #   注意不能用 ":[0-9]+$" 判定端口污染 —— 合法 IPv6 末组也常是全数字
@@ -896,8 +855,8 @@ _xmg_warp_register() {
             attempts=("" "-6")
         fi
 
-        tmp_body="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$$.json")"
-        tmp_err="$(mktemp 2>/dev/null || echo "/tmp/xmg_warp_reg_$$.err")"
+        tmp_body="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.reg_$$_$RANDOM.json")"
+        tmp_err="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.reg_$$_$RANDOM.err")"
 
         for fam_opt in "${attempts[@]}"; do
             local curl_args=()
@@ -1128,48 +1087,13 @@ xmg_warp_export_xray_outbound() {
         _xmg_warp_register 0 || return 1
     fi
 
-    local privkey="" addr_v4="" addr_v6="" peer_pub="" ep_v6="" ep_v4="" reserved_json=""
-    privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    addr_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    addr_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    peer_pub="$(grep -o '"peer_public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    local raw_res=""
-    raw_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d: -f2- || true)"
-    if [ -n "$raw_res" ]; then
-        local nums="${raw_res//[\[\]]/}"
-        nums="${nums//,/ }"
-        local r0="0" r1="0" r2="0"
-        read -r r0 r1 r2 _ <<< "$nums"
-        reserved_json="[${r0:-0}, ${r1:-0}, ${r2:-0}]"
-    else
-        local c_id=""
-        c_id="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4 || true)"
-        if [ -n "$c_id" ] && [ "$c_id" != "null" ]; then
-            local rb="" r0="0" r1="0" r2="0"
-            rb="$(_xmg_warp_decode_client_id "$c_id")"
-            read -r r0 r1 r2 _ <<< "$rb"
-            reserved_json="[$r0, $r1, $r2]"
-        else
-            reserved_json="[0, 0, 0]"
-        fi
-    fi
-
-    addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
-    addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
-
-    [ -n "$peer_pub" ] || peer_pub="$XMG_WARP_PEER_PUBKEY"
-
-    local endpoint=""
-    if xmg_warp_is_ipv6_only; then
-        endpoint="$(_xmg_warp_norm_endpoint_v6 "${ep_v6:-$XMG_WARP_ENDPOINT_V6}")"
-    else
-        endpoint="${ep_v4:-$XMG_WARP_ENDPOINT_V4}"
-        if [[ "$endpoint" =~ :0$ ]]; then
-            endpoint="${endpoint%:0}:2408"
-        fi
-    fi
+    _xmg_warp_get_account_vars || return 1
+    local privkey="$WARP_ACC_PRIVKEY"
+    local peer_pub="$WARP_ACC_PUBKEY"
+    local addr_v4="$WARP_ACC_IPV4"
+    local addr_v6="$WARP_ACC_IPV6"
+    local endpoint="$WARP_ACC_ENDPOINT"
+    local reserved_json="$WARP_ACC_RESERVED"
 
     # 隧道实际拥有哪些地址族，直接决定 allowedIPs / remoteDNS / targetStrategy
     local _host_v6_only=0
@@ -1297,32 +1221,112 @@ _xmg_warp_backup_config() {
         bak_dir="${XMG_HOME:-/opt/xmg}/backups"
     fi
     mkdir -p "$bak_dir" 2>/dev/null || true
-    local bak_file="$bak_dir/$(basename "$cfg").warp.bak.$(date +%Y%m%d%H%M%S).$$"
+    local bname="${cfg##*/}"
+    local base_bak="$bak_dir/${bname}.warp.bak.$(date +%Y%m%d%H%M%S).$$"
+    local _seq=0
+    local bak_file="${base_bak}_0"
+    while [ -e "$bak_file" ]; do
+        _seq=$((_seq + 1))
+        bak_file="${base_bak}_${_seq}"
+    done
     cp -f "$cfg" "$bak_file" 2>/dev/null || true
+
+    local keep="${XMG_BACKUP_KEEP:-5}"
+    case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+    if [ "$keep" -gt 0 ]; then
+        local -a wbaks=()
+        local _wf=""
+        for _wf in "$bak_dir/${bname}".warp.bak.*; do
+            [ -f "$_wf" ] && wbaks+=("$_wf")
+        done
+        local wtotal="${#wbaks[@]}"
+        if [ "$wtotal" -gt "$keep" ]; then
+            local wdel=$((wtotal - keep)) widx=0
+            while [ "$widx" -lt "$wdel" ]; do
+                rm -f "${wbaks[$widx]}" 2>/dev/null || true
+                widx=$((widx + 1))
+            done
+        fi
+    fi
+
     echo "$bak_file"
 }
 
-# ===== 辅助: 从 account.json 提取账号变量 =====
+# ===== 辅助: 纯 Bash 安全更新 account.json 端点与 warp.env 键值（零 sed -i，保持 0600 权限）=====
+_xmg_warp_account_set_ep() {
+    local key="$1" ep="$2"
+    [ -f "$XMG_WARP_ACCOUNT_FILE" ] || return 0
+    local _line="" _out="" _nl=$'\n'
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        if [[ "$_line" == *"\"${key}\""* ]]; then
+            local _prefix="${_line%%:*}: \""
+            local _rest="${_line#*:}"
+            local _comma=""
+            [[ "$_rest" == *","* ]] && _comma=","
+            _line="${_prefix}${ep}\"${_comma}"
+        fi
+        _out="${_out}${_line}${_nl}"
+    done < "$XMG_WARP_ACCOUNT_FILE"
+    printf '%s' "$_out" > "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+    chmod 600 "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null || true
+}
+
+_xmg_warp_env_set() {
+    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")" 2>/dev/null || true
+    local -A _updates=()
+    local -a _order=()
+    local _kv="" _k="" _v=""
+    for _kv in "$@"; do
+        _k="${_kv%%=*}"
+        _v="${_kv#*=}"
+        _updates["$_k"]="$_v"
+        _order+=("$_k")
+    done
+    local _line="" _lk="" _out="" _nl=$'\n'
+    if [ -f "$XMG_WARP_ENV_FILE" ]; then
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            _lk="${_line%%=*}"
+            if [ -n "${_updates[$_lk]+set}" ]; then
+                continue
+            fi
+            [ -n "$_line" ] && _out="${_out}${_line}${_nl}"
+        done < "$XMG_WARP_ENV_FILE"
+    fi
+    for _k in "${_order[@]}"; do
+        _out="${_out}${_k}=${_updates[$_k]}${_nl}"
+    done
+    printf '%s' "$_out" > "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+    chmod 600 "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+}
+
+# ===== 辅助: 从 account.json 提取账号变量（纯 Bash 单次内存读取，零外部子进程）=====
 _xmg_warp_get_account_vars() {
     [ -f "$XMG_WARP_ACCOUNT_FILE" ] || return 1
+    local acc_raw=""
+    acc_raw="$(< "$XMG_WARP_ACCOUNT_FILE")" 2>/dev/null || return 1
     local privkey="" addr_v4="" addr_v6="" peer_pub="" ep_v6="" ep_v4="" reserved_json=""
-    privkey="$(grep -o '"private_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    addr_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    addr_v6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    peer_pub="$(grep -o '"peer_public_key"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
-    ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4)"
+    privkey="$(_xmg_warp_json_val "$acc_raw" "private_key")"
+    addr_v4="$(_xmg_warp_json_val "$acc_raw" "address_v4")"
+    addr_v6="$(_xmg_warp_json_val "$acc_raw" "address_v6")"
+    peer_pub="$(_xmg_warp_json_val "$acc_raw" "peer_public_key")"
+    ep_v6="$(_xmg_warp_json_val "$acc_raw" "endpoint_v6")"
+    ep_v4="$(_xmg_warp_json_val "$acc_raw" "endpoint_v4")"
     local raw_res=""
-    raw_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d: -f2- || true)"
+    if [[ "$acc_raw" == *'"reserved"'* ]]; then
+        raw_res="${acc_raw#*\"reserved\"}"
+        raw_res="${raw_res#*\[}"
+        raw_res="${raw_res%%\]*}"
+    fi
     if [ -n "$raw_res" ]; then
-        local nums=""
-        nums="$(echo "$raw_res" | tr -d '[]' | tr ',' ' ')"
+        local nums="${raw_res//[\[\]]/}"
+        nums="${nums//,/ }"
+        nums="${nums//[$'\r\n']/ }"
         local r0="0" r1="0" r2="0"
         read -r r0 r1 r2 _ <<< "$nums"
-        reserved_json="[$r0, $r1, $r2]"
+        reserved_json="[${r0:-0}, ${r1:-0}, ${r2:-0}]"
     else
         local c_id=""
-        c_id="$(grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" | head -1 | cut -d'"' -f4 || true)"
+        c_id="$(_xmg_warp_json_val "$acc_raw" "client_id")"
         if [ -n "$c_id" ] && [ "$c_id" != "null" ]; then
             local rb="" r0="0" r1="0" r2="0"
             rb="$(_xmg_warp_decode_client_id "$c_id")"
@@ -1371,7 +1375,8 @@ xmg_warp_geo_dir() {
 _xmg_warp_geo_size() {
     local f="${1:-}" sz=''
     [ -f "$f" ] || { printf '0'; return 0; }
-    sz="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    sz="$(wc -c < "$f" 2>/dev/null || true)"
+    sz="${sz//[[:space:]]/}"
     [[ "$sz" =~ ^[0-9]+$ ]] || sz=0
     printf '%s' "$sz"
 }
@@ -1396,7 +1401,7 @@ _xmg_warp_sha256() {
     elif command -v busybox >/dev/null 2>&1; then
         h="$(busybox sha256sum "$f" 2>/dev/null | awk '{print $1}')"
     fi
-    printf '%s' "$h" | tr 'A-F' 'a-f'
+    printf '%s' "${h,,}"
 }
 
 # 官方源：geosite.dat.gz（2.4MB）→ gzip 解压 → 原子替换
@@ -1927,17 +1932,11 @@ EOF_GLOBAL_JQ
         fi
     fi
 
-    # 4.5 配置已成功落盘，此刻才把启用状态写进 warp.env（兼容副本）
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-        sed -i '/^WARP_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-        sed -i '/^WARP_GEO_MODE=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=1" >> "$XMG_WARP_ENV_FILE"
-    echo "WARP_MODE=$mode" >> "$XMG_WARP_ENV_FILE"
+    # 4.5 配置已成功落盘，此刻才把启用状态写进 warp.env（兼容副本，纯 Bash 零 sed）
     if [ "$mode" = "routing" ]; then
-        echo "WARP_GEO_MODE=${geo_want:-auto}" >> "$XMG_WARP_ENV_FILE"
+        _xmg_warp_env_set "WARP_ENABLED=1" "WARP_MODE=$mode" "WARP_GEO_MODE=${geo_want:-auto}"
+    else
+        _xmg_warp_env_set "WARP_ENABLED=1" "WARP_MODE=$mode"
     fi
 
     # 6. 清理任何可能存在的第三方 wireproxy 残留服务
@@ -1952,7 +1951,8 @@ EOF_GLOBAL_JQ
 
     # 7. 无论服务当前是否在运行，都要走一次硬重启（停→启→验证 active）
     #    WARP 出站只在进程启动时建立，配置变了必须换进程；服务已停时也要拉起
-    if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+    #    若外层升级/批量流水线显式设置 XMG_PROXY_NO_RELOAD=1，则跳过重启交由外层统一单次重启
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && [ "${XMG_PROXY_NO_RELOAD:-0}" != "1" ]; then
         local s_name="${XMG_XRAY_SERVICE:-xray}"
         if ! _warp_can_manage_service; then
             # 无服务管理器不能回滚：配置本身是好的，只是本环境无法托管进程
@@ -1968,10 +1968,7 @@ EOF_GLOBAL_JQ
             fi
             # 状态/env 必须与配置一起回退：否则 state 声称已启用，下一次 proxy apply
             # 会按 state 把 warp-out 重新渲染回来，形成"回滚了但又生效"的鬼状态。
-            if [ -f "$XMG_WARP_ENV_FILE" ]; then
-                sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-            fi
-            echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE" 2>/dev/null || true
+            _xmg_warp_env_set "WARP_ENABLED=0"
             if declare -F xmg_state_stage >/dev/null 2>&1; then
                 xmg_state_stage WARP_ENABLED 0
                 if declare -F xmg_state_commit_draft >/dev/null 2>&1; then
@@ -2215,7 +2212,7 @@ EOF_DISABLE_JQ
             xmg_state_commit_draft >/dev/null 2>&1 || true
         fi
 
-        if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+        if [ "${XMG_TEST_MODE:-0}" != "1" ] && [ "${XMG_PROXY_NO_RELOAD:-0}" != "1" ]; then
             local s_name="${XMG_XRAY_SERVICE:-xray}"
             if ! _warp_can_manage_service; then
                 _warp_warn_manual_restart "关停"
@@ -2227,11 +2224,7 @@ EOF_DISABLE_JQ
         fi
     fi
     # 走到这里说明配置已确实移除（或本来就没有），此刻才写停用标记
-    mkdir -p "$(dirname "$XMG_WARP_ENV_FILE")"
-    if [ -f "$XMG_WARP_ENV_FILE" ]; then
-        sed -i '/^WARP_ENABLED=/d' "$XMG_WARP_ENV_FILE" 2>/dev/null || true
-    fi
-    echo "WARP_ENABLED=0" >> "$XMG_WARP_ENV_FILE"
+    _xmg_warp_env_set "WARP_ENABLED=0"
 
     xmg_info "Xray WARP 出站已关闭 (warp-out 已停用，已恢复直连出站)"
     return 0
@@ -2334,12 +2327,19 @@ xmg_warp_status() {
         echo "未启用"
     fi
 
+    local _st_acc_raw=""
     if [ -f "$XMG_WARP_ACCOUNT_FILE" ]; then
-        local cur_v4 cur_ep_v4 cur_ep_v6 cur_res
-        cur_v4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
-        cur_ep_v4="$(grep -o '"endpoint_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
-        cur_ep_v6="$(grep -o '"endpoint_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
-        cur_res="$(grep -o '"reserved"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' ' || echo "未记录")"
+        _st_acc_raw="$(< "$XMG_WARP_ACCOUNT_FILE")" 2>/dev/null || true
+        local cur_v4="" cur_ep_v4="" cur_ep_v6="" cur_res="未记录"
+        cur_v4="$(_xmg_warp_json_val "$_st_acc_raw" "address_v4")"
+        cur_ep_v4="$(_xmg_warp_json_val "$_st_acc_raw" "endpoint_v4")"
+        cur_ep_v6="$(_xmg_warp_json_val "$_st_acc_raw" "endpoint_v6")"
+        if [[ "$_st_acc_raw" == *'"reserved"'* ]]; then
+            local _tmp_r="${_st_acc_raw#*\"reserved\"}"
+            _tmp_r="${_tmp_r#*\[}"
+            _tmp_r="${_tmp_r%%\]*}"
+            _tmp_r="${_tmp_r//[$'\r\n']/}"; cur_res="[${_tmp_r// /}]"
+        fi
         printf "虚拟内网 IPv4   : %s\n" "${cur_v4:-未分配}"
         printf "握手保留字节    : %s\n" "$cur_res"
         if xmg_warp_is_ipv6_only; then
@@ -2358,15 +2358,25 @@ xmg_warp_status() {
         trace6="$(curl -6sSL --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || echo 'warp=off')"
     fi
 
-    local ip4="" loc4="" colo4=""
-    ip4="$(echo -e "$trace4" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-    loc4="$(echo -e "$trace4" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-    colo4="$(echo -e "$trace4" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+    local ip4="" loc4="" colo4="" _tl="" _t4_norm="${trace4//\\n/$'\n'}"
+    while IFS= read -r _tl || [ -n "$_tl" ]; do
+        _tl="${_tl%$'\r'}"
+        case "$_tl" in
+            ip=*)   [ -n "$ip4" ]   || ip4="${_tl#ip=}" ;;
+            loc=*)  [ -n "$loc4" ]  || loc4="${_tl#loc=}" ;;
+            colo=*) [ -n "$colo4" ] || colo4="${_tl#colo=}" ;;
+        esac
+    done <<< "$_t4_norm"
 
-    local ip6="" loc6="" colo6=""
-    ip6="$(echo -e "$trace6" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-    loc6="$(echo -e "$trace6" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-    colo6="$(echo -e "$trace6" | grep -E '^colo=' | head -1 | cut -d= -f2)"
+    local ip6="" loc6="" colo6="" _t6_norm="${trace6//\\n/$'\n'}"
+    while IFS= read -r _tl || [ -n "$_tl" ]; do
+        _tl="${_tl%$'\r'}"
+        case "$_tl" in
+            ip=*)   [ -n "$ip6" ]   || ip6="${_tl#ip=}" ;;
+            loc=*)  [ -n "$loc6" ]  || loc6="${_tl#loc=}" ;;
+            colo=*) [ -n "$colo6" ] || colo6="${_tl#colo=}" ;;
+        esac
+    done <<< "$_t6_norm"
 
     echo "-------------------- 宿主机直连出口 (SSH 与直连) --------------------"
     printf "说明            : 宿主机 0 网卡改动，此处的 IP 为宿主机物理真实 IP (保证 SSH 稳定)\n"
@@ -2398,8 +2408,8 @@ xmg_warp_status() {
 
         # 协议族覆盖：隧道承载不了的那一族是否已回退直连
         local _tv4="" _tv6="" _tfam="" _sfb=""
-        _tv4="$(grep -o '"address_v4"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
-        _tv6="$(grep -o '"address_v6"[[:space:]]*:[[:space:]]*"[^"]*"' "$XMG_WARP_ACCOUNT_FILE" 2>/dev/null | head -1 | cut -d'"' -f4)"
+        _tv4="$(_xmg_warp_json_val "$_st_acc_raw" "address_v4")"
+        _tv6="$(_xmg_warp_json_val "$_st_acc_raw" "address_v6")"
         _tfam="$(_xmg_warp_tunnel_family "$_tv4" "$_tv6")"
         local _sonly=""
         _sonly="$(_xmg_warp_tunnel_only_cidr "$_tfam" "${XMG_NET_IPV4:-1}" "${XMG_NET_IPV6:-0}")"
@@ -2421,11 +2431,16 @@ xmg_warp_status() {
             local _px_trace=""
             _px_trace="$(curl -x "$_px_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
             if [ -n "$_px_trace" ]; then
-                local _px_ip="" _px_loc="" _px_colo="" _px_warp=""
-                _px_ip="$(printf '%s\n' "$_px_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-                _px_loc="$(printf '%s\n' "$_px_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-                _px_colo="$(printf '%s\n' "$_px_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
-                _px_warp="$(printf '%s\n' "$_px_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+                local _px_ip="" _px_loc="" _px_colo="" _px_warp="" _ptl=""
+                while IFS= read -r _ptl || [ -n "$_ptl" ]; do
+                    _ptl="${_ptl%$'\r'}"
+                    case "$_ptl" in
+                        ip=*)   [ -n "$_px_ip" ]   || _px_ip="${_ptl#ip=}" ;;
+                        loc=*)  [ -n "$_px_loc" ]  || _px_loc="${_ptl#loc=}" ;;
+                        colo=*) [ -n "$_px_colo" ] || _px_colo="${_ptl#colo=}" ;;
+                        warp=*) [ -n "$_px_warp" ] || _px_warp="${_ptl#warp=}" ;;
+                    esac
+                done <<< "$_px_trace"
                 printf "代理实测出口    : %s (%s, 机房: %s, warp=%s)\n" "${_px_ip:-未知}" "${_px_loc:-未知}" "${_px_colo:-未知}" "${_px_warp:-off}"
             else
                 printf "代理实测出口    : 探测超时（请确认 Xray 运行状态与 WARP 握手）\n"
@@ -2490,7 +2505,15 @@ xmg_warp_geo_cmd() {
             if _xmg_warp_geo_download "$f" && xmg_warp_geo_available; then
                 rm -f "${XMG_WARP_GEO_FAIL_MARK:-${XMG_WARP_DIR}/.geodata_failed}" 2>/dev/null || true
                 xmg_info "地理数据已更新 ($(( $(_xmg_warp_geo_size "$f") / 1024 )) KB)"
-                xmg_warn "规则未变，重启 Xray 后新数据才会被加载: xmg xray restart"
+                if [ "${XMG_PROXY_NO_RELOAD:-0}" != "1" ] && _warp_can_manage_service; then
+                    if _warp_restart_xray >/dev/null 2>&1; then
+                        xmg_info "已自动重启 Xray 服务使新地理数据立即生效"
+                    else
+                        xmg_warn "自动重启 Xray 失败，请执行: xmg xray restart"
+                    fi
+                else
+                    xmg_warn "规则未变，重启 Xray 后新数据才会被加载: xmg xray restart"
+                fi
                 return 0
             fi
             xmg_error "地理数据更新失败（网络不可达或产物异常）"
@@ -2502,7 +2525,15 @@ xmg_warp_geo_cmd() {
             if [ -f "$f" ]; then
                 rm -f "$f" 2>/dev/null || true
                 xmg_info "已删除地理数据文件: $f"
-                xmg_warn "分流将回退为硬编码域名，重启 Xray 后生效"
+                if [ "${XMG_TEST_MODE:-0}" != "1" ] && [ "${XMG_PROXY_NO_RELOAD:-0}" != "1" ] && _warp_can_manage_service; then
+                    if _warp_restart_xray >/dev/null 2>&1; then
+                        xmg_info "已自动重启 Xray 服务，分流已切换为纯硬编码域名"
+                    else
+                        xmg_warn "分流将回退为硬编码域名，请执行 xmg xray restart 生效"
+                    fi
+                else
+                    xmg_warn "分流将回退为硬编码域名，重启 Xray 后生效"
+                fi
             else
                 xmg_info "地理数据文件不存在，无需清理"
             fi
@@ -2546,7 +2577,7 @@ _xmg_warp_start_ephemeral_socks() {
     [ -n "$xray_bin" ] && [ -x "$xray_bin" ] || return 1
 
     local tdir="" tport=""
-    tdir="$(mktemp -d 2>/dev/null || echo "/tmp/xmg_warp_eph_$$")"
+    tdir="$(mktemp -d 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.eph_$$_$RANDOM")"
     mkdir -p "$tdir" 2>/dev/null || return 1
 
     if command -v python3 >/dev/null 2>&1; then
@@ -2755,7 +2786,7 @@ xmg_warp_test_unlock() {
     # 4. Google 搜索验证码防风控
     printf "测试 Google 搜索风控状态    : "
     local g_tmp="" g_code="" g_res=""
-    g_tmp="$(mktemp 2>/dev/null || echo "/tmp/xmg_g_$$.html")"
+    g_tmp="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.g_$$_$RANDOM.html")"
     g_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o "$g_tmp" -w "%{http_code}" "https://www.google.com/search?q=test" 2>/dev/null || echo "000")"
     g_res="$(cat "$g_tmp" 2>/dev/null || true)"
     rm -f "$g_tmp" 2>/dev/null || true

@@ -249,6 +249,7 @@ xmg_uninstall_cleanup_tune_artifacts() {
     for f in "${files[@]}"; do
         if [ -f "$f" ]; then
             rm -f "$f" 2>/dev/null && xmg_info "已清理调优文件: $f" || true
+            rmdir "$(dirname "$f")" 2>/dev/null || true
         fi
     done
 

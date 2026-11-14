@@ -41,10 +41,12 @@ fi
 XMG_HOME="${XMG_HOME:-/opt/xmg}"
 XMG_LIB_DIR="${XMG_LIB_DIR:-$XMG_HOME/lib}"
 
-# 自动发现到的模块列表
+# 自动发现到的模块列表（含进程内缓存标志，避免主菜单每次重绘重复扫描 20 个模块文件）
 XMG_MENU_FILES=()
 XMG_MENU_FUNCS=()
 XMG_MENU_LABELS=()
+XMG_MENU_DISCOVERED=0
+_XMG_MENU_CACHE_KEY=""
 
 xmg_menu_source_module() {
     local file="$1"
@@ -173,11 +175,54 @@ xmg_menu_module_seen() {
     return 1
 }
 
+# 单遍零 Fork 扫描模块文件：一次遍历同时提取 # XMG_MENU_LABEL 与 xmg_*_menu 函数名
+_XMG_SCAN_LABEL=""
+_XMG_SCAN_FN=""
+_xmg_menu_scan_module() {
+    local path="$1"
+    local line="" lno=0
+    _XMG_SCAN_LABEL=""
+    _XMG_SCAN_FN=""
+    [ -r "$path" ] || return 1
+
+    while IFS= read -r line; do
+        lno=$((lno + 1))
+        if [ -z "$_XMG_SCAN_LABEL" ] && [ "$lno" -le 60 ]; then
+            if [[ "$line" =~ ^[[:space:]]*\#[[:space:]]*XMG_MENU_LABEL:[[:space:]]*(.+)$ ]]; then
+                local lbl="${BASH_REMATCH[1]}"
+                lbl="${lbl#"${lbl%%[![:space:]]*}"}"
+                lbl="${lbl%"${lbl##*[![:space:]]}"}"
+                _XMG_SCAN_LABEL="$lbl"
+            fi
+            # 前 60 行还未找到自声明标签则直接判定非顶层菜单模块，无需扫描后续数千行代码
+            if [ "$lno" -eq 60 ] && [ -z "$_XMG_SCAN_LABEL" ]; then
+                return 1
+            fi
+        fi
+
+        case "$line" in
+            ''|[[:space:]]'#'*|'#'*) continue ;;
+        esac
+
+        if [ -z "$_XMG_SCAN_FN" ]; then
+            if [[ "$line" =~ ^[[:space:]]*(xmg_[A-Za-z0-9_]+_menu)[[:space:]]*\(\)[[:space:]]*\{ ]]; then
+                _XMG_SCAN_FN="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^[[:space:]]*function[[:space:]]+(xmg_[A-Za-z0-9_]+_menu)[[:space:]]*(\(\))?[[:space:]]*(\{|$) ]]; then
+                _XMG_SCAN_FN="${BASH_REMATCH[1]}"
+            fi
+        fi
+
+        if [ -n "$_XMG_SCAN_LABEL" ] && [ -n "$_XMG_SCAN_FN" ]; then
+            return 0
+        fi
+    done < "$path"
+
+    [ -n "$_XMG_SCAN_LABEL" ] && [ -n "$_XMG_SCAN_FN" ]
+}
+
 xmg_menu_add_module_if_valid() {
     local file="$1"
     local path="$XMG_LIB_DIR/$file"
-    local fn=""
-    local label=""
 
     # 核心支撑模块不作为菜单项出现
     xmg_menu_is_core_file "$file" && return 0
@@ -188,25 +233,26 @@ xmg_menu_add_module_if_valid() {
     # 不可读文件直接跳过
     [ -r "$path" ] || return 0
 
-    # 没有自声明标签的模块不被列为顶层功能模块
-    if ! label="$(xmg_menu_label_for_file "$file")" || [ -z "$label" ]; then
-        return 0
-    fi
-
-    # 没有 xmg_xxx_menu 函数定义的模块直接跳过
-    if ! fn="$(xmg_menu_find_menu_func "$path")"; then
+    # 单遍零 Fork 扫描标签与入口函数
+    if ! _xmg_menu_scan_module "$path"; then
         return 0
     fi
 
     XMG_MENU_FILES+=("$file")
-    XMG_MENU_FUNCS+=("$fn")
-    XMG_MENU_LABELS+=("$label")
+    XMG_MENU_FUNCS+=("$_XMG_SCAN_FN")
+    XMG_MENU_LABELS+=("$_XMG_SCAN_LABEL")
 }
 
 xmg_menu_discover_modules() {
+    local force="${1:-}"
     local path=""
     local file=""
     local manifest="${XMG_HOME}/xmg.files"
+    local ckey="${XMG_HOME}|${XMG_LIB_DIR}"
+
+    if [ "$force" != "force" ] && [ "${XMG_MENU_DISCOVERED:-0}" = "1" ] && [ "$_XMG_MENU_CACHE_KEY" = "$ckey" ] && [ "${#XMG_MENU_FILES[@]}" -gt 0 ]; then
+        return 0
+    fi
 
     XMG_MENU_FILES=()
     XMG_MENU_FUNCS=()
@@ -239,6 +285,9 @@ xmg_menu_discover_modules() {
         file="${path##*/}"
         xmg_menu_add_module_if_valid "$file"
     done
+
+    XMG_MENU_DISCOVERED=1
+    _XMG_MENU_CACHE_KEY="$ckey"
 }
 
 # 按需加载某个模块并校验入口函数

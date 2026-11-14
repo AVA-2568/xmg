@@ -114,7 +114,7 @@ xmg_ssh_supports_include() {
     grep -qiE '^[[:space:]]*Include[[:space:]]+' "$XMG_SSH_CONFIG" 2>/dev/null
 }
 
-# 备份文件到 $XMG_BACKUP_DIR/ssh/
+# 备份文件到 $XMG_BACKUP_DIR/ssh/（自动按 XMG_BACKUP_KEEP 轮转清理旧备份）
 xmg_ssh_backup_file() {
     local file="$1"
     local dir="${XMG_BACKUP_DIR:-${XMG_HOME:-/opt/xmg}/backups}/ssh"
@@ -122,7 +122,34 @@ xmg_ssh_backup_file() {
     [ -e "$file" ] || return 0
 
     mkdir -p "$dir" 2>/dev/null || return 1
-    cp -a -- "$file" "$dir/$(basename "$file").$(date '+%Y%m%d-%H%M%S').bak"
+    local bname="${file##*/}"
+    local base_bak="$dir/${bname}.$(date '+%Y%m%d-%H%M%S').$$"
+    local _seq=0
+    local bak_file="${base_bak}_0.bak"
+    while [ -e "$bak_file" ]; do
+        _seq=$((_seq + 1))
+        bak_file="${base_bak}_${_seq}.bak"
+    done
+    cp -a -- "$file" "$bak_file" || return 1
+
+    local keep="${XMG_BACKUP_KEEP:-5}"
+    case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+    if [ "$keep" -gt 0 ]; then
+        local -a baks=()
+        local _f=""
+        for _f in "$dir/${bname}".*.bak; do
+            [ -f "$_f" ] && baks+=("$_f")
+        done
+        local total="${#baks[@]}"
+        if [ "$total" -gt "$keep" ]; then
+            local del_cnt=$((total - keep)) idx=0
+            while [ "$idx" -lt "$del_cnt" ]; do
+                rm -f "${baks[$idx]}" 2>/dev/null || true
+                idx=$((idx + 1))
+            done
+        fi
+    fi
+    return 0
 }
 
 # 按 sshd 语义在配置树里查找键值：主配置顺序读，Include 在出现位置就地展开，
@@ -624,6 +651,21 @@ xmg_ssh_change_port() {
     fi
 
     rm -f "$bak_dropin" "$bak_main" 2>/dev/null || true
+
+    # 若已部署 XMG 的 fail2ban sshd 规则，自动同步监控端口并重载，避免改端口后防爆破失效
+    if [ -f "${XMG_SSH_F2B_JAIL_CONF:-/etc/fail2ban/jail.d/xmg-sshd.conf}" ]; then
+        local _f2b_tmp="${XMG_SSH_F2B_JAIL_CONF}.tmp.$$"
+        if sed "s/^port = .*/port = ssh,${port}/" "$XMG_SSH_F2B_JAIL_CONF" > "$_f2b_tmp" 2>/dev/null && [ -s "$_f2b_tmp" ]; then
+            cat "$_f2b_tmp" > "$XMG_SSH_F2B_JAIL_CONF" 2>/dev/null || true
+            rm -f "$_f2b_tmp" 2>/dev/null || true
+            if xmg_cmd_exists fail2ban-client; then
+                fail2ban-client reload sshd >/dev/null 2>&1 || fail2ban-client reload >/dev/null 2>&1 || true
+            fi
+            xmg_info "已同步更新 fail2ban 监控端口: ssh,$port"
+        else
+            rm -f "$_f2b_tmp" 2>/dev/null || true
+        fi
+    fi
 
     echo
     if [ "$lrc" -eq 2 ]; then

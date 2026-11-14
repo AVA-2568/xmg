@@ -304,6 +304,26 @@ xmg_update_apply_atomic() {
     # 刷新 xmg.files 清单
     xmg_update_refresh_manifest "$XMG_HOME"
 
+    # 7. 自动清理过期的 update_* 备份目录（默认保留最近 XMG_BACKUP_KEEP=5 份，防小盘机撑爆）
+    local keep="${XMG_BACKUP_KEEP:-5}"
+    case "$keep" in ''|*[!0-9]*) keep=5 ;; esac
+    if [ "$keep" -gt 0 ] && [ -d "$XMG_BACKUP_DIR" ]; then
+        local -a all_baks=()
+        local _b=""
+        for _b in "$XMG_BACKUP_DIR"/update_*; do
+            [ -d "$_b" ] && all_baks+=("$_b")
+        done
+        local total_baks="${#all_baks[@]}"
+        if [ "$total_baks" -gt "$keep" ]; then
+            local del_cnt=$((total_baks - keep))
+            local idx=0
+            while [ "$idx" -lt "$del_cnt" ]; do
+                rm -rf "${all_baks[$idx]}" 2>/dev/null || true
+                idx=$((idx + 1))
+            done
+        fi
+    fi
+
     xmg_info "原子更新与清单同步成功！"
     return 0
 }
@@ -335,21 +355,20 @@ xmg_update_pull_impl() {
         xmg_info "从 GitHub 拉取更新 (分支: $branch)"
         xmg_info "仓库: $repo_url"
 
-        if ! command -v git &>/dev/null; then
-            xmg_warn "git 不存在，尝试安装"
-            if [ "$(xmg_pkg_mgr)" != "none" ]; then
-                xmg_pkg_install git || xmg_die "安装 git 失败"
-            else
-                xmg_die "无法安装 git，请手动安装"
-            fi
-        fi
-
         tmp_dir="$(mktemp -d)" || xmg_die "创建临时目录失败"
         trap 'rm -rf "$tmp_dir"' EXIT
 
-        # 克隆仓库
-        if ! git clone --depth 1 -b "$branch" "$repo_url" "$tmp_dir" 2>/dev/null; then
-            xmg_warn "git clone 失败，尝试使用 curl/wget 下载压缩包"
+        # 优先仅在本机已装有 git 时尝试浅克隆；绝不在更新路径强装重量级 git 包（保护 215MB 低配机型）
+        local cloned=0
+        if command -v git >/dev/null 2>&1; then
+            if git clone --depth 1 -b "$branch" "$repo_url" "$tmp_dir" 2>/dev/null; then
+                cloned=1
+            else
+                xmg_warn "git clone 失败，切换为 curl/wget 下载轻量源码包"
+            fi
+        fi
+
+        if [ "$cloned" -ne 1 ]; then
             archive_url="https://github.com/$XMG_UPDATE_REPO/archive/refs/heads/$branch.tar.gz"
 
             rm -rf "$tmp_dir"
@@ -359,6 +378,7 @@ xmg_update_pull_impl() {
             local urls=(
                 "$archive_url"
                 "https://ghfast.top/$archive_url"
+                "https://mirror.ghproxy.com/$archive_url"
             )
 
             for u in "${urls[@]}"; do
@@ -515,27 +535,52 @@ xmg_update_run() {
     # 用新进程执行：当前 shell 里 source 的还是旧函数，不能就地渲染。
     local _state_f="${XMG_STATE_FILE:-${XMG_ETC_DIR:-$XMG_HOME/etc}/xray/state.env}"
     local _warp_env="${XMG_WARP_ENV_FILE:-$XMG_HOME/warp/warp.env}"
-    local _warp_on="" _warp_mode="" _warp_geo=""
+    local _warp_on="" _warp_mode="" _warp_geo="" _k="" _v=""
     if [ -f "$_state_f" ]; then
-        _warp_on="$(sed -n 's/^WARP_ENABLED=//p' "$_state_f" 2>/dev/null | tail -1 | tr -d '" ')"
-        _warp_mode="$(sed -n 's/^WARP_MODE=//p' "$_state_f" 2>/dev/null | tail -1 | tr -d '" ')"
-        _warp_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$_state_f" 2>/dev/null | tail -1 | tr -d '" ')"
+        while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+            _v="${_v%$'\r'}"
+            _v="${_v//\"/}"
+            _v="${_v//[[:space:]]/}"
+            case "$_k" in
+                WARP_ENABLED)  _warp_on="$_v" ;;
+                WARP_MODE)     _warp_mode="$_v" ;;
+                WARP_GEO_MODE) _warp_geo="$_v" ;;
+            esac
+        done < "$_state_f"
     fi
-    if [ -z "$_warp_on" ] && [ -f "$_warp_env" ]; then
-        _warp_on="$(sed -n 's/^WARP_ENABLED=//p' "$_warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
-    fi
-    if [ -z "$_warp_mode" ] && [ -f "$_warp_env" ]; then
-        _warp_mode="$(sed -n 's/^WARP_MODE=//p' "$_warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
-    fi
-    if [ -z "$_warp_geo" ] && [ -f "$_warp_env" ]; then
-        _warp_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$_warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    if [ -f "$_warp_env" ]; then
+        while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+            _v="${_v%$'\r'}"
+            _v="${_v//\"/}"
+            _v="${_v//[[:space:]]/}"
+            case "$_k" in
+                WARP_ENABLED)  [ -n "$_warp_on" ]   || _warp_on="$_v" ;;
+                WARP_MODE)     [ -n "$_warp_mode" ] || _warp_mode="$_v" ;;
+                WARP_GEO_MODE) [ -n "$_warp_geo" ]  || _warp_geo="$_v" ;;
+            esac
+        done < "$_warp_env"
     fi
     case "$_warp_mode" in
         global|routing) ;;
         *) _warp_mode="global" ;;
     esac
 
-    # 第 2 步：全量重渲染配置（暂不重启，待下文统一重启一次核心）
+    # 严格遵循 Update -> Sync/Render (NO_RELOAD) -> Single Restart 管线顺序：
+    # 1. 若启用了 WARP，先在 XMG_PROXY_NO_RELOAD=1 下同步 WARP 状态与配置（不重启）
+    if [ "$_warp_on" = "1" ] && [ -x "${XMG_BIN:-}" ]; then
+        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，正在同步最新 WARP 状态与分流规则..."
+        local _warp_args=(warp enable "$_warp_mode")
+        if [ "$_warp_mode" = "routing" ] && [ -n "$_warp_geo" ]; then
+            _warp_args+=(--geo "$_warp_geo")
+        fi
+        if XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" "${_warp_args[@]}"; then
+            xmg_info "WARP 状态与分流规则已同步"
+        else
+            xmg_warn "自动同步 WARP 失败，请手动执行: xmg warp enable $_warp_mode"
+        fi
+    fi
+
+    # 2. 若存在托管状态文件，按新版本全量重渲染 Proxy + WARP 配置并刷新 systemd drop-in（不重启）
     if [ -x "${XMG_BIN:-}" ] && [ -f "$_state_f" ]; then
         xmg_info "检测到已有托管状态，用新版本全量重渲染配置..."
         if XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply; then
@@ -545,19 +590,8 @@ xmg_update_run() {
         fi
     fi
 
-    # 第 3 步：应用 WARP（若启用）并单次硬重启核心使新配置与参数 100% 生效
-    if [ "$_warp_on" = "1" ] && [ -x "${XMG_BIN:-}" ]; then
-        xmg_info "检测到 WARP 已启用 (模式: $_warp_mode)，用新版本重新应用并重启核心..."
-        local _warp_args=(warp enable "$_warp_mode")
-        if [ "$_warp_mode" = "routing" ] && [ -n "$_warp_geo" ]; then
-            _warp_args+=(--geo "$_warp_geo")
-        fi
-        if "$XMG_BIN" "${_warp_args[@]}"; then
-            xmg_info "WARP 配置已刷新且 Xray 核心已重启"
-        else
-            xmg_warn "自动刷新 WARP 失败，请手动执行: xmg warp enable $_warp_mode"
-        fi
-    elif [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ]; then
+    # 3. 统一执行单次硬重启核心，使新渲染的配置与服务参数 100% 生效
+    if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ] || [ -f "$_state_f" ] || [ "$_warp_on" = "1" ]; then
         if [ -x "${XMG_BIN:-}" ]; then
             xmg_info "正在重启 Xray 核心以加载最新配置与参数..."
             if "$XMG_BIN" xray restart; then
@@ -655,10 +689,11 @@ xmg_update_rollback() {
         chmod 0644 "$XMG_HOME/lib"/*.sh 2>/dev/null || true
     fi
 
-    # 3. 回滚 templates 目录
+    # 3. 回滚 templates 目录并同步至 etc/xray
     if [ -d "$backup_dir/templates" ]; then
-        mkdir -p "$XMG_HOME/templates"
+        mkdir -p "$XMG_HOME/templates" "$XMG_ETC_DIR/xray"
         cp -r "$backup_dir/templates"/* "$XMG_HOME/templates/" 2>/dev/null || true
+        cp -r "$backup_dir/templates"/* "$XMG_ETC_DIR/xray/" 2>/dev/null || true
     fi
 
     # 4. 回滚 xmg.files 清单
@@ -670,6 +705,13 @@ xmg_update_rollback() {
     # 5. 重建命令入口软链接
     mkdir -p "$(dirname "$XMG_LINK")" 2>/dev/null || true
     ln -sf "$XMG_BIN" "$XMG_LINK" 2>/dev/null || true
+
+    # 6. 用回滚后的版本重渲染配置并重启核心（测试模式或无状态文件时跳过）
+    local _rb_state="${XMG_STATE_FILE:-${XMG_ETC_DIR:-$XMG_HOME/etc}/xray/state.env}"
+    if [ "${XMG_TEST_MODE:-0}" != "1" ] && [ -x "${XMG_BIN:-}" ] && [ -f "$_rb_state" ]; then
+        XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply >/dev/null 2>&1 || true
+        "$XMG_BIN" xray restart >/dev/null 2>&1 || true
+    fi
 
     xmg_info "回滚完成"
     return 0

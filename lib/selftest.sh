@@ -94,18 +94,26 @@ _st_section() {
     printf '\n[%s]\n' "$*"
 }
 
-# 端口是否处于 LISTEN（不依赖 ss/netstat）
+# 端口是否处于 LISTEN（纯 Bash 精确校验本地地址列与 0A LISTEN 状态，零 fork 且防 TIME_WAIT/远端端口误判）
 _st_port_listening() {
     local port="$1"
-    local hex=""
+    local hex="" file="" sl="" addr="" rem="" state="" rest="" lport=""
 
     case "$port" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    hex="$(printf '%04X' "$port" 2>/dev/null)" || return 1
+    printf -v hex '%04X' "$port" 2>/dev/null || return 1
 
-    grep -qi ":${hex} " /proc/net/tcp 2>/dev/null && return 0
-    grep -qi ":${hex} " /proc/net/tcp6 2>/dev/null && return 0
+    for file in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$file" ] || continue
+        while read -r sl addr rem state rest; do
+            [ "$state" = "0A" ] || continue
+            lport="${addr##*:}"
+            if [ "${lport^^}" = "$hex" ]; then
+                return 0
+            fi
+        done < "$file"
+    done
     return 1
 }
 
@@ -118,8 +126,13 @@ _st_check_env() {
     local id="" like="" family=""
     local rel="${XMG_OS_RELEASE_FILE:-/etc/os-release}"
     if [ -r "$rel" ]; then
-        id="$(sed -n 's/^ID=//p' "$rel" 2>/dev/null | head -1 | tr -d '"'\''\r')"
-        like="$(sed -n 's/^ID_LIKE=//p' "$rel" 2>/dev/null | head -1 | tr -d '"'\''\r')"
+        local _rl=""
+        while IFS= read -r _rl || [ -n "$_rl" ]; do
+            case "$_rl" in
+                ID=*)      id="${_rl#ID=}"; id="${id//\"/}"; id="${id//\x27/}"; id="${id//$''/}" ;;
+                ID_LIKE=*) like="${_rl#ID_LIKE=}"; like="${like//\"/}"; like="${like//\x27/}"; like="${like//$''/}" ;;
+            esac
+        done < "$rel"
     elif [ -r "${XMG_ALPINE_RELEASE_FILE:-/etc/alpine-release}" ]; then
         # 极简 Alpine 镜像可能没有完整 os-release，与 os.sh 用同一回退口径
         id="alpine"
@@ -393,12 +406,30 @@ _st_check_firewall() {
     fi
 
     if [ "$backend" = "ufw" ]; then
-        if ufw status 2>/dev/null | grep -q 'Status: active'; then
+        local ufw_st=""
+        ufw_st="$(ufw status 2>/dev/null || true)"
+        if [[ "$ufw_st" == *"Status: active"* ]]; then
             _st_pass "UFW 已启用"
-            if ufw status 2>/dev/null | grep -q '22/tcp'; then
-                _st_pass "SSH 端口已放行"
+            local ssh_p="22"
+            if declare -F xmg_ssh_get_port >/dev/null 2>&1; then
+                ssh_p="$(xmg_ssh_get_port 2>/dev/null || echo 22)"
+            elif [ -r "${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}" ]; then
+                local _sl="" _sk="" _sv=""
+                while IFS= read -r _sl || [ -n "$_sl" ]; do
+                    _sl="${_sl#"${_sl%%[![:space:]]*}"}"
+                    case "$_sl" in ''|'#'*) continue ;; esac
+                    _sk="${_sl%%[[:space:]]*}"
+                    if [ "${_sk,,}" = "port" ]; then
+                        _sv="${_sl#*[[:space:]]}"
+                        _sv="${_sv%%[[:space:]]*}"
+                        case "$_sv" in ''|*[!0-9]*) ;; *) ssh_p="$_sv"; break ;; esac
+                    fi
+                done < "${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}"
+            fi
+            if [[ "$ufw_st" == *"${ssh_p}/tcp"* ]] || [[ "$ufw_st" == *"22/tcp"* ]]; then
+                _st_pass "SSH 端口已放行 (${ssh_p}/tcp)"
             else
-                _st_warn "未见 22/tcp 放行规则（若 SSH 使用其他端口请确认已放行）"
+                _st_warn "未见 ${ssh_p}/tcp 放行规则（请确认当前 SSH 端口已放行）"
             fi
         else
             _st_warn "UFW 未启用"

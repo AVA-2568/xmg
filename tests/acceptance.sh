@@ -19,6 +19,7 @@
 #   - 缺外网或缺能力时输出 SKIP，不计入失败
 #
 
+unset BASH_ENV ENV 2>/dev/null || true
 set -uo pipefail
 
 SKIP_CORE=0

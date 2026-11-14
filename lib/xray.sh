@@ -418,6 +418,7 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 Environment="GOMEMLIMIT=$(xmg_xray_gomemlimit)"
+Environment="GOGC=$(xmg_xray_gogc)"
 Environment="GODEBUG=madvdontneed=1"
 Environment="GOMAXPROCS=$(xmg_xray_gomaxprocs)"
 ExecStart=$xray_bin run -config ${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}
@@ -435,10 +436,10 @@ EOF_UNIT
             xray_unit="${sys_dir}/xray.service"
             unit_found=1
             xmg_info "已成功自愈生成 Xray systemd unit: $xray_unit"
+        else
+            xmg_warn "未找到 Xray 可执行程序与 systemd unit，跳过自动配置"
+            return 1
         fi
-
-        xmg_warn "未找到 Xray 可执行程序与 systemd unit，跳过自动配置"
-        return 1
     fi
 
     xmg_info "检测到 Xray systemd unit: $xray_unit"

@@ -192,12 +192,12 @@ xmg_read_mem() {
     local cg_used_bytes=""
     local is_cgroup=0
 
-    # 1. 尝试 Cgroup v2
+    # 1. 尝试 Cgroup v2（纯 Bash read 零 fork）
     if [ -r "$cg_max_file" ]; then
-        cg_limit_bytes="$(cat "$cg_max_file" 2>/dev/null || true)"
+        IFS= read -r cg_limit_bytes < "$cg_max_file" 2>/dev/null || true
         if [ -n "$cg_limit_bytes" ] && [ "$cg_limit_bytes" != "max" ] && [[ "$cg_limit_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_limit_bytes}" -le 15 ]; then
             if [ -r "$cg_curr_file" ]; then
-                cg_used_bytes="$(cat "$cg_curr_file" 2>/dev/null || true)"
+                IFS= read -r cg_used_bytes < "$cg_curr_file" 2>/dev/null || true
                 if [ -n "$cg_used_bytes" ] && [[ "$cg_used_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_used_bytes}" -le 15 ]; then
                     is_cgroup=1
                 fi
@@ -205,12 +205,12 @@ xmg_read_mem() {
         fi
     fi
 
-    # 2. 尝试 Cgroup v1
+    # 2. 尝试 Cgroup v1（纯 Bash read 零 fork）
     if [ "$is_cgroup" -eq 0 ] && [ -r "$cg_v1_limit" ]; then
-        cg_limit_bytes="$(cat "$cg_v1_limit" 2>/dev/null || true)"
+        IFS= read -r cg_limit_bytes < "$cg_v1_limit" 2>/dev/null || true
         if [ -n "$cg_limit_bytes" ] && [[ "$cg_limit_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_limit_bytes}" -le 15 ]; then
             if [ -r "$cg_v1_usage" ]; then
-                cg_used_bytes="$(cat "$cg_v1_usage" 2>/dev/null || true)"
+                IFS= read -r cg_used_bytes < "$cg_v1_usage" 2>/dev/null || true
                 if [ -n "$cg_used_bytes" ] && [[ "$cg_used_bytes" =~ ^[0-9]+$ ]] && [ "${#cg_used_bytes}" -le 15 ]; then
                     is_cgroup=1
                 fi
@@ -362,12 +362,33 @@ xmg_port_status() {
     fi
 }
 
+# 单遍扫描 /proc/net/tcp{,6} 同时更新 22/80/443 端口监听状态（零子进程 fork）
+_xmg_system_refresh_ports_fast() {
+    XMG_STATUS_PORT_22="closed"
+    XMG_STATUS_PORT_80="closed"
+    XMG_STATUS_PORT_443="closed"
+
+    local file="" sl="" addr="" rem="" state="" rest="" lport=""
+    for file in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$file" ] || continue
+        while read -r sl addr rem state rest; do
+            [ "$state" = "0A" ] || continue
+            lport="${addr##*:}"
+            case "$lport" in
+                0016) XMG_STATUS_PORT_22="listen" ;;
+                0050) XMG_STATUS_PORT_80="listen" ;;
+                01BB|01bb) XMG_STATUS_PORT_443="listen" ;;
+            esac
+        done < "$file"
+    done
+}
+
 xmg_system_refresh_basic() {
     local force="${1:-}"
     local now=0
     local mem_result=""
 
-    now="$(xmg_now_s)"
+    printf -v now '%(%s)T' -1 2>/dev/null || now="$(xmg_now_s)"
 
     if [ "$force" != "force" ] && [ $((now - XMG_CACHE_TS)) -lt "$XMG_CACHE_TTL" ]; then
         return 0
@@ -375,7 +396,7 @@ xmg_system_refresh_basic() {
 
     XMG_CACHE_TS="$now"
 
-    XMG_STATUS_TIME="$(xmg_read_time)"
+    printf -v XMG_STATUS_TIME '%(%Y-%m-%d %H:%M:%S)T' -1 2>/dev/null || XMG_STATUS_TIME="$(xmg_read_time)"
     XMG_STATUS_HOSTNAME="$(xmg_read_hostname)"
     XMG_STATUS_KERNEL="$(xmg_read_kernel)"
     XMG_STATUS_UPTIME="$(xmg_read_uptime)"
@@ -387,9 +408,7 @@ xmg_system_refresh_basic() {
 
     XMG_STATUS_DISK_ROOT="$(xmg_read_disk_root)"
 
-    XMG_STATUS_PORT_22="$(xmg_port_status 22)"
-    XMG_STATUS_PORT_80="$(xmg_port_status 80)"
-    XMG_STATUS_PORT_443="$(xmg_port_status 443)"
+    _xmg_system_refresh_ports_fast
 }
 
 xmg_system_refresh_services() {

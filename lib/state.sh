@@ -752,7 +752,23 @@ xmg_state_validate() {
         fi
 
         _state_val rsni PROXY_REALITY_SNI
-        if [[ ! "$rsni" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+        if [ -z "$rsni" ]; then
+            xmg_error "REALITY serverName 不能为空"
+            return 2
+        fi
+        local _sni_item="" _sni_valid=0
+        local -a _sni_arr=()
+        IFS=',' read -r -a _sni_arr <<< "$rsni"
+        for _sni_item in "${_sni_arr[@]}"; do
+            _sni_item="${_sni_item#"${_sni_item%%[![:space:]]*}"}"
+            _sni_item="${_sni_item%"${_sni_item##*[![:space:]]}"}"
+            if [ -z "$_sni_item" ] || [[ ! "$_sni_item" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                xmg_error "REALITY serverName 格式非法: '$rsni'"
+                return 2
+            fi
+            _sni_valid=$((_sni_valid + 1))
+        done
+        if [ "$_sni_valid" -eq 0 ]; then
             xmg_error "REALITY serverName 格式非法: '$rsni'"
             return 2
         fi
@@ -1220,7 +1236,9 @@ xmg_state_commit() {
 
     # 5.1 自动同步服务配置路径与双重兜底
     if xmg_svc_supported; then
-        if declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
+        if declare -F xmg_xray_patch_systemd_unit >/dev/null 2>&1; then
+            xmg_xray_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
+        elif declare -F xmg_core_patch_systemd_unit >/dev/null 2>&1; then
             xmg_core_patch_systemd_unit "$XMG_XRAY_CONFIG" >/dev/null 2>&1 || true
         fi
         if [ "$XMG_XRAY_CONFIG" != "/usr/local/etc/xray/config.json" ]; then

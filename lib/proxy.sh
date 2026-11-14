@@ -150,6 +150,40 @@ _xmg_onoff() {
     return 0
 }
 
+# ===== UUID 生成器（VLESS / REALITY 共用唯一真源）=====
+# 优先级：1. xray uuid -> 2. /proc/sys/kernel/random/uuid -> 3. openssl rand -> 4. 纯 Bash v4 兜底
+xmg_proxy_gen_uuid() {
+    local u="" _xbin=""
+    if declare -F xmg_xray_binary >/dev/null 2>&1; then
+        _xbin="$(xmg_xray_binary 2>/dev/null || true)"
+    fi
+    if [ -n "$_xbin" ] && [ -x "$_xbin" ]; then
+        u="$("$_xbin" uuid 2>/dev/null || true)"
+        u="${u%%$'\n'*}"
+        u="${u//$''/}"
+        u="${u//[[:space:]]/}"
+    fi
+    if [ -z "$u" ] && [ -r /proc/sys/kernel/random/uuid ]; then
+        IFS= read -r u < /proc/sys/kernel/random/uuid 2>/dev/null || true
+        u="${u//$''/}"
+        u="${u//[[:space:]]/}"
+    fi
+    if [ -z "$u" ] && command -v openssl >/dev/null 2>&1; then
+        local hex=""
+        hex="$(openssl rand -hex 16 2>/dev/null || true)"
+        hex="${hex//[[:space:]]/}"
+        if [ "${#hex}" -eq 32 ]; then
+            u="${hex:0:8}-${hex:8:4}-${hex:12:4}-${hex:16:4}-${hex:20:12}"
+        fi
+    fi
+    if [ -z "$u" ]; then
+        printf -v u '%04x%04x-%04x-4%03x-%04x-%04x%04x%04x' \
+            $RANDOM $RANDOM $RANDOM $((RANDOM & 0x0fff)) \
+            $(((RANDOM & 0x3fff) | 0x8000)) $RANDOM $RANDOM $RANDOM
+    fi
+    printf '%s' "$u"
+}
+
 # ===== 事务式草稿 =====
 # apply 先在内存里改 state，schema 校验通过才落盘。
 # 采用 lib/state.sh 提供的暂存与单一事务落盘机制，消除 N+1 写放大。
@@ -254,6 +288,19 @@ xmg_proxy_apply() {
         }
     fi
 
+    # VLESS 自举：启用 VLESS 且未显式提供 UUID 时自动生成，避免 CLI/向导留空直接报错
+    if [ "$(xmg_state_get PROXY_VLESS_ENABLED 0)" = "1" ]; then
+        local _v_uuid=""
+        _v_uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
+        if [ -z "$_v_uuid" ]; then
+            _v_uuid="$(xmg_proxy_gen_uuid 2>/dev/null || true)"
+            if [ -n "$_v_uuid" ]; then
+                _xmg_stage PROXY_VLESS_UUID "$_v_uuid"
+                xmg_info "已自动生成 VLESS UUID: $_v_uuid"
+            fi
+        fi
+    fi
+
     # REALITY 自举：UUID / privateKey / shortId 缺失时自动补齐。
     # 必须在 schema 校验之前完成，否则校验会直接以「不能为空」失败。
     if [ "$(xmg_state_get PROXY_REALITY_ENABLED 0)" = "1" ]; then
@@ -261,20 +308,7 @@ xmg_proxy_apply() {
         r_uuid="$(xmg_state_get PROXY_REALITY_UUID "")"
         [ -n "$r_uuid" ] || r_uuid="$(xmg_state_get PROXY_VLESS_UUID "")"
         if [ -z "$r_uuid" ]; then
-            # 优先让内核生成（xray uuid），保证格式与当前版本一致
-            local _xbin=""
-            if declare -F xmg_xray_binary >/dev/null 2>&1; then
-                _xbin="$(xmg_xray_binary 2>/dev/null || true)"
-            fi
-            if [ -n "$_xbin" ] && [ -x "$_xbin" ]; then
-                r_uuid="$("$_xbin" uuid 2>/dev/null | head -n 1 | tr -d '\r\n' || true)"
-            fi
-            if [ -z "$r_uuid" ] && [ -r /proc/sys/kernel/random/uuid ]; then
-                r_uuid="$(tr -d '\r\n' < /proc/sys/kernel/random/uuid 2>/dev/null || true)"
-            fi
-            if [ -z "$r_uuid" ] && command -v openssl >/dev/null 2>&1; then
-                r_uuid="$(openssl rand -hex 16 2>/dev/null | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/')"
-            fi
+            r_uuid="$(xmg_proxy_gen_uuid 2>/dev/null || true)"
             [ -n "$r_uuid" ] && _uuid_generated=1
         fi
         [ -n "$r_uuid" ] && _xmg_stage PROXY_REALITY_UUID "$r_uuid"
@@ -555,15 +589,23 @@ _xmg_proxy_server_host() {
 
     # 本机只有私网地址：探测出口公网 IP（NAT/OVZ 场景）
     if command -v curl >/dev/null 2>&1; then
-        local trace="" fam=""
+        local trace="" _line=""
         trace="$(curl -4 -sS --connect-timeout 3 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
-        h="$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -n 1)"
+        while IFS= read -r _line; do
+            case "$_line" in
+                ip=*) h="${_line#ip=}"; h="${h%$'\r'}"; break ;;
+            esac
+        done <<< "$trace"
         if _xmg_proxy_ip_is_private "$h"; then
             h=""
         fi
         if [ -z "$h" ] && [ "${XMG_NET_IPV6:-0}" = "1" ]; then
             trace="$(curl -6 -sS --connect-timeout 3 --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
-            h="$(printf '%s\n' "$trace" | sed -n 's/^ip=//p' | head -n 1)"
+            while IFS= read -r _line; do
+                case "$_line" in
+                    ip=*) h="${_line#ip=}"; h="${h%$'\r'}"; break ;;
+                esac
+            done <<< "$trace"
             if _xmg_proxy_ip_is_private "$h"; then
                 h=""
             fi
@@ -825,7 +867,7 @@ xmg_proxy_vless_link() {
     local uuid domain path mode port
     uuid="$(xmg_state_get PROXY_VLESS_UUID)"
     domain="$(xmg_state_get PROXY_VLESS_DOMAIN)"
-    path="$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")"
+    path="$(xmg_state_get PROXY_VLESS_PATH "/")"
     mode="$(xmg_state_get PROXY_VLESS_MODE "auto")"
     port="$(_xmg_proxy_client_port "$(xmg_state_get PROXY_VLESS_PORT "443")" PROXY_VLESS_EXTERNAL_PORT)"
 
@@ -1123,6 +1165,13 @@ xmg_proxy_acme_issue() {
         # xmg_state_commit 提交，否则校验失败时会留下 state 已改、config 未改
         if [ "${XMG_PROXY_TXN:-0}" != "1" ]; then
             xmg_state_commit_draft || return 4
+            if { [ "${XMG_TEST_MODE:-0}" != "1" ] || [ "${XMG_ACME_AUTO_APPLY:-0}" = "1" ]; } \
+                && [ "$(xmg_state_get PROXY_VLESS_ENABLED 0)" = "1" ] \
+                && [ -n "$(xmg_state_get PROXY_VLESS_DOMAIN "")" ]; then
+                xmg_info "ACME 正规证书已就绪: $XMG_ACME_CERT_FILE，正在自动重渲染并应用配置..."
+                xmg_proxy_apply || xmg_warn "自动应用新证书失败，请手动执行: xmg proxy apply"
+                return 0
+            fi
         fi
         xmg_info "ACME 正规证书已就绪: $XMG_ACME_CERT_FILE（执行 apply 后生效）"
         return 0
@@ -1176,6 +1225,14 @@ xmg_proxy_self_sign_cert() {
             # 留下 config 回滚了但 state 已改的幽灵状态。独立调用（菜单）才提交。
             if [ "${XMG_PROXY_TXN:-0}" != "1" ]; then
                 xmg_state_commit_draft || true
+                if { [ "${XMG_TEST_MODE:-0}" != "1" ] || [ "${XMG_ACME_AUTO_APPLY:-0}" = "1" ]; } \
+                    && [ "$(xmg_state_get PROXY_VLESS_ENABLED 0)" = "1" ] \
+                    && [ -n "$(xmg_state_get PROXY_VLESS_DOMAIN "")" ]; then
+                    xmg_info "自签名证书已生成就绪: $cert，正在自动重渲染并应用配置..."
+                    xmg_proxy_apply || xmg_warn "自动应用自签证书失败，请手动执行: xmg proxy apply"
+                    xmg_info "提示：请在 Cloudflare 后台 SSL/TLS 模式选择 Full（完全）"
+                    return 0
+                fi
             fi
             xmg_info "自签名证书已生成就绪: $cert"
             xmg_info "提示：请在 Cloudflare 后台 SSL/TLS 模式选择 Full（完全）"
@@ -1252,11 +1309,17 @@ _xmg_proxy_ip_country() {
         fam_args=(-4)
     fi
 
-    local cc=""
+    local cc="" _t_out="" _t_line=""
     if [ -n "$ip" ]; then
-        cc="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://ipinfo.io/${ip}/country" 2>/dev/null | tr -d '[:space:]' || true)"
+        cc="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://ipinfo.io/${ip}/country" 2>/dev/null || true)"
+        cc="${cc//[[:space:]]/}"
     else
-        cc="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null | sed -n 's/^loc=//p' | head -1 | tr -d '[:space:]' || true)"
+        _t_out="$(curl "${fam_args[@]}" -sSL --connect-timeout 2 --max-time 3 "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null || true)"
+        while IFS= read -r _t_line; do
+            case "$_t_line" in
+                loc=*) cc="${_t_line#loc=}"; cc="${cc//[[:space:]]/}"; break ;;
+            esac
+        done <<< "$_t_out"
     fi
     [[ "$cc" =~ ^[A-Z]{2}$ ]] && printf '%s\n' "$cc"
     return 0
@@ -1503,7 +1566,7 @@ xmg_proxy_menu() {
                 v_domain="$(_xmg_read "域名(用于SNI/CDN回源)" "$(xmg_state_get PROXY_VLESS_DOMAIN)")"
                 v_uuid="$(_xmg_read "UUID" "$(xmg_state_get PROXY_VLESS_UUID)")"
                 [ -z "$v_uuid" ] && v_uuid="$(xmg_proxy_gen_uuid 2>/dev/null || true)"
-                v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/xhttpx")")"
+                v_path="$(_xmg_read "path" "$(xmg_state_get PROXY_VLESS_PATH "/")")"
                 v_mode="$(_xmg_read "mode(auto/packet-up/stream-up/stream-one)" "$(xmg_state_get PROXY_VLESS_MODE "auto")")"
                 v_ext="$(_xmg_read "外部映射端口(NAT 机型填公网端口，直连留空)" "$(xmg_state_get PROXY_VLESS_EXTERNAL_PORT "")")"
                 v_src="$(_xmg_read "证书来源(user/acme)" "$(xmg_state_get PROXY_VLESS_CERT_SOURCE "user")")"

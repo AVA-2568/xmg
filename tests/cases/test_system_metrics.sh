@@ -34,14 +34,14 @@ chmod +x "$_TS_TMP/bin/df"
 PATH="$_TS_TMP/bin:$PATH"
 
 # 1.1 中文 Locale 测试
-res_zh="$(LC_ALL=zh_CN.UTF-8 xmg_read_disk_root)"
+res_zh="$({ LC_ALL=zh_CN.UTF-8 xmg_read_disk_root; } 2>/dev/null)"
 pct_zh="${res_zh%% *}"
 t_assert "中文 Locale 下返回有效结果" test -n "$res_zh"
 t_equals "中文 Locale 下解析出纯数字百分比 25%" "$pct_zh" "25%"
 t_contains "中文 Locale 下格式包含 10G/40G" "$res_zh" "10G/40G"
 
 # 1.2 德语 Locale 测试
-res_de="$(LC_ALL=de_DE.UTF-8 xmg_read_disk_root)"
+res_de="$({ LC_ALL=de_DE.UTF-8 xmg_read_disk_root; } 2>/dev/null)"
 pct_de="${res_de%% *}"
 t_equals "德语 Locale 下解析出纯数字百分比 25%" "$pct_de" "25%"
 

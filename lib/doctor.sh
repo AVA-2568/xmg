@@ -242,8 +242,12 @@ _xmg_doctor_disk_pct() {
         printf '%s' "$MOCK_DISK_PCT"
         return 0
     fi
-    # -P：BusyBox df 遇到长设备名会折行，POSIX 模式强制一条记录一行
-    df -P / 2>/dev/null | awk 'END {p=$5; gsub(/%/,"",p); print (p ~ /^[0-9]+$/ ? p : "")}'
+    local _fs="" _sz="" _used="" _avail="" _usep="" _mnt="" _pct=""
+    while read -r _fs _sz _used _avail _usep _mnt; do
+        [ "$_fs" = "Filesystem" ] && continue
+        [ -n "$_usep" ] && _pct="${_usep//%/}"
+    done < <(LC_ALL=C df -P / 2>/dev/null)
+    [[ "$_pct" =~ ^[0-9]+$ ]] && printf '%s' "$_pct"
 }
 
 _xmg_doctor_get_disk_summary() {
@@ -251,16 +255,24 @@ _xmg_doctor_get_disk_summary() {
         printf '%s' "$MOCK_DISK_STATUS"
         return 0
     fi
-    local line="" total="" used="" pct=""
-    line="$(df -Ph / 2>/dev/null | awk 'END {print}')"
-    [ -n "$line" ] || line="$(df -P / 2>/dev/null | awk 'END {print}')"
-    if [ -z "$line" ]; then
-        printf '未知'
-        return 0
+    local _fs="" _sz="" _u="" _a="" _p="" _m="" total="" used="" pct=""
+    while read -r _fs _sz _u _a _p _m; do
+        [ "$_fs" = "Filesystem" ] && continue
+        if [ -n "$_sz" ] && [ -n "$_u" ]; then
+            total="$_sz"; used="$_u"; pct="${_p//%/}"
+        fi
+    done < <(LC_ALL=C df -Ph / 2>/dev/null)
+    if [ -z "$total" ]; then
+        while read -r _fs _sz _u _a _p _m; do
+            [ "$_fs" = "Filesystem" ] && continue
+            if [ -n "$_sz" ] && [ -n "$_u" ]; then
+                total="$_sz"; used="$_u"; pct="${_p//%/}"
+            fi
+        done < <(LC_ALL=C df -P / 2>/dev/null)
     fi
-    total="$(printf '%s\n' "$line" | awk '{print $2}')"
-    used="$(printf '%s\n' "$line" | awk '{print $3}')"
-    pct="$(_xmg_doctor_disk_pct)"
+    if [ -n "${MOCK_DISK_PCT:-}" ]; then
+        pct="$MOCK_DISK_PCT"
+    fi
     if [ -n "$total" ] && [ -n "$used" ]; then
         printf '%s/%s (%s%%)' "$used" "$total" "${pct:-?}"
     else
@@ -663,9 +675,9 @@ _xmg_doctor_cert_days_left() {
     local cert_file="$1"
     local end_date="" end_ts="" now_ts=""
 
-    end_date="$(openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || true)"
+    end_date="$(LC_ALL=C openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2 || true)"
     [ -n "$end_date" ] || return 1
-    end_ts="$(date -d "$end_date" +%s 2>/dev/null || true)"
+    end_ts="$(LC_ALL=C date -d "$end_date" +%s 2>/dev/null || true)"
     case "$end_ts" in
         ''|0|*[!0-9]*) return 1 ;;
     esac
@@ -728,11 +740,17 @@ _xmg_doctor_get_warp_status() {
         w_mode="$(xmg_state_get WARP_MODE "" 2>/dev/null || true)"
     fi
     local w_env="${XMG_WARP_ENV_FILE:-${XMG_HOME:-/opt/xmg}/warp/warp.env}"
-    if [ -z "$w_on" ] && [ -f "$w_env" ]; then
-        w_on="$(sed -n 's/^WARP_ENABLED=//p' "$w_env" 2>/dev/null | tail -1 | tr -d '" ')"
-    fi
-    if [ -z "$w_mode" ] && [ -f "$w_env" ]; then
-        w_mode="$(sed -n 's/^WARP_MODE=//p' "$w_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    if { [ -z "$w_on" ] || [ -z "$w_mode" ]; } && [ -f "$w_env" ]; then
+        local _wk="" _wv=""
+        while IFS='=' read -r _wk _wv || [ -n "$_wk" ]; do
+            _wv="${_wv%$'\r'}"
+            _wv="${_wv//\"/}"
+            _wv="${_wv//[[:space:]]/}"
+            case "$_wk" in
+                WARP_ENABLED) [ -n "$w_on" ]   || w_on="$_wv" ;;
+                WARP_MODE)    [ -n "$w_mode" ] || w_mode="$_wv" ;;
+            esac
+        done < "$w_env"
     fi
     if [ "$w_on" != "1" ]; then
         printf '未启用'
@@ -836,14 +854,23 @@ _xmg_doctor_get_ssh_port() {
             return 0
         fi
     fi
-    if [ -r /etc/ssh/sshd_config ]; then
-        local cfg_port
-        cfg_port="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' /etc/ssh/sshd_config 2>/dev/null | head -n 1 | awk '{print $2}' || true)"
-        if [ -n "$cfg_port" ]; then
-            printf '%s' "$cfg_port"
-            return 0
-        fi
-    fi
+    local _ssh_f="" _ssh_line="" _ssh_k="" _ssh_v=""
+    for _ssh_f in "${XMG_SSH_DROPIN_CONF:-/etc/ssh/sshd_config.d/00-xmg-security.conf}" /etc/ssh/sshd_config.d/*.conf "${XMG_SSH_CONFIG:-/etc/ssh/sshd_config}"; do
+        [ -r "$_ssh_f" ] || continue
+        while IFS= read -r _ssh_line || [ -n "$_ssh_line" ]; do
+            _ssh_line="${_ssh_line#"${_ssh_line%%[![:space:]]*}"}"
+            case "$_ssh_line" in ''|'#'*) continue ;; esac
+            _ssh_k="${_ssh_line%%[[:space:]]*}"
+            if [ "${_ssh_k,,}" = "port" ]; then
+                _ssh_v="${_ssh_line#*[[:space:]]}"
+                _ssh_v="${_ssh_v%%[[:space:]]*}"
+                if [[ "$_ssh_v" =~ ^[0-9]+$ ]]; then
+                    printf '%s' "$_ssh_v"
+                    return 0
+                fi
+            fi
+        done < "$_ssh_f"
+    done
     printf '22'
 }
 

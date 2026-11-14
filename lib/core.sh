@@ -455,7 +455,7 @@ xmg_core_resolve_tmpdir() {
         if [ -z "$tmp_fs" ] || [ -z "$tmp_avail_kb" ]; then
             if command -v df >/dev/null 2>&1; then
                 local df_out=""
-                df_out="$(df -k /tmp 2>/dev/null | tail -n 1)"
+                df_out="$(LC_ALL=C df -k /tmp 2>/dev/null | tail -n 1)"
                 if [ -n "$df_out" ]; then
                     local -a fields=($df_out)
                     local num_fields="${#fields[@]}"
@@ -464,7 +464,7 @@ xmg_core_resolve_tmpdir() {
                     fi
                 fi
                 local df_t=""
-                df_t="$(df -T /tmp 2>/dev/null | tail -n 1)"
+                df_t="$(LC_ALL=C df -T /tmp 2>/dev/null | tail -n 1)"
                 if [[ "$df_t" =~ [[:space:]]tmpfs[[:space:]] ]]; then
                     [ -n "$tmp_fs" ] || tmp_fs="tmpfs"
                 fi

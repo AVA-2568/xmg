@@ -141,7 +141,7 @@ xmg_maint_update() {
         # 预设 grub debconf，避免云 VPS 镜像无终端下 grub-pc postinst 报错卡死
         if command -v debconf-set-selections >/dev/null 2>&1; then
             local root_dev="" root_disk=""
-            root_dev="$(df / 2>/dev/null | awk 'NR==2 {print $1}')"
+            root_dev="$(LC_ALL=C df -P / 2>/dev/null | awk 'NR==2 {print $1}')"
             if [ -n "$root_dev" ]; then
                 case "$root_dev" in
                     /dev/nvme*|/dev/mmcblk*) root_disk="${root_dev%p[0-9]*}" ;;
@@ -237,10 +237,26 @@ EOF
 
 # 根分区占用行：BusyBox df 遇到长设备名会折行，-P 强制一条记录一行后取末行
 _xmg_maint_disk_line() {
-    local line=""
-    line="$(df -Ph / 2>/dev/null | awk 'END {print}')"
-    [ -n "$line" ] || line="$(df -P / 2>/dev/null | awk 'END {print}')"
-    printf '%s\n' "$line" | awk '{if (NF >= 5) printf "%s/%s (%s)", $3, $2, $5; else printf "未知"}'
+    local _fs="" _r_sz="" _r_u="" _r_a="" _r_p="" _r_m="" _sz="" _used="" _usep=""
+    while read -r _fs _r_sz _r_u _r_a _r_p _r_m; do
+        [ "$_fs" = "Filesystem" ] && continue
+        if [ -n "$_r_sz" ] && [ -n "$_r_u" ] && [ -n "$_r_p" ]; then
+            _sz="$_r_sz"; _used="$_r_u"; _usep="$_r_p"
+        fi
+    done < <(LC_ALL=C df -Ph / 2>/dev/null)
+    if [ -z "$_sz" ]; then
+        while read -r _fs _r_sz _r_u _r_a _r_p _r_m; do
+            [ "$_fs" = "Filesystem" ] && continue
+            if [ -n "$_r_sz" ] && [ -n "$_r_u" ] && [ -n "$_r_p" ]; then
+                _sz="$_r_sz"; _used="$_r_u"; _usep="$_r_p"
+            fi
+        done < <(LC_ALL=C df -P / 2>/dev/null)
+    fi
+    if [ -n "$_used" ] && [ -n "$_sz" ] && [ -n "$_usep" ]; then
+        printf '%s/%s (%s)' "$_used" "$_sz" "$_usep"
+    else
+        printf '未知'
+    fi
 }
 
 xmg_maint_clean() {

@@ -35,6 +35,7 @@ if [ -z "${BASH_VERSION:-}" ]; then
     exit 1
 fi
 
+unset BASH_ENV ENV 2>/dev/null || true
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -471,32 +472,52 @@ auto_refresh_on_upgrade() {
     local warp_env="$XMG_HOME/warp/warp.env"
     [ "${XMG_TEST_MODE:-0}" = "1" ] && return 0
     [ -x "$XMG_BIN" ] || return 0
-    [ -f "$state_f" ] || return 0
+    [ -f "$state_f" ] || [ -f "$warp_env" ] || return 0
 
-    local w_on="" w_mode="" w_geo=""
-    w_on="$(sed -n 's/^WARP_ENABLED=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
-    w_mode="$(sed -n 's/^WARP_MODE=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
-    w_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$state_f" 2>/dev/null | tail -1 | tr -d '" ')"
-    [ -n "$w_on" ] || [ ! -f "$warp_env" ] || w_on="$(sed -n 's/^WARP_ENABLED=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
-    [ -n "$w_mode" ] || [ ! -f "$warp_env" ] || w_mode="$(sed -n 's/^WARP_MODE=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
-    [ -n "$w_geo" ] || [ ! -f "$warp_env" ] || w_geo="$(sed -n 's/^WARP_GEO_MODE=//p' "$warp_env" 2>/dev/null | tail -1 | tr -d '" ')"
+    local w_on="" w_mode="" w_geo="" _k="" _v=""
+    if [ -f "$state_f" ]; then
+        while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+            _v="${_v%$'\r'}"
+            _v="${_v//\"/}"
+            _v="${_v//[[:space:]]/}"
+            case "$_k" in
+                WARP_ENABLED)  w_on="$_v" ;;
+                WARP_MODE)     w_mode="$_v" ;;
+                WARP_GEO_MODE) w_geo="$_v" ;;
+            esac
+        done < "$state_f"
+    fi
+    if [ -f "$warp_env" ]; then
+        while IFS='=' read -r _k _v || [ -n "$_k" ]; do
+            _v="${_v%$'\r'}"
+            _v="${_v//\"/}"
+            _v="${_v//[[:space:]]/}"
+            case "$_k" in
+                WARP_ENABLED)  [ -n "$w_on" ]   || w_on="$_v" ;;
+                WARP_MODE)     [ -n "$w_mode" ] || w_mode="$_v" ;;
+                WARP_GEO_MODE) [ -n "$w_geo" ]  || w_geo="$_v" ;;
+            esac
+        done < "$warp_env"
+    fi
     case "$w_mode" in
         global|routing) ;;
         *) w_mode="global" ;;
     esac
 
     echo
-    green "检测到已有配置，正在按新版本全量重渲染配置并重启 Xray 核心..."
-    XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply || true
+    green "检测到已有配置，正在按新版本同步状态、全量重渲染并单次重启 Xray 核心..."
+    # 管线顺序：1. 同步 WARP 状态(不重启) -> 2. 全量重渲染 Proxy+WARP 配置(不重启) -> 3. 单次硬重启核心
     if [ "$w_on" = "1" ]; then
         if [ "$w_mode" = "routing" ] && [ -n "$w_geo" ]; then
-            "$XMG_BIN" warp enable routing --geo "$w_geo" || yellow "WARP 刷新失败，请手动执行: xmg warp enable routing"
+            XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" warp enable routing --geo "$w_geo" || yellow "WARP 状态同步失败，请手动执行: xmg warp enable routing"
         else
-            "$XMG_BIN" warp enable "$w_mode" || yellow "WARP 刷新失败，请手动执行: xmg warp enable $w_mode"
+            XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" warp enable "$w_mode" || yellow "WARP 状态同步失败，请手动执行: xmg warp enable $w_mode"
         fi
-    else
-        "$XMG_BIN" xray restart || yellow "Xray 自动重启失败，请手动执行: xmg xray restart"
     fi
+    if [ -f "$state_f" ]; then
+        XMG_PROXY_NO_RELOAD=1 "$XMG_BIN" proxy apply || yellow "Proxy 配置重渲染失败，请手动执行: xmg proxy apply"
+    fi
+    "$XMG_BIN" xray restart || yellow "Xray 自动重启失败，请手动执行: xmg xray restart"
 }
 
 print_summary() {
