@@ -870,8 +870,10 @@ xmg_tune_dns_apply_resolved() {
 
     if xmg_tune_is_ipv6_only; then
         fallback="2606:4700:4700::1111 2001:4860:4860::8888"
-    else
+    elif xmg_tune_has_ipv6; then
         fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+    else
+        fallback="1.1.1.1 8.8.8.8"
     fi
 
     mkdir -p "$(dirname "$XMG_TUNE_RESOLVED_CONF")"
@@ -1187,8 +1189,10 @@ xmg_tune_dns_enable_resolved() {
         local fallback=""
         if xmg_tune_is_ipv6_only; then
             fallback="2606:4700:4700::1111 2001:4860:4860::8888"
-        else
+        elif xmg_tune_has_ipv6; then
             fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+        else
+            fallback="1.1.1.1 8.8.8.8"
         fi
         cat > "$XMG_TUNE_RESOLVED_CONF" <<EOF
 # XMG: DNS 预载配置（由 xmg tune 生成）
@@ -1238,8 +1242,10 @@ xmg_tune_dns_dot_apply() {
 
     if xmg_tune_is_ipv6_only; then
         fallback="2606:4700:4700::1111 2001:4860:4860::8888"
-    else
+    elif xmg_tune_has_ipv6; then
         fallback="1.1.1.1 2606:4700:4700::1111 8.8.8.8 2001:4860:4860::8888"
+    else
+        fallback="1.1.1.1 8.8.8.8"
     fi
 
     local snapshot_dropin=""

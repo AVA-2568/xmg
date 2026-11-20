@@ -498,7 +498,6 @@ xmg_warp_optimize_endpoint() {
         )
     else
         candidates=(
-            "engage.cloudflareclient.com:2408"
             "162.159.192.1:2408"
             "162.159.193.1:2408"
             "162.159.195.1:2408"
@@ -568,7 +567,7 @@ xmg_warp_optimize_endpoint() {
         if [ "$is_v6" -eq 1 ]; then
             best_ep="$XMG_WARP_ENDPOINT_V6"
         else
-            best_ep="engage.cloudflareclient.com:2408"
+            best_ep="$XMG_WARP_ENDPOINT_V4"
         fi
         xmg_warn "端点探测未能获得更低延迟，使用默认端点: $best_ep"
     else
@@ -1368,11 +1367,29 @@ _xmg_warp_get_account_vars() {
     local endpoint=""
     if xmg_warp_is_ipv6_only; then
         endpoint="$(_xmg_warp_norm_endpoint_v6 "${ep_v6:-$XMG_WARP_ENDPOINT_V6}")"
+        # 防止导入的 account.json 中 endpoint_v6 含双栈域名（如 engage.cloudflareclient.com:2408）或 IPv4 被误包成非法地址
+        if [[ "$endpoint" =~ ^\[([^]]+)\]:([0-9]+)$ ]]; then
+            local _v6_host="${BASH_REMATCH[1]}" _v6_port="${BASH_REMATCH[2]}"
+            if ! _xmg_is_valid_ipv6 "$_v6_host"; then
+                [[ "$_v6_port" =~ ^[0-9]+$ ]] && [ "$_v6_port" -gt 0 ] || _v6_port="2408"
+                endpoint="${XMG_WARP_ENDPOINT_V6%:*}:${_v6_port}"
+            fi
+        else
+            endpoint="$XMG_WARP_ENDPOINT_V6"
+        fi
     else
         endpoint="${ep_v4:-$XMG_WARP_ENDPOINT_V4}"
         if [[ "$endpoint" =~ :0$ ]]; then
             endpoint="${endpoint%:0}:2408"
         fi
+        # 纯 IPv4 / 双栈避免域名在 dns.queryStrategy=UseIP 下解析为 AAAA 导致 network is unreachable
+        case "$endpoint" in
+            engage.cloudflareclient.com:*)
+                local _ep_port="${endpoint##*:}"
+                [[ "$_ep_port" =~ ^[0-9]+$ ]] && [ "$_ep_port" -gt 0 ] || _ep_port="2408"
+                endpoint="${XMG_WARP_ENDPOINT_V4%:*}:${_ep_port}"
+                ;;
+        esac
     fi
 
     WARP_ACC_PRIVKEY="$privkey"

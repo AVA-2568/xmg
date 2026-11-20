@@ -1167,6 +1167,9 @@ xmg_proxy_acme_issue() {
         xmg_proxy_acme_install || true
 
         if [ -x "$XMG_ACME_DIR/acme.sh" ]; then
+            if { [ -z "${XMG_NET_IPV4:-}" ] || [ -z "${XMG_NET_IPV6:-}" ]; } && declare -F xmg_detect_network >/dev/null 2>&1; then
+                xmg_detect_network >/dev/null 2>&1 || true
+            fi
             local acme_cmd=("$XMG_ACME_DIR/acme.sh" --issue --server letsencrypt --standalone -d "$domain" --keylength ec-256)
             if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
                 acme_cmd+=(--listen-v6)

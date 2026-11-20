@@ -683,6 +683,14 @@ xmg_xray_restart_hard() {
     xmg_svc_restart_verified "$svc" "$timeout"
     local rc=$?
 
+    # 生产环境首次启动未稳住（如旧连接端口释放稍慢）时，自动自愈重试 1 次，避免升级后需手动重启
+    if [ "$rc" -eq 1 ] && [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+        xmg_warn "$svc 首次重启未稳定进入 active，等待端口释放后自动重试 1 次..."
+        sleep 1
+        xmg_svc_restart_verified "$svc" "$timeout"
+        rc=$?
+    fi
+
     if [ "$rc" -eq 1 ]; then
         xmg_error "$svc 启动后未进入 active，最近日志:"
         xmg_svc_logs "$svc" 15 2>/dev/null | sed 's/^/  /' >&2 || true

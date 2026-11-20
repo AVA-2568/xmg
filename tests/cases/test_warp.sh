@@ -558,3 +558,47 @@ _EXT_RC=0
 XMG_WARP_NO_JQ=1 xmg_warp_enable global >/dev/null 2>&1 || _EXT_RC=$?
 t_equals "外部配置无 jq 时启用被拒绝" "$_EXT_RC" "1"
 t_equals "外部配置无 jq 时原文件不被改写" "$(cat "$_EXT_CFG")" "$_EXT_BEFORE"
+
+# 回归：纯 IPv4 主机历史 account.json 若残留双栈域名 engage.cloudflareclient.com:2408，
+# 必须自动收敛为纯 IPv4 字面量，避免 Xray 在 dns.queryStrategy=UseIP 下解析出 AAAA 触发 network is unreachable
+_ep_fix_dir="$(mktemp -d)"
+cat > "$_ep_fix_dir/account.json" <<'EOF_EPFIX'
+{
+  "private_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+  "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "ipv4": "172.16.0.2",
+  "ipv6": "2606:4700:110:8972:7cb3:bc95:c470:cfa4",
+  "endpoint_v4": "engage.cloudflareclient.com:2408",
+  "endpoint_v6": "[2606:4700:d0::a29f:c001]:2408",
+  "reserved": [0, 0, 0]
+}
+EOF_EPFIX
+_ep_fixed="$(
+    XMG_WARP_ACCOUNT_FILE="$_ep_fix_dir/account.json"
+    unset XMG_MOCK_WARP_STACK
+    XMG_NET_STACK="ipv4_only"
+    _xmg_warp_get_account_vars && printf '%s' "$WARP_ACC_ENDPOINT"
+)"
+rm -rf "$_ep_fix_dir"
+t_equals "纯IPv4环境下双栈域名Endpoint自动收敛为IPv4字面量" "$_ep_fixed" "162.159.192.1:2408"
+
+_ep_v6_dir="$(mktemp -d)"
+cat > "$_ep_v6_dir/account.json" <<'EOF_EPV6FIX'
+{
+  "private_key": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
+  "peer_public_key": "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=",
+  "ipv4": "172.16.0.2",
+  "ipv6": "2606:4700:110:8972:7cb3:bc95:c470:cfa4",
+  "endpoint_v4": "162.159.192.1:2408",
+  "endpoint_v6": "engage.cloudflareclient.com:2408",
+  "reserved": [0, 0, 0]
+}
+EOF_EPV6FIX
+_ep_v6_fixed="$(
+    XMG_WARP_ACCOUNT_FILE="$_ep_v6_dir/account.json"
+    unset XMG_MOCK_WARP_STACK
+    XMG_NET_STACK="ipv6_only"
+    _xmg_warp_get_account_vars && printf '%s' "$WARP_ACC_ENDPOINT"
+)"
+rm -rf "$_ep_v6_dir"
+t_equals "纯IPv6环境下域名endpoint_v6自动收敛为IPv6字面量" "$_ep_v6_fixed" "[2606:4700:d0::a29f:c001]:2408"

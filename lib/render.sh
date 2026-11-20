@@ -744,11 +744,15 @@ _xmg_render_config_bash() {
     # WARP 参数清洗与兜底
     [ -n "$warp_mode" ] || warp_mode="global"
     if [ "$is_ipv6_only" = "true" ]; then
-        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]] || [[ "$warp_endpoint" == engage.cloudflareclient.com:* ]]; then
             warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
         fi
     else
-        [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" == engage.cloudflareclient.com:* ]]; then
+            local _we_port="${warp_endpoint##*:}"
+            [[ "$_we_port" =~ ^[0-9]+$ ]] && [ "$_we_port" -gt 0 ] || _we_port="2408"
+            warp_endpoint="162.159.192.1:${_we_port}"
+        fi
     fi
     if [[ "$warp_endpoint" =~ :0$ ]]; then
         warp_endpoint="${warp_endpoint%:0}:2408"
@@ -799,12 +803,22 @@ _xmg_render_config_bash() {
     # 纯 IPv6 宿主默认锁 UseIPv6，避免解析出根本没有出口的 A 记录。
     # 但 WARP 隧道补上 IPv4 出口后必须放开为 UseIP：
     # UseIPv6 只查 AAAA，IPv4-only 的域名永远解析不出 A，隧道再能承载也没用。
+    local _is_ipv4_only="false"
+    if [ "$is_ipv6_only" != "true" ] && [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+        _is_ipv4_only="true"
+    fi
     if [ "$is_ipv6_only" = "true" ] && { [ "$warp_on" != "1" ] || [ -z "$warp_v4" ]; }; then
         dns_query_strat="UseIPv6"
         out_strat="UseIPv6"
     elif [ "$is_ipv6_only" = "true" ] && [ "$warp_mode" = "routing" ]; then
         dns_query_strat="UseIP"
         out_strat="UseIPv6"
+    elif [ "$_is_ipv4_only" = "true" ] && { [ "$warp_on" != "1" ] || [ -z "$warp_v6" ]; }; then
+        dns_query_strat="UseIPv4"
+        out_strat="UseIPv4"
+    elif [ "$_is_ipv4_only" = "true" ]; then
+        dns_query_strat="UseIP"
+        out_strat="UseIPv4"
     else
         dns_query_strat="UseIP"
         out_strat="UseIP"
@@ -1201,11 +1215,15 @@ xmg_render_config() {
     [ -n "$warp_mode" ] || warp_mode="global"
 
     if [ "$is_ipv6_only" = "true" ]; then
-        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]]; then
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$ ]] || [[ "$warp_endpoint" == engage.cloudflareclient.com:* ]]; then
             warp_endpoint="[2606:4700:d0::a29f:c001]:2408"
         fi
     else
-        [ -n "$warp_endpoint" ] || warp_endpoint="162.159.192.1:2408"
+        if [ -z "$warp_endpoint" ] || [[ "$warp_endpoint" == engage.cloudflareclient.com:* ]]; then
+            local _we_port="${warp_endpoint##*:}"
+            [[ "$_we_port" =~ ^[0-9]+$ ]] && [ "$_we_port" -gt 0 ] || _we_port="2408"
+            warp_endpoint="162.159.192.1:${_we_port}"
+        fi
     fi
     if [[ "$warp_endpoint" =~ :0$ ]]; then
         warp_endpoint="${warp_endpoint%:0}:2408"
@@ -1489,13 +1507,22 @@ xmg_render_config() {
 .inbounds = $active_inbounds'
 
         # 协议族兜底：jq 路径与纯 Bash 路径共用同一套判定函数
-        local _stack_strategy="UseIP" _out_strategy="UseIP"
+        local _stack_strategy="UseIP" _out_strategy="UseIP" _is_ipv4_only="false"
+        if [ "$is_ipv6_only" != "true" ] && [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+            _is_ipv4_only="true"
+        fi
         if [ "$is_ipv6_only" = "true" ] && { [ "$warp_bool" != "true" ] || [ -z "$warp_v4" ]; }; then
             _stack_strategy="UseIPv6"
             _out_strategy="UseIPv6"
         elif [ "$is_ipv6_only" = "true" ] && [ "$warp_mode" = "routing" ]; then
             _stack_strategy="UseIP"
             _out_strategy="UseIPv6"
+        elif [ "$_is_ipv4_only" = "true" ] && { [ "$warp_bool" != "true" ] || [ -z "$warp_v6" ]; }; then
+            _stack_strategy="UseIPv4"
+            _out_strategy="UseIPv4"
+        elif [ "$_is_ipv4_only" = "true" ]; then
+            _stack_strategy="UseIP"
+            _out_strategy="UseIPv4"
         fi
         local _warp_tun="" _warp_strategy="AsIs" _warp_ip_cond="[]" _warp_only="[]"
         _warp_tun="$(_xmg_warp_tunnel_family "$warp_v4" "$warp_v6")"

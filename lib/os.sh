@@ -590,7 +590,15 @@ xmg_svc_restart_verified() {
     xmg_svc_start "$svc" >/dev/null 2>&1 || true
 
     for ((i = 0; i < timeout; i++)); do
-        xmg_svc_is_active "$svc" && return 0
+        if xmg_svc_is_active "$svc"; then
+            # 稳定期二次复检：防止 systemd Type=simple 秒活秒死（bind 失败/配置异常退出）被误判为成功
+            if [ "${XMG_TEST_MODE:-0}" != "1" ]; then
+                sleep 1
+                xmg_svc_is_active "$svc" && return 0
+            else
+                return 0
+            fi
+        fi
         sleep 1
     done
 

@@ -237,3 +237,40 @@ if [ -z "$_MX_HAS_TEST_MODE" ]; then
 else
     export XMG_TEST_MODE="$_MX_SAVED_TEST_MODE"
 fi
+
+# 回归：纯 IPv4 宿主机无 WARP 时锁定 UseIPv4，有 WARP routing 时 direct 出站锁定 UseIPv4 且域名 Endpoint 自动收敛为 IPv4
+_v4_sym_dir="$(mktemp -d)"
+_v4_off_json="$(
+    export XMG_TEST_MODE=1 XMG_HOME="$_v4_sym_dir" XMG_ETC_DIR="$_v4_sym_dir/etc"
+    export XMG_STATE_FILE="$_v4_sym_dir/etc/xray/state.env" XMG_XRAY_CONFIG="$_v4_sym_dir/xray/config.json"
+    export MOCK_NET_IPV4=1 MOCK_NET_IPV6=0 XMG_NET_IPV4=1 XMG_NET_IPV6=0 XMG_NET_STACK=ipv4_only
+    mkdir -p "$_v4_sym_dir/etc/xray" "$_v4_sym_dir/xray" "$_v4_sym_dir/certs"
+    touch "$_v4_sym_dir/certs/c.crt" "$_v4_sym_dir/certs/c.key"
+    xmg_state_init
+    xmg_state_set PROXY_VLESS_ENABLED 1
+    xmg_state_set PROXY_VLESS_PORT 443
+    xmg_state_set PROXY_VLESS_DOMAIN "example.com"
+    xmg_state_set PROXY_VLESS_UUID "11111111-1111-4111-8111-111111111111"
+    xmg_state_set PROXY_VLESS_CERT_FILE "$_v4_sym_dir/certs/c.crt"
+    xmg_state_set PROXY_VLESS_KEY_FILE "$_v4_sym_dir/certs/c.key"
+    xmg_render_config 0 1
+)"
+t_equals "纯IPv4无WARP时 dns.queryStrategy 为 UseIPv4" "$(printf '%s' "$_v4_off_json" | jq -r '.dns.queryStrategy')" "UseIPv4"
+t_equals "纯IPv4无WARP时 direct.sockopt.domainStrategy 为 UseIPv4" "$(printf '%s' "$_v4_off_json" | jq -r '.outbounds[] | select(.tag=="direct") | .streamSettings.sockopt.domainStrategy')" "UseIPv4"
+
+_v4_rt_json="$(
+    export XMG_TEST_MODE=1 XMG_HOME="$_v4_sym_dir" XMG_ETC_DIR="$_v4_sym_dir/etc"
+    export XMG_STATE_FILE="$_v4_sym_dir/etc/xray/state.env" XMG_XRAY_CONFIG="$_v4_sym_dir/xray/config.json"
+    export MOCK_NET_IPV4=1 MOCK_NET_IPV6=0 XMG_NET_IPV4=1 XMG_NET_IPV6=0 XMG_NET_STACK=ipv4_only
+    xmg_state_init
+    xmg_state_set WARP_ENABLED 1
+    xmg_state_set WARP_MODE routing
+    xmg_state_set WARP_ENDPOINT "engage.cloudflareclient.com:2408"
+    xmg_state_set WARP_PRIVATE_KEY "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB="
+    xmg_state_set WARP_IPV4 "172.16.0.2"
+    xmg_state_set WARP_IPV6 "2606:4700:110:8972:7cb3:bc95:c470:cfa4"
+    xmg_render_config 0 1
+)"
+t_equals "纯IPv4+WARP routing 时 direct 出站锁定 UseIPv4" "$(printf '%s' "$_v4_rt_json" | jq -r '.outbounds[] | select(.tag=="direct") | .streamSettings.sockopt.domainStrategy')" "UseIPv4"
+t_equals "纯IPv4渲染阶段域名 WARP_ENDPOINT 自动收敛为 IPv4 字面量" "$(printf '%s' "$_v4_rt_json" | jq -r '.outbounds[] | select(.tag=="warp-out") | .settings.peers[0].endpoint')" "162.159.192.1:2408"
+rm -rf "$_v4_sym_dir"
