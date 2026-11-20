@@ -90,3 +90,33 @@ _echo_e_hits="$(grep -rnE '\becho[[:space:]]+-e\b' "$_PROJ_ROOT/xmg" "$_PROJ_ROO
 t_equals "生产代码 echo -e 清零" "$_echo_e_hits" ""
 _rel_src_hits="$(grep -rnE '\bsource[[:space:]]+lib/' "$_PROJ_ROOT/tests/cases/" 2>/dev/null | grep -v 'test_framework_selfcheck.sh' | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
 t_equals "测试脚本相对路径 source lib/ 清零" "$_rel_src_hits" ""
+
+# 回归门禁：生产代码零无用 cat 管道、零 echo/printf 字符串管道、网络请求 100% 带超时
+_cat_pipe_hits="$(grep -rnE '\bcat[[:space:]]+[^|]+\|[[:space:]]*(grep|awk|sed|head|tail|wc|tr|cut|jq)\b' "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT/lib/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -v 'systemctl cat' || true)"
+t_equals "生产代码无用 cat 管道清零" "$_cat_pipe_hits" ""
+
+_str_pipe_hits="$(grep -rnE '(^|[;&|[:space:]])(echo|printf)[[:space:]]+[^|]*\|[[:space:]]*(grep|awk|sed|tr|cut|wc)\b' "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT/lib/" 2>/dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -vE '(echo|printf)[[:space:]]+[^|]*\$\([^)]*\|' || true)"
+t_equals "生产代码 echo/printf 字符串管道清零" "$_str_pipe_hits" ""
+
+_no_to_hits=""
+for _pf in "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT"/lib/*.sh; do
+    mapfile -t _plines < "$_pf"
+    _plen="${#_plines[@]}"
+    for (( _pi=0; _pi<_plen; _pi++ )); do
+        _pl="${_plines[$_pi]}"
+        [[ "$_pl" =~ ^[[:space:]]*# ]] && continue
+        if [[ "$_pl" =~ (^|[[:space:]\;\&\|\(])(curl|wget)[[:space:]]+ ]]; then
+            [[ "$_pl" == *"command -v"* || "$_pl" == *"--version"* || "$_pl" == *"for "* || "$_pl" == *"xmg_error"* || "$_pl" == *"xmg_warn"* || "$_pl" == *"die "* ]] && continue
+            _pblk="$_pl"
+            [ $((_pi + 1)) -lt "$_plen" ] && _pblk+=$'\n'"${_plines[$((_pi + 1))]}"
+            [ $((_pi + 2)) -lt "$_plen" ] && _pblk+=$'\n'"${_plines[$((_pi + 2))]}"
+            if [[ "$_pblk" != *"--max-time"* && "$_pblk" != *" -m "* && "$_pblk" != *"--timeout"* && "$_pblk" != *" -T "* && "$_pblk" != *"--connect-timeout"* ]]; then
+                _no_to_hits+="${_pf}:$((_pi + 1)) "
+            fi
+        fi
+    done
+done
+t_equals "生产代码网络请求超时保护全覆盖" "$_no_to_hits" ""
+
+_raw_cr_hits="$(LC_ALL=C grep -rl $'\r' "$_PROJ_ROOT/xmg" "$_PROJ_ROOT/install.sh" "$_PROJ_ROOT/lib/" "$_PROJ_ROOT/tests/cases/" 2>/dev/null || true)"
+t_equals "生产与测试脚本零裸CR控制字符" "$_raw_cr_hits" ""

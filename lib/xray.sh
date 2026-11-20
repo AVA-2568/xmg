@@ -382,6 +382,7 @@ _xmg_xray_patch_systemd_unit_impl() {
     local sys_dir="${XMG_SYSTEMD_DIR:-/etc/systemd/system}"
 
     # 查找 Xray 的 systemd unit 文件
+    local path=""
     for path in "${sys_dir}/xray.service" "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
         if [ -f "$path" ]; then
             xray_unit="$path"
@@ -591,6 +592,7 @@ xmg_xray_uninstall() {
     # 用 use_systemd_units 而非 is_systemd：容器/chroot 里 systemd 未运行，
     # 但 unit 文件仍然存在，必须一并清掉
     if xmg_init_use_systemd_units; then
+        local path=""
         for path in "/etc/systemd/system/xray.service" "/etc/systemd/system/xray@.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
             rm -f "$path" 2>/dev/null || true
         done
@@ -730,6 +732,7 @@ xmg_xray_diag() {
 
     echo
     echo "[命令检测]"
+    local cmd=""
     for cmd in xray curl wget systemctl rc-service rc-update unzip; do
         if xmg_cmd_exists "$cmd"; then
             echo "$cmd: $(command -v "$cmd")"
@@ -775,7 +778,7 @@ xmg_xray_diag() {
     echo
     echo "[服务注册检测]"
     if xmg_init_use_systemd_units; then
-        local unit_found=0
+        local unit_found=0 path=""
         for path in "/etc/systemd/system/xray.service" "/lib/systemd/system/xray.service" "/usr/lib/systemd/system/xray.service"; do
             if [ -f "$path" ]; then
                 echo "存在: $path"

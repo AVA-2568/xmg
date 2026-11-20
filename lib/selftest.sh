@@ -129,8 +129,8 @@ _st_check_env() {
         local _rl=""
         while IFS= read -r _rl || [ -n "$_rl" ]; do
             case "$_rl" in
-                ID=*)      id="${_rl#ID=}"; id="${id//\"/}"; id="${id//\x27/}"; id="${id//$''/}" ;;
-                ID_LIKE=*) like="${_rl#ID_LIKE=}"; like="${like//\"/}"; like="${like//\x27/}"; like="${like//$''/}" ;;
+                ID=*)      id="${_rl#ID=}"; id="${id//\"/}"; id="${id//\x27/}"; id="${id//$'\r'/}" ;;
+                ID_LIKE=*) like="${_rl#ID_LIKE=}"; like="${like//\"/}"; like="${like//\x27/}"; like="${like//$'\r'/}" ;;
             esac
         done < "$rel"
     elif [ -r "${XMG_ALPINE_RELEASE_FILE:-/etc/alpine-release}" ]; then

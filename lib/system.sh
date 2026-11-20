@@ -51,6 +51,7 @@ XMG_STATUS_MEM_PERCENT="unknown"
 XMG_STATUS_MEM_DETAIL="unknown"
 XMG_STATUS_DISK_ROOT="unknown"
 XMG_STATUS_XRAY="unknown"
+XMG_STATUS_SSH_PORT="22"
 XMG_STATUS_PORT_22="unknown"
 XMG_STATUS_PORT_80="unknown"
 XMG_STATUS_PORT_443="unknown"
@@ -362,11 +363,39 @@ xmg_port_status() {
     fi
 }
 
-# 单遍扫描 /proc/net/tcp{,6} 同时更新 22/80/443 端口监听状态（零子进程 fork）
+# 零 fork 读取当前生效的 SSH 端口（默认 22，优先 sshd_config.d drop-in）
+_xmg_system_detect_ssh_port() {
+    if [[ "${XMG_SSH_PORT_OVERRIDE:-}" =~ ^[0-9]+$ ]] && [ "$XMG_SSH_PORT_OVERRIDE" -ge 1 ] && [ "$XMG_SSH_PORT_OVERRIDE" -le 65535 ]; then
+        printf '%s' "$XMG_SSH_PORT_OVERRIDE"
+        return 0
+    fi
+    local cfg_main="${XMG_SSHD_CONFIG:-/etc/ssh/sshd_config}"
+    local cfg_dir="${cfg_main}.d"
+    local f="" line="" kw="" val=""
+    for f in "$cfg_dir"/*.conf "$cfg_main"; do
+        [ -r "$f" ] || continue
+        while IFS= read -r line; do
+            line="${line%%#*}"
+            read -r kw val _ <<< "$line"
+            if [ "${kw,,}" = "port" ] && [[ "$val" =~ ^[0-9]+$ ]] && [ "$val" -ge 1 ] && [ "$val" -le 65535 ]; then
+                printf '%s' "$val"
+                return 0
+            fi
+        done < "$f"
+    done
+    printf '22'
+}
+
+# 单遍扫描 /proc/net/tcp{,6} 同时更新 SSH/80/443 端口监听状态（零子进程 fork）
 _xmg_system_refresh_ports_fast() {
+    XMG_STATUS_SSH_PORT="$(_xmg_system_detect_ssh_port)"
     XMG_STATUS_PORT_22="closed"
     XMG_STATUS_PORT_80="closed"
     XMG_STATUS_PORT_443="closed"
+
+    local ssh_hex=""
+    printf -v ssh_hex '%04X' "$XMG_STATUS_SSH_PORT"
+    local ssh_hex_low="${ssh_hex,,}"
 
     local file="" sl="" addr="" rem="" state="" rest="" lport=""
     for file in /proc/net/tcp /proc/net/tcp6; do
@@ -375,7 +404,7 @@ _xmg_system_refresh_ports_fast() {
             [ "$state" = "0A" ] || continue
             lport="${addr##*:}"
             case "$lport" in
-                0016) XMG_STATUS_PORT_22="listen" ;;
+                "$ssh_hex"|"$ssh_hex_low") XMG_STATUS_PORT_22="listen" ;;
                 0050) XMG_STATUS_PORT_80="listen" ;;
                 01BB|01bb) XMG_STATUS_PORT_443="listen" ;;
             esac
@@ -482,7 +511,7 @@ EOF
 Ports:
 EOF
 
-    xmg_system_print_status_line "22/SSH" "$XMG_STATUS_PORT_22"
+    xmg_system_print_status_line "${XMG_STATUS_SSH_PORT:-22}/SSH" "$XMG_STATUS_PORT_22"
     xmg_system_print_status_line "80/HTTP" "$XMG_STATUS_PORT_80"
     xmg_system_print_status_line "443/HTTPS" "$XMG_STATUS_PORT_443"
 }

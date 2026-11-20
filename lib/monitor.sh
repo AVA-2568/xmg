@@ -73,7 +73,7 @@ xmg_monitor_draw() {
     printf '\n'
 
     printf '%s监听端口%s\n' "$XMG_C_BOLD" "$XMG_C_RESET"
-    xmg_monitor_print_status_line "22/SSH" "$XMG_STATUS_PORT_22"
+    xmg_monitor_print_status_line "${XMG_STATUS_SSH_PORT:-22}/SSH" "$XMG_STATUS_PORT_22"
     xmg_monitor_print_status_line "80/HTTP" "$XMG_STATUS_PORT_80"
     xmg_monitor_print_status_line "443/HTTPS" "$XMG_STATUS_PORT_443"
     printf '\n'

@@ -158,13 +158,17 @@ _xmg_warp_json_val() {
         return 0
     fi
 
-    local key="${path##*.}"
+    _xmg_warp_json_str "$json" "${path##*.}"
+}
+
+# 纯 Bash 零 fork 提取 JSON 文本（含片段）中首个指定字符串键值
+_xmg_warp_json_str() {
+    local text="$1" key="$2"
     local regex="\"$key\"[[:space:]]*:[[:space:]]*\"([^\"]*)\""
-    if [[ "$json" =~ $regex ]]; then
+    if [[ "$text" =~ $regex ]]; then
         printf '%s\n' "${BASH_REMATCH[1]}"
-        return 0
     fi
-    echo "$json" | grep -o '"'"$key"'"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4 || true
+    return 0
 }
 
 # ===== 凭据与 IP 清洗工具 =====
@@ -323,7 +327,7 @@ xmg_warp_detect_native_geo() {
             ip_info="$(curl -6 -sSL --connect-timeout 4 --max-time 6 https://ipinfo.io/json 2>/dev/null || true)"
         fi
         if [ -n "$ip_info" ]; then
-            XMG_WARP_NATIVE_LOC="$(echo "$ip_info" | grep -o '"country"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+            XMG_WARP_NATIVE_LOC="$(_xmg_warp_json_str "$ip_info" "country")"
             XMG_WARP_NATIVE_COLO="DEFAULT"
         fi
     fi
@@ -526,9 +530,10 @@ xmg_warp_optimize_endpoint() {
             if [ -z "$ping_out" ] && [ "$is_v6" -eq 1 ] && command -v ping6 >/dev/null 2>&1; then
                 ping_out="$(ping6 -c 1 -W 1 "$host" 2>/dev/null || true)"
             fi
-            rtt="$(echo "$ping_out" | grep -o 'min/avg/max[^=]*=[^/]*' | cut -d= -f2 | tr -d ' ' || true)"
-            if [ -z "$rtt" ]; then
-                rtt="$(echo "$ping_out" | grep -oE '[0-9]+\.[0-9]+/[0-9]+\.[0-9]+' | cut -d/ -f2 || true)"
+            if [[ "$ping_out" =~ min/avg/max[^=]*=[[:space:]]*([0-9.]+) ]]; then
+                rtt="${BASH_REMATCH[1]}"
+            elif [[ "$ping_out" =~ [0-9]+\.[0-9]+/([0-9]+\.[0-9]+) ]]; then
+                rtt="${BASH_REMATCH[1]}"
             fi
         fi
 
@@ -714,8 +719,18 @@ _xmg_warp_gen_keys() {
     if [ -n "$xray_bin" ] && [ -x "$xray_bin" ]; then
         local k_out=""
         k_out="$("$xray_bin" x25519 2>/dev/null || "$xray_bin" wg 2>/dev/null || true)"
-        priv="$(echo "$k_out" | grep -iE 'Private[[:space:]]*Key' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
-        pub="$(echo "$k_out" | grep -iE '(Public[[:space:]]*Key|Password)' | head -1 | cut -d: -f2- | tr -d '[:space:]')"
+        local _kl="" _klow="" _kv=""
+        while IFS= read -r _kl; do
+            _kl="${_kl%$'\r'}"
+            _klow="${_kl,,}"
+            if [ -z "$priv" ] && [[ "$_klow" =~ private[[:space:]]*key ]]; then
+                _kv="${_kl#*:}"
+                priv="${_kv//[[:space:]]/}"
+            elif [ -z "$pub" ] && [[ "$_klow" =~ (public[[:space:]]*key|password) ]]; then
+                _kv="${_kl#*:}"
+                pub="${_kv//[[:space:]]/}"
+            fi
+        done <<< "$k_out"
         if [ -n "$priv" ] && [ -n "$pub" ]; then
             priv="$(_xmg_warp_std_b64 "$priv")"
             pub="$(_xmg_warp_std_b64 "$pub")"
@@ -856,6 +871,7 @@ _xmg_warp_register() {
         tmp_body="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.reg_$$_$RANDOM.json")"
         tmp_err="$(mktemp 2>/dev/null || echo "${XMG_WARP_DIR:-/opt/xmg/warp}/.reg_$$_$RANDOM.err")"
 
+        local fam_opt="" ep_url=""
         for fam_opt in "${attempts[@]}"; do
             local curl_args=()
             [ -n "$fam_opt" ] && curl_args=("$fam_opt")
@@ -884,7 +900,7 @@ _xmg_warp_register() {
         done
     fi
 
-    if [ -z "$resp" ] || ! echo "$resp" | grep -q '"id"'; then
+    if [ -z "$resp" ] || [[ "$resp" != *'"id"'* ]]; then
         local cf_err_msg=""
         if [ -s "$tmp_body" ]; then
             cf_err_msg="$(grep -oE '"message"[[:space:]]*:[[:space:]]*"[^"]+"' "$tmp_body" 2>/dev/null | head -1 | cut -d'"' -f4 || true)"
@@ -937,25 +953,25 @@ _xmg_warp_register() {
     local addr_block="${resp#*\"addresses\"}"
     addr_block="${addr_block%%\}*}"
 
-    addr_v4="$(echo "$addr_block" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-    addr_v6="$(echo "$addr_block" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    addr_v4="$(_xmg_warp_json_str "$addr_block" "v4")"
+    addr_v6="$(_xmg_warp_json_str "$addr_block" "v6")"
 
     addr_v4="$(_xmg_warp_clean_ipv4 "$addr_v4")"
     addr_v6="$(_xmg_warp_clean_ipv6 "$addr_v6")"
 
-    peer_pub="$(echo "$resp" | grep -o '"public_key"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+    peer_pub="$(_xmg_warp_json_str "$resp" "public_key")"
 
     if [[ "$resp" == *"endpoint"* ]]; then
         local ep_block="${resp#*\"endpoint\"}"
         ep_block="${ep_block%%\}*}"
-        peer_ep_v6="$(echo "$ep_block" | grep -o '"v6"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
-        peer_ep_v4="$(echo "$ep_block" | grep -o '"v4"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)"
+        peer_ep_v6="$(_xmg_warp_json_str "$ep_block" "v6")"
+        peer_ep_v4="$(_xmg_warp_json_str "$ep_block" "v4")"
     fi
 
     # 提取 client_id 并解码为 3 字节十进制 reserved
     client_id="$(_xmg_warp_json_val "$resp" ".config.client_id")"
     if [ -z "$client_id" ] || [ "$client_id" = "null" ]; then
-        client_id="$(echo "$resp" | grep -o '"client_id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+        client_id="$(_xmg_warp_json_str "$resp" "client_id")"
     fi
 
     local r_bytes="" r0="0" r1="0" r2="0"
@@ -1067,8 +1083,13 @@ xmg_warp_import() {
             [ -n "$r1" ] || r1="0"
             [ -n "$r2" ] || r2="0"
             if command -v jq >/dev/null 2>&1; then
-                local tmp_acc="${XMG_WARP_ACCOUNT_FILE}.tmp"
-                jq ".reserved = [$r0, $r1, $r2]" "$XMG_WARP_ACCOUNT_FILE" > "$tmp_acc" && mv -f "$tmp_acc" "$XMG_WARP_ACCOUNT_FILE"
+                local tmp_acc="${XMG_WARP_ACCOUNT_FILE}.tmp.$$"
+                if jq ".reserved = [$r0, $r1, $r2]" "$XMG_WARP_ACCOUNT_FILE" > "$tmp_acc" 2>/dev/null; then
+                    chmod 600 "$tmp_acc" 2>/dev/null || true
+                    mv -f "$tmp_acc" "$XMG_WARP_ACCOUNT_FILE"
+                else
+                    rm -f "$tmp_acc" 2>/dev/null || true
+                fi
             fi
         fi
     fi
@@ -1173,7 +1194,9 @@ _xmg_warp_find_xray_config() {
         fi
         if [ -n "$proc_cmd" ]; then
             local parsed_cfg=""
-            parsed_cfg="$(echo "$proc_cmd" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
+            if [[ "$proc_cmd" =~ (-c|-config)[[:space:]]+([^[:space:]]+) ]]; then
+                parsed_cfg="${BASH_REMATCH[2]}"
+            fi
             if [ -n "$parsed_cfg" ] && [ -f "$parsed_cfg" ]; then
                 echo "$parsed_cfg"
                 return 0
@@ -1187,7 +1210,9 @@ _xmg_warp_find_xray_config() {
         unit_exec="$(systemctl cat "$svc_name" 2>/dev/null | grep -E '^ExecStart=' | tail -1 || true)"
         if [ -n "$unit_exec" ]; then
             local parsed_unit_cfg=""
-            parsed_unit_cfg="$(echo "$unit_exec" | grep -oE '(-c|-config)[[:space:]]+[^[:space:]]+' | awk '{print $2}' | head -1)"
+            if [[ "$unit_exec" =~ (-c|-config)[[:space:]]+([^[:space:]]+) ]]; then
+                parsed_unit_cfg="${BASH_REMATCH[2]}"
+            fi
             if [ -n "$parsed_unit_cfg" ] && [ -f "$parsed_unit_cfg" ]; then
                 echo "$parsed_unit_cfg"
                 return 0
@@ -1195,6 +1220,7 @@ _xmg_warp_find_xray_config() {
         fi
     fi
 
+    local cand=""
     for cand in \
         "${XMG_HOME:-/opt/xmg}/xray/config.json" \
         "/opt/xmg/xray/config.json" \
@@ -1500,7 +1526,8 @@ _xmg_warp_geo_prepare() {
     # 失败负缓存：三个源依次超时要等 24 秒以上，不能让用户每次 enable 都再等一遍。
     # 24 小时内直接走硬编码，需要重试时用 xmg warp geo update。
     if [ -f "$mark" ]; then
-        ts="$(cat "$mark" 2>/dev/null | tr -d '[:space:]')"
+        IFS= read -r ts < "$mark" 2>/dev/null || ts=""
+        ts="${ts//[[:space:]]/}"
         [[ "$ts" =~ ^[0-9]+$ ]] || ts=0
         now="$(date +%s 2>/dev/null || printf 0)"
         if [ "$ts" -gt 0 ] && [ "$now" -gt 0 ] && [ $(( now - ts )) -lt 86400 ]; then
@@ -2522,7 +2549,11 @@ xmg_warp_geo_cmd() {
                 printf "文件状态        : 缺失或不可用 (分流只使用硬编码域名)\n"
             fi
             printf "geosite 标签    : %s\n" "$(_xmg_warp_geo_tags "$eff")"
-            printf "分流条目数      : %s (硬编码 + geosite)\n" "$(xmg_warp_routing_domains "$eff" | wc -l | tr -d ' ')"
+            local _dom_cnt=0 _dl=""
+            while IFS= read -r _dl; do
+                _dom_cnt=$((_dom_cnt + 1))
+            done < <(xmg_warp_routing_domains "$eff")
+            printf "分流条目数      : %s (硬编码 + geosite)\n" "$_dom_cnt"
             echo "=============================================================="
             ;;
         update)
@@ -2747,11 +2778,16 @@ xmg_warp_test_unlock() {
         px_trace="$(curl -x "$proxy_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
         if [ -n "$px_trace" ]; then
             curl_proxy_args=(-x "$proxy_url")
-            local px_ip="" px_loc="" px_colo="" px_warp=""
-            px_ip="$(printf '%s\n' "$px_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-            px_loc="$(printf '%s\n' "$px_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-            px_colo="$(printf '%s\n' "$px_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
-            px_warp="$(printf '%s\n' "$px_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+            local px_ip="" px_loc="" px_colo="" px_warp="" _tk="" _tv=""
+            while IFS='=' read -r _tk _tv; do
+                _tv="${_tv%$'\r'}"
+                case "$_tk" in
+                    ip)   [ -z "$px_ip" ]   && px_ip="$_tv" ;;
+                    loc)  [ -z "$px_loc" ]  && px_loc="$_tv" ;;
+                    colo) [ -z "$px_colo" ] && px_colo="$_tv" ;;
+                    warp) [ -z "$px_warp" ] && px_warp="$_tv" ;;
+                esac
+            done <<< "$px_trace"
             xmg_info "测试路径: 通过 Xray 本机 SOCKS5 代理 (实测 WARP 出站)"
             printf "当前代理出口 IP             : %s (%s, 机房: %s, warp=%s)\n" "${px_ip:-未知}" "${px_loc:-未知}" "${px_colo:-未知}" "${px_warp:-off}"
         else
@@ -2764,12 +2800,17 @@ xmg_warp_test_unlock() {
         if [ -n "$proxy_url" ]; then
             used_ephemeral=1
             curl_proxy_args=(-x "$proxy_url")
-            local eph_trace="" eph_ip="" eph_loc="" eph_colo="" eph_warp=""
+            local eph_trace="" eph_ip="" eph_loc="" eph_colo="" eph_warp="" _etk="" _etv=""
             eph_trace="$(curl -x "$proxy_url" -sSL --connect-timeout 4 --max-time 6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
-            eph_ip="$(printf '%s\n' "$eph_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
-            eph_loc="$(printf '%s\n' "$eph_trace" | grep -E '^loc=' | head -1 | cut -d= -f2)"
-            eph_colo="$(printf '%s\n' "$eph_trace" | grep -E '^colo=' | head -1 | cut -d= -f2)"
-            eph_warp="$(printf '%s\n' "$eph_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
+            while IFS='=' read -r _etk _etv; do
+                _etv="${_etv%$'\r'}"
+                case "$_etk" in
+                    ip)   [ -z "$eph_ip" ]   && eph_ip="$_etv" ;;
+                    loc)  [ -z "$eph_loc" ]  && eph_loc="$_etv" ;;
+                    colo) [ -z "$eph_colo" ] && eph_colo="$_etv" ;;
+                    warp) [ -z "$eph_warp" ] && eph_warp="$_etv" ;;
+                esac
+            done <<< "$eph_trace"
             xmg_info "测试路径: 通过临时本地 WARP 探测实例 (不暴露公网端口，测完自动销毁)"
             printf "当前 WARP 实测出口 IP       : %s (%s, 机房: %s, warp=%s)\n" "${eph_ip:-未知}" "${eph_loc:-未知}" "${eph_colo:-未知}" "${eph_warp:-off}"
         fi
@@ -2828,7 +2869,8 @@ xmg_warp_test_unlock() {
     g_code="$(curl "${curl_proxy_args[@]}" -sSL -A "$ua" --connect-timeout 5 --max-time 8 -o "$g_tmp" -w "%{http_code}" "https://www.google.com/search?q=test" 2>/dev/null || echo "000")"
     g_res="$(cat "$g_tmp" 2>/dev/null || true)"
     rm -f "$g_tmp" 2>/dev/null || true
-    if [ "$g_code" = "429" ] || echo "$g_res" | grep -qiE "recaptcha|unusual traffic|/sorry/"; then
+    local _g_low="${g_res,,}"
+    if [ "$g_code" = "429" ] || [[ "$_g_low" == *recaptcha* || "$_g_low" == *"unusual traffic"* || "$_g_low" == *"/sorry/"* ]]; then
         echo "检测到异常流量验证码 (HTTP $g_code, WARN)"
     elif [ "$g_code" = "200" ] || [ "$g_code" = "301" ] || [ "$g_code" = "302" ]; then
         echo "清洁通过 (HTTP $g_code，无验证码拦截)"

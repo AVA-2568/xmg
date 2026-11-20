@@ -125,7 +125,7 @@ xmg_os_detect() {
         if [ -z "$id" ] && [ -r "$alpine_rel" ]; then
             id="alpine"
             IFS= read -r ver < "$alpine_rel" 2>/dev/null || true
-            ver="${ver//$''/}"
+            ver="${ver//$'\r'/}"
         fi
     fi
 
@@ -440,20 +440,6 @@ xmg_svc_start_nodeps() {
     fi
     command -v rc-service >/dev/null 2>&1 || return 1
     rc-service --nodeps "$svc" start
-}
-
-xmg_svc_reload() {
-    local svc="$1"
-    xmg_os_detect
-    if [ "$XMG_INIT_SYSTEM" = "systemd" ]; then
-        systemctl reload "$svc" 2>/dev/null || systemctl restart "$svc"
-        return $?
-    fi
-    # OpenRC 的 reload 依赖服务自身实现，失败时退化为 restart
-    if xmg_svc_do reload "$svc" >/dev/null 2>&1; then
-        return 0
-    fi
-    xmg_svc_do restart "$svc"
 }
 
 xmg_svc_is_active() {

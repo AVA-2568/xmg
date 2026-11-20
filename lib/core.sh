@@ -521,7 +521,7 @@ xmg_core_install_official() {
         "https://mirror.ghproxy.com/$XMG_XRAY_INSTALL_URL"
     )
 
-    local dl_ok=0
+    local dl_ok=0 u=""
     for u in "${install_urls[@]}"; do
         if command -v curl >/dev/null 2>&1; then
             if curl -fsSL --connect-timeout 8 --max-time 25 "$u" -o "$script_tmp" 2>/dev/null && [ -s "$script_tmp" ]; then

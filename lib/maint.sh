@@ -365,7 +365,8 @@ xmg_maint_vnstat() {
     echo "== 本月流量统计 =="
     local v_out=""
     v_out="$(vnstat -m 2>&1 || vnstat 2>&1 || true)"
-    if echo "$v_out" | grep -qiE "(not enough|no interface|created)"; then
+    local _v_low="${v_out,,}"
+    if [[ "$_v_low" == *"not enough"* || "$_v_low" == *"no interface"* || "$_v_low" == *created* ]]; then
         echo "$v_out"
         echo
         xmg_info "vnstat 刚刚部署或采样库初始化中，系统将在后台持续采样（通常 5~10 分钟后生成首批统计）"

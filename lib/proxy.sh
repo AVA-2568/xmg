@@ -160,12 +160,12 @@ xmg_proxy_gen_uuid() {
     if [ -n "$_xbin" ] && [ -x "$_xbin" ]; then
         u="$("$_xbin" uuid 2>/dev/null || true)"
         u="${u%%$'\n'*}"
-        u="${u//$''/}"
+        u="${u//$'\r'/}"
         u="${u//[[:space:]]/}"
     fi
     if [ -z "$u" ] && [ -r /proc/sys/kernel/random/uuid ]; then
         IFS= read -r u < /proc/sys/kernel/random/uuid 2>/dev/null || true
-        u="${u//$''/}"
+        u="${u//$'\r'/}"
         u="${u//[[:space:]]/}"
     fi
     if [ -z "$u" ] && command -v openssl >/dev/null 2>&1; then
@@ -456,12 +456,20 @@ xmg_proxy_reality_keygen_raw() {
     [ -n "$bin" ] || bin="$(command -v xray 2>/dev/null || true)"
     [ -n "$bin" ] && [ -x "$bin" ] || return 1
 
-    local out="" priv="" pub=""
+    local out="" priv="" pub="" _line="" _val=""
     out="$("$bin" x25519 2>/dev/null || true)"
     [ -n "$out" ] || return 1
-    priv="$(printf '%s\n' "$out" | sed -n 's/^[Pp]rivate[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
-    pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
-    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password[^:]*:[[:space:]]*//p' | head -n 1)"
+    while IFS= read -r _line; do
+        _line="${_line%$'\r'}"
+        if [ -z "$priv" ] && [[ "$_line" =~ ^[Pp]rivate[[:space:]]*[Kk]ey:[[:space:]]*(.*)$ ]]; then
+            priv="${BASH_REMATCH[1]}"
+        elif [ -z "$pub" ] && [[ "$_line" =~ ^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*(.*)$ ]]; then
+            pub="${BASH_REMATCH[1]}"
+        elif [ -z "$pub" ] && [[ "$_line" =~ ^Password[^:]*:[[:space:]]*(.*)$ ]]; then
+            _val="${BASH_REMATCH[1]}"
+        fi
+    done <<< "$out"
+    [ -n "$pub" ] || pub="$_val"
     [ -n "$priv" ] || return 1
     pub="$(_xmg_proxy_normalize_pbk "$pub")"
     printf '%s %s\n' "$priv" "$pub"
@@ -477,16 +485,28 @@ _xmg_proxy_reality_pubkey() {
     [ -n "$bin" ] || bin="$(command -v xray 2>/dev/null || true)"
     [ -n "$bin" ] && [ -x "$bin" ] || return 1
 
-    local out="" pub="" pk_norm=""
+    local out="" pub="" pk_norm="" _line="" _pwd_pub="" _tok_pub=""
     pk_norm="$(_xmg_proxy_normalize_pbk "$pk")"
     out="$("$bin" x25519 -i "$pk_norm" 2>/dev/null || true)"
     [ -n "$out" ] || return 1
-    pub="$(printf '%s\n' "$out" | sed -n 's/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1)"
-    [ -n "$pub" ] || pub="$(printf '%s\n' "$out" | sed -n 's/^Password[^:]*:[[:space:]]*//p' | head -n 1)"
-    # 兼容不带标签的输出：排除 Hash32 行后取最后一个 43/44 位 base64 token
-    if [ -z "$pub" ]; then
-        pub="$(printf '%s\n' "$out" | grep -v '^Hash32:' | grep -oE '[A-Za-z0-9_+/-]{43}=?' | tail -n 1)"
-    fi
+    while IFS= read -r _line; do
+        _line="${_line%$'\r'}"
+        if [ -z "$pub" ] && [[ "$_line" =~ ^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*(.*)$ ]]; then
+            pub="${BASH_REMATCH[1]}"
+        elif [ -z "$_pwd_pub" ] && [[ "$_line" =~ ^Password[^:]*:[[:space:]]*(.*)$ ]]; then
+            _pwd_pub="${BASH_REMATCH[1]}"
+        fi
+        # 兼容不带标签的输出：排除 Hash32 行后提取最后一个 43/44 位 base64 token
+        if [[ "$_line" != Hash32:* ]]; then
+            local _rest="$_line"
+            while [[ "$_rest" =~ ([A-Za-z0-9_+/-]{43}=?) ]]; do
+                _tok_pub="${BASH_REMATCH[1]}"
+                _rest="${_rest#*"${BASH_REMATCH[1]}"}"
+            done
+        fi
+    done <<< "$out"
+    [ -n "$pub" ] || pub="$_pwd_pub"
+    [ -n "$pub" ] || pub="$_tok_pub"
     [ -n "$pub" ] || return 1
     pub="$(_xmg_proxy_normalize_pbk "$pub")"
     # 推导结果等于输入私钥，说明解析到了回显行；这是错的，宁可失败也不能把私钥当公钥下发
@@ -770,10 +790,17 @@ xmg_proxy_reality_link() {
     fi
     cfg_sids="$(_xmg_proxy_runtime_reality_sids "${XMG_XRAY_CONFIG:-}" 2>/dev/null || true)"
     if [ -n "$cfg_sids" ]; then
-        if printf '%s\n' "$cfg_sids" | grep -Fxq -- "$sid"; then
-            :
-        else
-            sid_new="$(printf '%s\n' "$cfg_sids" | sed -n '/^$/!{p;q;}')"
+        local _sid_found=0 _s_line=""
+        sid_new=""
+        while IFS= read -r _s_line; do
+            _s_line="${_s_line%$'\r'}"
+            [ -n "$_s_line" ] && [ -z "$sid_new" ] && sid_new="$_s_line"
+            if [ "$_s_line" = "$sid" ]; then
+                _sid_found=1
+                break
+            fi
+        done <<< "$cfg_sids"
+        if [ "$_sid_found" -eq 0 ]; then
             if [ -n "$sid" ]; then
                 xmg_warn "运行配置的 shortIds 不包含 state 的 shortId，已改用运行配置中的值"
             elif [ -n "$sid_new" ]; then
@@ -1090,7 +1117,7 @@ xmg_proxy_acme_install() {
         "https://ghfast.top/https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
         "https://mirror.ghproxy.com/https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
     )
-    local dl_ok=0
+    local dl_ok=0 u=""
     for u in "${urls[@]}"; do
         if command -v curl >/dev/null 2>&1; then
             if curl -fsSL --connect-timeout 8 --max-time 25 "$u" -o "$XMG_ACME_DIR/acme.sh" 2>/dev/null && [ -s "$XMG_ACME_DIR/acme.sh" ]; then
@@ -1288,11 +1315,31 @@ _xmg_read() {
 # ===== 检测域名是否套了 Cloudflare / 共享 CDN（防偷流量与特征暴露） =====
 # 返回 0 = 命中 CDN（不建议用作 REALITY 目标），1 = 未检测到常见共享 CDN 头
 _xmg_proxy_reality_is_cdn_headers() {
-    local hdrs="${1:-}"
+    local hdrs="${1:-}" _hl="" _hlow=""
     [ -n "$hdrs" ] || return 1
-    if printf '%s\n' "$hdrs" | grep -qiE '^(cf-ray:|cf-cache-status:|server:[[:space:]]*cloudflare|x-amz-cf-id:|server:[[:space:]]*cloudfront|server:[[:space:]]*akamaighost|x-served-by:[[:space:]]*cache-)'; then
-        return 0
-    fi
+    while IFS= read -r _hl; do
+        _hlow="${_hl,,}"
+        _hlow="${_hlow%$'\r'}"
+        case "$_hlow" in
+            cf-ray:*|cf-cache-status:*|x-amz-cf-id:*)
+                return 0
+                ;;
+            x-served-by:*)
+                local _xsb="${_hlow#x-served-by:}"
+                _xsb="${_xsb#"${_xsb%%[![:space:]]*}"}"
+                case "$_xsb" in
+                    cache-*) return 0 ;;
+                esac
+                ;;
+            server:*)
+                local _sv="${_hlow#server:}"
+                _sv="${_sv#"${_sv%%[![:space:]]*}"}"
+                case "$_sv" in
+                    cloudflare*|cloudfront*|akamaighost*) return 0 ;;
+                esac
+                ;;
+        esac
+    done <<< "$hdrs"
     return 1
 }
 
@@ -1340,11 +1387,17 @@ _xmg_proxy_reality_warn_if_cdn() {
         fam_args=(-4)
     fi
 
-    local resp="" meta="" remote_ip="" hdrs=""
-    resp="$(curl "${fam_args[@]}" -sI -o /dev/null -D - -w "\n__XMG_IP__:%{remote_ip}" --connect-timeout 2 --max-time 3 "https://${d_one}" 2>/dev/null | tr -d '\r' || true)"
-    meta="$(printf '%s\n' "$resp" | grep '^__XMG_IP__:' | tail -1 || true)"
+    local resp="" meta="" remote_ip="" hdrs="" _rl=""
+    resp="$(curl "${fam_args[@]}" -sI -o /dev/null -D - -w "\n__XMG_IP__:%{remote_ip}" --connect-timeout 2 --max-time 3 "https://${d_one}" 2>/dev/null || true)"
+    resp="${resp//$'\r'/}"
+    while IFS= read -r _rl; do
+        if [[ "$_rl" == __XMG_IP__:* ]]; then
+            meta="$_rl"
+        else
+            hdrs+="${_rl}"$'\n'
+        fi
+    done <<< "$resp"
     remote_ip="${meta#__XMG_IP__:}"
-    hdrs="$(printf '%s\n' "$resp" | sed '/^__XMG_IP__:/d')"
 
     if _xmg_proxy_reality_is_cdn_headers "$hdrs"; then
         xmg_warn "检测到 REALITY 伪装域名 $d_one 存在 Cloudflare/共享 CDN 响应头！"
@@ -1412,14 +1465,22 @@ xmg_proxy_reality_auto_target() {
         for d in "${candidates[@]}"; do
             resp="$(curl "${fam_args[@]}" --tlsv1.3 --http2 -sI -o /dev/null -D - \
                 -w "\n__XMG_META__:%{http_version}|%{time_connect}|%{remote_ip}" \
-                --connect-timeout 2 --max-time 3 "https://${d}" 2>/dev/null | tr -d '\r' || true)"
-            meta="$(printf '%s\n' "$resp" | grep '^__XMG_META__:' | tail -1 || true)"
+                --connect-timeout 2 --max-time 3 "https://${d}" 2>/dev/null || true)"
+            resp="${resp//$'\r'/}"
+            meta=""
+            hdrs=""
+            local _ml=""
+            while IFS= read -r _ml; do
+                if [[ "$_ml" == __XMG_META__:* ]]; then
+                    meta="$_ml"
+                else
+                    hdrs+="${_ml}"$'\n'
+                fi
+            done <<< "$resp"
             [ -n "$meta" ] || continue
             meta="${meta#__XMG_META__:}"
             IFS='|' read -r ver rtt rip <<< "$meta"
             [ "$ver" = "2" ] || [ "$ver" = "2.0" ] || continue
-
-            hdrs="$(printf '%s\n' "$resp" | sed '/^__XMG_META__:/d')"
             if _xmg_proxy_reality_is_cdn_headers "$hdrs"; then
                 continue
             fi

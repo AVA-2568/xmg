@@ -80,9 +80,9 @@ xmg_update_latest_version() {
     tmp="$(mktemp)" || { printf 'unknown\n'; return 0; }
 
     if xmg_cmd_exists curl; then
-        curl -fsSL "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; printf 'unknown\n'; return 0; }
+        curl -fsSL --connect-timeout 5 --max-time 15 "$url" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; printf 'unknown\n'; return 0; }
     elif xmg_cmd_exists wget; then
-        wget -qO "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; printf 'unknown\n'; return 0; }
+        wget -q -T 15 --tries=1 -O "$tmp" "$url" 2>/dev/null || { rm -f "$tmp"; printf 'unknown\n'; return 0; }
     else
         rm -f "$tmp"
         printf 'unknown\n'
@@ -118,6 +118,7 @@ xmg_update_refresh_manifest() {
     local target_root="${1:-$XMG_HOME}"
     local manifest="${target_root}/xmg.files"
     local tmp_manifest="${manifest}.tmp.$$"
+    local f=""
 
     {
         printf 'xmg\n'
@@ -134,7 +135,7 @@ xmg_update_refresh_manifest() {
             done
         fi
         printf 'xmg.files\n'
-    } > "$tmp_manifest" 2>/dev/null || return 1
+    } > "$tmp_manifest" 2>/dev/null || { rm -f "$tmp_manifest" 2>/dev/null || true; return 1; }
 
     mv "$tmp_manifest" "$manifest" 2>/dev/null || cp "$tmp_manifest" "$manifest"
     rm -f "$tmp_manifest" 2>/dev/null || true
@@ -381,15 +382,16 @@ xmg_update_pull_impl() {
                 "https://mirror.ghproxy.com/$archive_url"
             )
 
+            local u=""
             for u in "${urls[@]}"; do
                 xmg_info "尝试下载源: $u"
                 if command -v curl &>/dev/null; then
-                    if curl -fsSL --connect-timeout 8 "$u" -o "$tmp_dir/repo.tar.gz" 2>/dev/null; then
+                    if curl -fsSL --connect-timeout 8 --max-time 60 "$u" -o "$tmp_dir/repo.tar.gz" 2>/dev/null; then
                         download_ok=1
                         break
                     fi
                 elif command -v wget &>/dev/null; then
-                    if wget -q -T 8 -O "$tmp_dir/repo.tar.gz" "$u" 2>/dev/null; then
+                    if wget -q -T 15 --tries=1 -O "$tmp_dir/repo.tar.gz" "$u" 2>/dev/null; then
                         download_ok=1
                         break
                     fi

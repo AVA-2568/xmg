@@ -1144,9 +1144,6 @@ xmg_tune_resolved_unit_exists() {
 xmg_tune_dns_enable_resolved() {
     local dns1="${1:-}"
     local dns2="${2:-}"
-    local resolv_backup=""
-    resolv_backup="$(mktemp)" || resolv_backup="${XMG_RUN_DIR:-${XMG_HOME:-/opt/xmg}/run}/.resolv-backup.$$.$RANDOM"
-
     xmg_warn "systemd-resolved 未运行，将启用它并接管 /etc/resolv.conf"
     if ! xmg_confirm "确认继续? (失败会自动回滚)"; then
         return 1
@@ -1172,6 +1169,9 @@ xmg_tune_dns_enable_resolved() {
             return 1
         fi
     fi
+
+    local resolv_backup=""
+    resolv_backup="$(mktemp)" || resolv_backup="${XMG_RUN_DIR:-${XMG_HOME:-/opt/xmg}/run}/.resolv-backup.$$.$RANDOM"
 
     # 前置诊断 2：被 mask（部分"优化脚本"会禁用它）
     if [ "$(systemctl is-enabled systemd-resolved 2>/dev/null)" = "masked" ]; then
@@ -1264,6 +1264,7 @@ DNSOverTLS=opportunistic
 EOF
 
     systemctl restart systemd-resolved 2>/dev/null || {
+        [ -n "$snapshot_dropin" ] && rm -f "$snapshot_dropin" 2>/dev/null || true
         xmg_error "systemd-resolved 重启失败"
         return 1
     }
@@ -1476,7 +1477,11 @@ xmg_tune_dns_dot_openrc() {
     fi
 
     mkdir -p "$(dirname "$conf")"
-    xmg_tune_unbound_write_conf "$conf" "$dns1" "$dns2" "$name1" "$name2" || return 1
+    if ! xmg_tune_unbound_write_conf "$conf" "$dns1" "$dns2" "$name1" "$name2"; then
+        [ -n "$snapshot_conf" ] && rm -f "$snapshot_conf" 2>/dev/null || true
+        [ -n "$snapshot_resolv" ] && rm -f "$snapshot_resolv" 2>/dev/null || true
+        return 1
+    fi
 
     # 指向本机 unbound
     if [ -L /etc/resolv.conf ]; then

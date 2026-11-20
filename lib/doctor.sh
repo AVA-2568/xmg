@@ -775,8 +775,13 @@ _xmg_doctor_get_warp_status() {
         if [ -n "$p_url" ]; then
             p_trace="$(curl -x "$p_url" -sSL --connect-timeout 3 --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)"
             if [ -n "$p_trace" ]; then
-                p_warp="$(printf '%s\n' "$p_trace" | grep -E '^warp=' | head -1 | cut -d= -f2)"
-                p_ip="$(printf '%s\n' "$p_trace" | grep -E '^ip=' | head -1 | cut -d= -f2)"
+                local _tk="" _tv=""
+                while IFS='=' read -r _tk _tv; do
+                    case "$_tk" in
+                        warp) [ -z "$p_warp" ] && p_warp="${_tv%$'\r'}" ;;
+                        ip)   [ -z "$p_ip" ]   && p_ip="${_tv%$'\r'}" ;;
+                    esac
+                done <<< "$p_trace"
                 printf '已启用 (模式: %s, 握手正常: warp=%s, 出口: %s)' "$w_mode" "${p_warp:-off}" "${p_ip:-未知}"
                 return 0
             fi

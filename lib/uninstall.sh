@@ -199,6 +199,7 @@ xmg_uninstall_cleanup_systemd_artifacts() {
     local dropin_dir="${sys_dir}/xray.service.d"
 
     # 1. 仅清理 XMG 自身的 drop-in 覆盖文件
+    local f=""
     for f in "${dropin_dir}/xmg.conf" "${dropin_dir}/20-xmg.conf"; do
         if [ -f "$f" ]; then
             rm -f "$f" 2>/dev/null && xmg_info "已清理 drop-in 覆盖: $f" || true
@@ -412,6 +413,7 @@ xmg_uninstall_cli() {
     # 3. 清理 XMG 自治主目录
     if [ "$XMG_UNINSTALL_KEEP_BACKUPS" = "1" ] && [ -n "${XMG_BACKUP_DIR:-}" ] && [ -d "$XMG_BACKUP_DIR" ]; then
         xmg_info "保留备份目录: $XMG_BACKUP_DIR"
+        local dir=""
         for dir in "${XMG_BIN_DIR:-}" "${XMG_LIB_DIR:-}" "${XMG_ETC_DIR:-}" "${XMG_RUN_DIR:-}" "${XMG_LOG_DIR:-}" "${XMG_XRAY_DIR:-}"; do
             if [ -n "$dir" ] && [ -d "$dir" ]; then
                 rm -rf "$dir" 2>/dev/null || true
