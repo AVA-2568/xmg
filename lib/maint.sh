@@ -111,6 +111,30 @@ xmg_maint_update() {
         fi
     fi
 
+    # 磁盘可用空间预警：防止小盘 VPS 更新半途写满 / 或 /boot 导致 dpkg/initramfs 损坏
+    local _df_fs="" _df_tot="" _df_used="" _df_avail="" _df_rest="" _root_avail_kb=0
+    while read -r _df_fs _df_tot _df_used _df_avail _df_rest; do
+        [ "$_df_fs" = "Filesystem" ] && continue
+        [[ "$_df_avail" =~ ^[0-9]+$ ]] && _root_avail_kb="$_df_avail"
+    done < <(LC_ALL=C df -Pk / 2>/dev/null)
+    if [ "$_root_avail_kb" -gt 0 ] && [ "$_root_avail_kb" -lt 307200 ]; then
+        xmg_warn "根分区 / 可用空间仅 $((_root_avail_kb / 1024))MB (<300MB)，系统更新存在写满风险（建议先执行「深度磁盘清理」）"
+    fi
+    if [ -d /boot ]; then
+        local _root_dev_id="" _boot_dev_id="" _boot_avail_kb=0
+        _root_dev_id="$(LC_ALL=C df -Pk / 2>/dev/null)"
+        _boot_dev_id="$(LC_ALL=C df -Pk /boot 2>/dev/null)"
+        if [ -n "$_boot_dev_id" ] && [ "$_boot_dev_id" != "$_root_dev_id" ]; then
+            while read -r _df_fs _df_tot _df_used _df_avail _df_rest; do
+                [ "$_df_fs" = "Filesystem" ] && continue
+                [[ "$_df_avail" =~ ^[0-9]+$ ]] && _boot_avail_kb="$_df_avail"
+            done <<< "$_boot_dev_id"
+            if [ "$_boot_avail_kb" -gt 0 ] && [ "$_boot_avail_kb" -lt 102400 ]; then
+                xmg_warn "独立 /boot 分区可用空间仅 $((_boot_avail_kb / 1024))MB (<100MB)，内核更新可能失败"
+            fi
+        fi
+    fi
+
     if ! xmg_confirm "确认执行系统更新?"; then
         xmg_info "已取消"
         return 0
@@ -130,48 +154,79 @@ xmg_maint_update() {
         if [ "${XMG_NET_IPV4:-}" = "0" ] && [ "${XMG_NET_IPV6:-}" = "1" ]; then
             _apt_net_opts=(-o Acquire::ForceIPv6=true)
             xmg_info "纯 IPv6 环境：已启用 Acquire::ForceIPv6=true 加速 apt 源连接"
+        elif [ "${XMG_NET_IPV4:-}" = "1" ] && [ "${XMG_NET_IPV6:-}" = "0" ]; then
+            _apt_net_opts=(-o Acquire::ForceIPv4=true)
+            xmg_info "纯 IPv4 环境：已启用 Acquire::ForceIPv4=true 加速 apt 源连接"
         fi
 
         if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
-            xmg_apt_wait_lock 15 || true
+            xmg_apt_wait_lock 30 || true
         fi
         xmg_info "apt-get update..."
         apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 update || xmg_warn "apt-get update 存在错误（个别第三方源失败不影响主体）"
 
         # 预设 grub debconf，避免云 VPS 镜像无终端下 grub-pc postinst 报错卡死
-        if command -v debconf-set-selections >/dev/null 2>&1; then
-            local root_dev="" root_disk=""
-            root_dev="$(LC_ALL=C df -P / 2>/dev/null | awk 'NR==2 {print $1}')"
-            if [ -n "$root_dev" ]; then
-                case "$root_dev" in
-                    /dev/nvme*|/dev/mmcblk*) root_disk="${root_dev%p[0-9]*}" ;;
-                    /dev/*)                 root_disk="${root_dev%[0-9]*}" ;;
-                esac
-            fi
-            if [ -n "$root_disk" ] && [ -b "$root_disk" ]; then
-                echo "grub-pc grub-pc/install_devices multiselect $root_disk" | debconf-set-selections 2>/dev/null || true
-            fi
-            echo "grub-pc grub-pc/install_devices_empty boolean true" | debconf-set-selections 2>/dev/null || true
-            echo "grub-pc grub-pc/mixed_legacy_and_grub2 boolean true" | debconf-set-selections 2>/dev/null || true
+        if declare -F _xmg_apt_preset_grub_debconf >/dev/null 2>&1; then
+            _xmg_apt_preset_grub_debconf
         fi
 
         if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
-            xmg_apt_wait_lock 15 || true
+            xmg_apt_wait_lock 30 || true
         fi
         xmg_info "apt-get upgrade..."
-        apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || {
-            xmg_warn "upgrade 初次受阻，尝试自动解除死锁后重试一次..."
-            if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
-                xmg_apt_unlock_and_repair || true
+        if ! apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold"; then
+            local _dpkg_needs_repair=0 _audit_out="" _audit_rc=0 _lock_pids=""
+            if xmg_cmd_exists dpkg; then
+                _audit_out="$(dpkg --audit 2>&1)" || _audit_rc=$?
+                if [ "$_audit_rc" -ne 0 ] || [ -n "$_audit_out" ]; then
+                    _dpkg_needs_repair=1
+                fi
             fi
-            apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || { xmg_error "apt-get upgrade 失败"; return 1; }
-        }
+            if [ "$_dpkg_needs_repair" -eq 0 ] && [ -d /var/lib/dpkg/updates ]; then
+                local _upd_f=""
+                for _upd_f in /var/lib/dpkg/updates/[0-9]*; do
+                    if [ -f "$_upd_f" ]; then
+                        _dpkg_needs_repair=1
+                        break
+                    fi
+                done
+            fi
+            if declare -F xmg_apt_find_lock_pids >/dev/null 2>&1; then
+                _lock_pids="$(xmg_apt_find_lock_pids)"
+            fi
+
+            if [ -n "$_lock_pids" ]; then
+                xmg_error "apt-get upgrade 因锁占用失败（当前持锁 PID: $_lock_pids），请等待后台更新完成，或确认僵死后在「系统维护 → 7」手动解除"
+                return 1
+            elif [ "$_dpkg_needs_repair" -eq 1 ]; then
+                xmg_warn "检测到 dpkg 数据库存在中断或未完成配置的软件包，正在尝试修复并重试 upgrade..."
+                if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
+                    xmg_apt_unlock_and_repair || { xmg_error "dpkg 修复失败，无法继续升级"; return 1; }
+                fi
+                apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 upgrade -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" || { xmg_error "apt-get upgrade 失败"; return 1; }
+            else
+                xmg_error "apt-get upgrade 失败（dpkg 数据库状态正常且无锁冲突，请检查上方网络/软件源/磁盘空间报错）"
+                return 1
+            fi
+        fi
 
         xmg_info "apt-get autoremove..."
-        apt-get autoremove --purge -y >/dev/null 2>&1 || true
+        apt-get "${_apt_net_opts[@]}" -o DPkg::Lock::Timeout=60 autoremove --purge -y || xmg_warn "apt-get autoremove 存在警告（不影响主更新）"
+        apt-get -o DPkg::Lock::Timeout=60 autoclean -y >/dev/null 2>&1 || true
 
         if [ -f /var/run/reboot-required ]; then
-            xmg_warn "系统提示需要重启才能完成更新 (reboot-required)"
+            local _rb_pkgs=""
+            if [ -r /var/run/reboot-required.pkgs ]; then
+                local _pkg_line=""
+                while read -r _pkg_line; do
+                    [ -n "$_pkg_line" ] && _rb_pkgs="${_rb_pkgs:+$_rb_pkgs, }$_pkg_line"
+                done < /var/run/reboot-required.pkgs
+            fi
+            if [ -n "$_rb_pkgs" ]; then
+                xmg_warn "系统提示需要重启才能完成更新 (reboot-required，涉及: $_rb_pkgs)"
+            else
+                xmg_warn "系统提示需要重启才能完成更新 (reboot-required)"
+            fi
         fi
     elif xmg_cmd_exists dnf; then
         xmg_info "dnf upgrade..."
@@ -192,23 +247,44 @@ xmg_maint_update() {
         return 1
     fi
 
-    # 更新后检查关键服务存活状态（needrestart 重启 libc/openssl 时偶发异常）
+    # 更新后检查关键服务存活状态（needrestart 重启 libc/openssl 时偶发异常，支持自动抢救）
     if declare -F xmg_svc_supported >/dev/null 2>&1 && xmg_svc_supported; then
         local _svc_x="${XMG_XRAY_SERVICE:-xray}"
         if [ -s "${XMG_XRAY_CONFIG:-/opt/xmg/xray/config.json}" ]; then
             if xmg_svc_is_active "$_svc_x" >/dev/null 2>&1; then
                 xmg_info "服务状态确认: $_svc_x 运行正常 (active)"
             else
-                xmg_warn "更新后检测到 $_svc_x 未处于运行态，请执行 xmg xray restart 恢复"
+                xmg_warn "更新后检测到 $_svc_x 未处于运行态，尝试自动拉起..."
+                if declare -F xmg_svc_restart_verified >/dev/null 2>&1 && xmg_svc_restart_verified "$_svc_x" >/dev/null 2>&1; then
+                    xmg_info "服务已自动恢复: $_svc_x 运行正常 (active)"
+                elif xmg_svc_start "$_svc_x" >/dev/null 2>&1 && xmg_svc_is_active "$_svc_x" >/dev/null 2>&1; then
+                    xmg_info "服务已自动恢复: $_svc_x 运行正常 (active)"
+                else
+                    xmg_warn "$_svc_x 自动拉起失败，请执行 xmg xray restart 排查"
+                fi
             fi
         fi
-        local _ssh_s=""
+        local _ssh_s="" _ssh_ok=0
         for _ssh_s in ssh sshd; do
             if xmg_svc_is_active "$_ssh_s" >/dev/null 2>&1; then
                 xmg_info "服务状态确认: $_ssh_s 运行正常 (active)"
+                _ssh_ok=1
                 break
             fi
         done
+        if [ "$_ssh_ok" -eq 0 ]; then
+            xmg_warn "更新后未检测到活跃的 ssh/sshd 服务，尝试自动拉起以防失联..."
+            for _ssh_s in ssh sshd; do
+                if xmg_svc_start "$_ssh_s" >/dev/null 2>&1 && xmg_svc_is_active "$_ssh_s" >/dev/null 2>&1; then
+                    xmg_info "SSH 服务已自动恢复: $_ssh_s 运行正常 (active)"
+                    _ssh_ok=1
+                    break
+                fi
+            done
+            if [ "$_ssh_ok" -eq 0 ]; then
+                xmg_error "警告：ssh/sshd 服务当前未运行且自动拉起失败！请切勿断开当前 SSH 会话，立即手动排查 (systemctl status ssh || systemctl status sshd)"
+            fi
+        fi
     fi
 
     xmg_info "系统更新完成"
@@ -284,12 +360,16 @@ xmg_maint_clean() {
         if xmg_cmd_exists apt-get; then
             export DEBIAN_FRONTEND=noninteractive
 
+            if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
+                xmg_apt_wait_lock 30 || true
+            fi
+
             xmg_info "清理 apt 缓存..."
-            apt-get clean
-            apt-get autoclean -y >/dev/null 2>&1 || true
+            apt-get -o DPkg::Lock::Timeout=60 clean || true
+            apt-get -o DPkg::Lock::Timeout=60 autoclean -y >/dev/null 2>&1 || true
 
             xmg_info "清理孤立包 (autoremove)..."
-            apt-get autoremove --purge -y || xmg_warn "autoremove 失败"
+            apt-get -o DPkg::Lock::Timeout=60 autoremove --purge -y || xmg_warn "autoremove 失败"
 
             # 清理已卸载包的残余配置文件 (状态为 rc 的包)
             if xmg_cmd_exists dpkg; then
@@ -322,9 +402,9 @@ xmg_maint_clean() {
         xmg_info "清理 /var/log 历史轮转归档文件..."
         find /var/log -type f \( -name "*.gz" -o -name "*.[0-9]" -o -name "*.old" \) -delete 2>/dev/null || true
 
-        # 4. /tmp 和 /var/tmp 临时文件清理 (超过 7 天未访问的文件)
+        # 4. /tmp 和 /var/tmp 临时文件清理 (仅删 7 天前修改的普通文件，跳过 systemd 私有目录与活跃套接字)
         xmg_info "清理过期临时文件 (/tmp, /var/tmp)..."
-        find /tmp /var/tmp -mindepth 1 -atime +7 -delete 2>/dev/null || true
+        find /tmp /var/tmp -mindepth 1 \( -name 'systemd-private-*' -prune \) -o \( -type f -mtime +7 -delete \) 2>/dev/null || true
 
         after="$(_xmg_maint_disk_line)"
         echo
@@ -541,7 +621,12 @@ xmg_maint_menu() {
             7)
                 clear
                 if declare -F xmg_apt_unlock_and_repair >/dev/null 2>&1; then
-                    xmg_apt_unlock_and_repair
+                    xmg_warn "此操作会终止当前持有 apt/dpkg 锁的进程并修复包数据库（仅在确认后台更新已僵死时使用）"
+                    if xmg_confirm "确认强制解除 apt/dpkg 锁并修复状态?"; then
+                        xmg_apt_unlock_and_repair
+                    else
+                        xmg_info "已取消"
+                    fi
                 else
                     xmg_warn "当前函数不可用"
                 fi

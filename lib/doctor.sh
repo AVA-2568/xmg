@@ -715,7 +715,7 @@ _xmg_doctor_get_doh_latency() {
 
     if command -v curl >/dev/null 2>&1; then
         local rtt=""
-        rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 2 "$doh_url" 2>/dev/null || true)"
+        rtt="$(curl -s -o /dev/null -w "%{time_connect}\n" --connect-timeout 2 --max-time 4 "$doh_url" 2>/dev/null || true)"
         if [ -n "$rtt" ] && [ "$rtt" != "0.000" ] && [ "$rtt" != "0.000000" ]; then
             local ms
             ms="$(awk -v t="$rtt" 'BEGIN { printf "%.0f", t * 1000 }' 2>/dev/null || echo 0)"

@@ -137,7 +137,7 @@ xmg_uninstall_check_safe_home() {
 xmg_uninstall_kill_residues() {
     xmg_info "正在清理残留后台进程..."
     if command -v pkill &>/dev/null; then
-        pkill -f "wireproxy" 2>/dev/null || true
+        pkill -x "wireproxy" 2>/dev/null || true
     fi
 }
 

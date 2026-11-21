@@ -1917,7 +1917,7 @@ xmg_tune_fs_type() {
         fstype="$(stat -f -c %T "$target_dir" 2>/dev/null || true)"
     fi
     if [ -z "$fstype" ] && command -v df >/dev/null 2>&1; then
-        fstype="$(LC_ALL=C df -T "$target_dir" 2>/dev/null | awk 'NR>1 {print $2; exit}' || true)"
+        fstype="$(LC_ALL=C df -PT "$target_dir" 2>/dev/null | awk 'NR>1 {print $2; exit}' || true)"
     fi
     printf '%s' "$fstype"
 }

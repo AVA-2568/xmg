@@ -284,7 +284,7 @@ xmg_pkg_install() {
             ;;
         apt)
             if declare -F xmg_apt_wait_lock >/dev/null 2>&1; then
-                xmg_apt_wait_lock 15 || true
+                xmg_apt_wait_lock 30 || true
             fi
             export DEBIAN_FRONTEND=noninteractive
             apt-get -o DPkg::Lock::Timeout=60 \
@@ -318,8 +318,8 @@ xmg_pkg_clean() {
             apk cache clean >/dev/null 2>&1 || true
             ;;
         apt)
-            apt-get clean >/dev/null 2>&1 || true
-            apt-get autoclean -y >/dev/null 2>&1 || true
+            apt-get -o DPkg::Lock::Timeout=60 clean >/dev/null 2>&1 || true
+            apt-get -o DPkg::Lock::Timeout=60 autoclean -y >/dev/null 2>&1 || true
             ;;
         dnf) dnf clean all >/dev/null 2>&1 || true ;;
         yum) yum clean all >/dev/null 2>&1 || true ;;

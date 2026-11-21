@@ -112,7 +112,7 @@ ensure_dependencies() {
         export DEBIAN_FRONTEND=noninteractive
         export NEEDRESTART_MODE=a
         export UCF_FORCE_CONFFOLD=1
-        (apt-get update -y -q && apt-get install -y -q "${missing[@]}") >/dev/null 2>&1 || true
+        (apt-get -o DPkg::Lock::Timeout=60 update -y -q && apt-get -o DPkg::Lock::Timeout=60 -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" install -y -q "${missing[@]}") >/dev/null 2>&1 || true
     elif cmd_exists apk; then
         # Alpine：ca-certificates 由 ca-certificates-bundle 提供，jq 非必需
         (apk update -q && apk add --no-cache "${missing[@]}") >/dev/null 2>&1 || \
